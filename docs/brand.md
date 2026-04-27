@@ -4,9 +4,9 @@ Voxium’s public voice rests on **two** complementary themes. Every **operator-
 
 ---
 
-## 1) Radio: HAM, CB, PTT, and *vox*
+## 1) Radio: HAM, CB, PTT, and VOX
 
-**Why:** The product is **push-to-talk (PTT)**. That is the same **floor culture** as amateur and CB radio: a mic key, a short **transmission**, a clear readback. The name *Voxium* itself points at **vox** (voice): signal in, duty cycle short, no endless carrier unless you need it.
+**Why:** The product is **push-to-talk (PTT)**. That is the same **floor culture** as amateur and CB radio: a mic key, a short **transmission**, a clear readback. The name *Voxium* itself points at **VOX** (voice): signal in, duty cycle short, no endless carrier unless you need it. In copy, name the pair **PTT & VOX** or **PTT/VOX** (not `VOX/PTT` — PTT leads).
 
 **How to use it (examples, not a mandatory list):**
 
@@ -14,7 +14,7 @@ Voxium’s public voice rests on **two** complementary themes. Every **operator-
 - Avoid insulting or exclusive CB stereotypes; keep it **inclusive and professional**—a nod, not a caricature.
 - **Errors and diagnostics** must stay **actionable** first. A one-line “radio” flavor is optional; the fix must always be obvious.
 
-**Product nouns to reinforce:** *PTT* (the gesture), *vox* (voice as the input medium), *loopback* (local link—your rig, your wire).
+**Product nouns to reinforce:** *PTT* (the gesture), **VOX** (voice as the input medium), *loopback* (local link—your rig, your wire).
 
 ---
 

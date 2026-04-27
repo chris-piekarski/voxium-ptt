@@ -26,7 +26,8 @@ flowchart TB
     U1[Model registry & validation]
     U2[URL / loopback helpers]
     U3[Pure functions & config merge]
-    U4[make helper mk.py]
+    U4[Session history · slash · standby · disk report]
+    U5[make helper mk.py]
   end
   subgraph integ["Integration (opt-in)"]
     I1[ASGI + httpx / TestClient]

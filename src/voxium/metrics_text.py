@@ -29,6 +29,21 @@ def format_number(value, suffix: str = "", digits: int = 2) -> str:
     return f"{formatted}{suffix}"
 
 
+def format_number_plain(value, suffix: str = "", digits: int = 2) -> str:
+    """Same as :func:`format_number` but without Rich markup (downlink / plain text)."""
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        formatted = str(int(number))
+    else:
+        formatted = f"{number:.{digits}f}"
+    return f"{formatted}{suffix}"
+
+
 def format_bytes(value) -> str:
     if value is None:
         return "[dim]n/a[/dim]"

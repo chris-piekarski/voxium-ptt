@@ -20,4 +20,5 @@ class VoxiumUserConfig(BaseModel):
     transcription: dict[str, Any] = Field(default_factory=dict)
     server: dict[str, Any] = Field(default_factory=dict)
     ui: dict[str, Any] = Field(default_factory=dict)
+    # ``limit`` / ``max_total_chars`` / ``pending_audio_max_mib`` — see ``voxium run --help`` (History group).
     history: dict[str, Any] = Field(default_factory=dict)

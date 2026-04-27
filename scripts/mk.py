@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterator
 
 
 def _vpaths(venvd: Path) -> tuple[Path, Path, Path]:
@@ -25,51 +24,6 @@ def _vpaths(venvd: Path) -> tuple[Path, Path, Path]:
         b / "python",
         b / "voxium",
     )
-
-
-def _human_size(n: int) -> str:
-    n = max(0, n)
-    for u, d in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
-        if n >= d:
-            return f"{(n / d):.1f}{u[0]}"
-    return f"{n}" if n else "0"
-
-
-def _iter_files(p: Path) -> Iterator[Path]:
-    if p.is_file():
-        yield p
-        return
-    if not p.is_dir():
-        return
-    try:
-        for sub in p.rglob("*"):
-            if sub.is_file():
-                yield sub
-    except OSError:
-        pass
-
-
-def _dir_size(p: Path) -> int:
-    total = 0
-    if p.is_file():
-        try:
-            return p.stat().st_size
-        except OSError:
-            return 0
-    for f in _iter_files(p):
-        try:
-            total += f.stat().st_size
-        except OSError:
-            pass
-    return total
-
-
-def _du_line(p: Path) -> None:
-    if not p.exists():
-        print(f"  (absent) {p}")
-        return
-    h = _human_size(_dir_size(p))
-    print(f"{h}\t{p}")
 
 
 # --- subcommands
@@ -96,7 +50,7 @@ def cmd_help(mkfile: Path) -> int:
     # *current* section (GNU make convention: help text on the first recipe line only).
     print(
         "\033[1mVoxium\033[0m — \033[0;90m"
-        "ground support · make <target> (PTT/vox in app; see docs/brand.md)\033[0m"
+        "ground support · make <target> (PTT & VOX in app; see docs/brand.md)\033[0m"
     )
     text = mkfile.read_text(encoding="utf-8", errors="replace")
     current_title: str | None = None
@@ -153,7 +107,7 @@ def cmd_install(root: Path, venvd: Path, python: str) -> int:
     if err:
         print(err, file=sys.stderr)
         return 1
-    pip, _, vox = _vpaths(venvd)
+    pip, _, voxium_bin = _vpaths(venvd)
     if not pip.exists():
         if venvd.is_dir():
             print(
@@ -174,7 +128,7 @@ def cmd_install(root: Path, venvd: Path, python: str) -> int:
         [str(pip), "install", "-e", str(root)],
         check=True,
     )
-    print(f"Install complete. Run: make start  (or: {vox} run)")
+    print(f"Install complete. Run: make start  (or: {voxium_bin} run)")
     return 0
 
 
@@ -286,11 +240,13 @@ def cmd_clean(root: Path, venvd: Path, dev_stamp: Path) -> int:
 
 def cmd_disk_usage(root: Path, venvd: Path, dev_stamp: Path) -> int:
     del venvd, dev_stamp
-    print("=== Voxium local data (repository) ===")
-    for name in ("models", "history", "logs"):
-        p = root / name
-        print(f"--- {name}/ ---")
-        _du_line(p)
+    root = root.resolve()
+    src = root / "src"
+    if src.is_dir() and str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    from voxium.disk_usage_report import format_repo_disk_usage_text
+
+    print(format_repo_disk_usage_text(root), end="")
     return 0
 
 
@@ -358,7 +314,7 @@ def cmd_test(root: Path, venv_py: Path) -> int:
 
 
 def cmd_test_cov(root: Path, venv_py: Path) -> int:
-    """Run pytest with coverage: terminal per-file report (term-missing), fail-under from pyproject.toml."""
+    """Run pytest with coverage: term-missing report; gate is ``fail_under`` in ``[tool.coverage.report]``."""
     p = venv_py
     if not p.is_file():
         print(f"Missing {p}. Run: make install", file=sys.stderr)
@@ -376,7 +332,7 @@ def cmd_test_cov(root: Path, venv_py: Path) -> int:
             ".",
             "--cov-config",
             str(cfg),
-            "--cov-fail-under=95",
+            # fail_under: [tool.coverage.report] in pyproject.toml (single source of truth)
             "--cov-report=term-missing:skip-covered",
             *extra,
         ],
@@ -412,7 +368,10 @@ def main() -> int:
     pclean.add_argument("--venvd", type=Path, required=True)
     pclean.add_argument("--dev-stamp", type=Path, required=True)
 
-    pd = sp.add_parser("disk-usage", help="Show disk usage for models/, history/, logs/ under the repo")
+    pd = sp.add_parser(
+        "disk-usage",
+        help="Show disk usage for models/ and logs/ under the repo",
+    )
     pd.add_argument("--root", type=Path, required=True)
     pd.add_argument("--venvd", type=Path, required=True)
     pd.add_argument("--dev-stamp", type=Path, required=True)

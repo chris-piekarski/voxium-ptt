@@ -107,6 +107,8 @@ omit = [
     # Heavy entrypoints: require sounddevice, ctranslate2, full stack to import; tested interactively.
     "*/voxium/app.py",
     "*/voxium/whisper_server.py",
+    # Rich Live + PTT status box: mostly interactive; pure helpers are smoke-tested, not line-gated.
+    "*/voxium/console_status.py",
 ]
 
 [tool.coverage.report]

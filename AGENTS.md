@@ -12,7 +12,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 
 ## What this project is
 
-- **Voxium** is a **PTT (push-to-talk) voice-typing** application for the terminal: *vox* in, text out, over a **local loopback** to a **Whisper**-based server (or local inference). Brand-wise, the repo treats the **HAM/CB radio** heritage (PTT, *vox*, mic, copy) and the **Apollo-era** image of people flying **new combinations** of **hardware + software + mechanical** systems with **robotic** automation (inference stack, I/O) into **uncharted, local** territory—see [`docs/brand.md`](docs/brand.md).
+- **Voxium** is a **PTT (push-to-talk) voice-typing** application for the terminal: **VOX** in, text out, over a **local loopback** to a **Whisper**-based server (or local inference). Brand-wise, the repo treats the **HAM/CB radio** heritage (PTT, **VOX**, mic, copy) and the **Apollo-era** image of people flying **new combinations** of **hardware + software + mechanical** systems with **robotic** automation (inference stack, I/O) into **uncharted, local** territory—see [`docs/brand.md`](docs/brand.md).
 - The installable package lives under **`src/voxium/`** (setuptools `package-dir` = `src`).
 - The console entry point is **`voxium`**, defined in `pyproject.toml` as `voxium.cli.main:main` (the CLI entry imports `voxium.app` for the interactive client).
 
@@ -29,7 +29,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 
 | Area | Role |
 |------|------|
-| `src/voxium/` | Application code: `app.py` (client UI / hotkeys / recording), `whisper_server.py` (FastAPI + inference), `cli/`, `config`, `model_registry`, and **small pure modules** (`loopback`, `hotkey_rules`, `metrics_*`, `speech_guards`, etc.) for testable logic |
+| `src/voxium/` | Application code: `app.py` (client UI / hotkeys / recording), `whisper_server.py` (FastAPI + inference), `cli/`, `config`, `model_registry`, **session UI** (`console_status`, `recording_ui`, `standby_fft`, `standby_telemetry`), **slash** (`slash_commands`, `slash_complete`), `session_history` (in-RAM PTT/VOX transcript list; `/history`), `disk_usage_report` (`make disk-usage` / `/disk`), and **small pure modules** (`loopback`, `hotkey_rules`, `metrics_*`, `speech_guards`, etc.) for testable logic |
 | `tests/` | `pytest` suite; `pythonpath` includes `src` and `.` (see `pyproject.toml`) |
 | `scripts/` | `mk.py` — Python backend for **GNU make** (venv, install, lint, test); `scripts/windows/` — `venv_bootstrap.cmd`, `Voxium.ps1` / `Voxium.cmd` to launch `voxium` on Windows with a short tab title |
 | `Makefile` | Dev workflow: `make install`, `make install-dev`, `make lint`, `make test`, `make test-cov`, etc. |
@@ -37,6 +37,8 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 | `pyproject.toml` | Project metadata, **ruff**, **mypy** (with overrides for large modules), **pytest**, **coverage** |
 
 On **Windows**, the README may point to PowerShell / the `voxium` CLI instead of `make`.
+
+**Repository data on disk** (what `make disk-usage` and `/disk` summarize): **`models/`** and **`logs/`** under the project root (or `VOXIUM_REPO_ROOT`). **Transcript text** for `/history` and replay is **in-process RAM only** — the product does not use a `history/` directory under the repo for that data.
 
 ---
 
@@ -56,7 +58,7 @@ The top-level **README** stays a concise entry point; **depth** belongs in `docs
 
 Voxium’s public tone is defined in **[`docs/brand.md`](docs/brand.md)**. In short:
 
-1. **Radio / PTT** — HAM and CB *culture* (not jargon overload): stress **PTT** and *vox*, mic checks, “copy/standing by” where it stays readable. Never obscure errors or steps with slang.
+1. **Radio / PTT** — HAM and CB *culture* (not jargon overload): stress **PTT** and **VOX**, mic checks, “copy/standing by” where it stays readable. Never obscure errors or steps with slang.
 2. **Apollo / uncharted stacks** — Narrate the product as *humans steering* a **local** blend of **electrical + software + mechanical** *plus* **automated/robotic** work (inference, streaming) in **new, first-flight** conditions on **your** machine. Metaphor only: no false historical claims.
 
 **Enforcement for contributors and agents**
@@ -155,6 +157,6 @@ You may add a **scope** in parentheses when it helps, e.g. `fix(cli): normalize 
 - Prefer **small, pure functions** in `src/voxium/` and **tests** over growing `app.py` / `whisper_server.py` when the change is testable in isolation.
 - **Do not** add unsolicited **root-level** documentation files beyond what maintainers request. **Exception:** updates and additions under **`docs/`** are welcome when they follow the [Operator documentation](#operator-documentation) section (verbose, operator-focused, **Mermaid** where it helps) and, for operator copy, the [Brand voice](#brand-voice) / [`docs/brand.md`](docs/brand.md) rules. This file (`AGENTS.md`) remains the place for **repo-wide policy and structure** for agents and humans.
 - Match **existing** naming, imports, and ruff/mypy expectations; avoid drive-by refactors outside the task.
-- When you change **any** public-facing or operator-facing string, **re-check** [Brand voice](#brand-voice) and [`docs/brand.md`](docs/brand.md) (PTT / *vox* + Apollo-style local “stack” story).
+- When you change **any** public-facing or operator-facing string, **re-check** [Brand voice](#brand-voice) and [`docs/brand.md`](docs/brand.md) (PTT & VOX + Apollo-style local “stack” story).
 
 When in doubt, run **`make test`**, **`make lint`**, and keep the PR aligned with the **conventional** + **signed** commit policy above.

@@ -1,6 +1,7 @@
 """Tests for voxium.loopback (pure URL / host helpers)."""
 
 from voxium.loopback import (
+    get_gpu_url,
     get_health_url,
     get_server_endpoint_url,
     get_server_listen_args,
@@ -39,6 +40,10 @@ def test_get_server_endpoint_url():
 
 def test_get_health_url():
     assert get_health_url("http://a:3/base") == "http://a:3/health"
+
+
+def test_get_gpu_url():
+    assert get_gpu_url("http://a:3/base") == "http://a:3/gpu"
 
 
 def test_get_server_listen_args():

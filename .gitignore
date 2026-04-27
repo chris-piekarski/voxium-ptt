@@ -29,7 +29,6 @@ dist/
 
 # Voxium data (see voxium.paths; same layout on all platforms)
 /models/
-/history/
 /logs/
 
 # IDE

@@ -1,4 +1,4 @@
-"""Console entry: PTT / *vox* path (``[project.scripts] voxium = voxium.cli.main:main``). Brand: docs/brand.md."""
+"""Console entry: PTT & VOX path (``[project.scripts] voxium = voxium.cli.main:main``). Brand: docs/brand.md."""
 
 from __future__ import annotations
 

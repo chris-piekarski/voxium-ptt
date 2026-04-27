@@ -33,3 +33,25 @@ def test_health_returns_ok_json() -> None:
     assert body["status"] == "ok"
     assert body["model"] == "base"
     assert "device" in body
+
+
+def test_ensure_model_rejects_bad_id() -> None:
+    from voxium import whisper_server as ws
+
+    ws.config = ws.ServerConfig(
+        model="base",
+        device="cpu",
+        compute="int8",
+        timeout=120,
+        vad_enabled=True,
+        host="127.0.0.1",
+        port=8002,
+        gpu_metrics_enabled=False,
+        metrics_sample_interval=0.25,
+    )
+    ws.stats = ws.ServerStats()
+    ws.logger = ws.setup_logging("CRITICAL")
+    ws.gpu_probe = ws.GpuProbe(False)
+    with TestClient(ws.app) as client:
+        r = client.post("/ensure-model", json={"model": "not-a-valid-model-name"})
+    assert r.status_code == 400
