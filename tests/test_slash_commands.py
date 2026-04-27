@@ -1,4 +1,5 @@
 from io import StringIO
+from unittest.mock import patch
 
 import pytest
 from rich.console import Console
@@ -115,7 +116,9 @@ def test_run_slash_history_list_and_expand_and_copy() -> None:
     assert "📋" in out0.text and "charlie" in out0.text
     out1 = run_slash_line("/history 2", transcript_history=mem)
     assert "alpha" in out1.text
-    out2 = run_slash_line("/history copy 1", transcript_history=mem)
+    # Headless CI has no OS clipboard; mock so the success path is asserted.
+    with patch("voxium.slash_commands.pyperclip.copy"):
+        out2 = run_slash_line("/history copy 1", transcript_history=mem)
     assert "Copied" in out2.text and "clipboard" in out2.text.lower()
 
 
