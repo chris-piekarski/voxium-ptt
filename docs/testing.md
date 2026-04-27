@@ -1,6 +1,6 @@
 # Testing and coverage
 
-Voxium aims for **high confidence in refactors** and a **repeatable** developer workflow — the same “**ground**” discipline you want before a **PTT** app ships: tests are the **copy** you trust. This document defines the **coverage fail-under** (see `pyproject.toml`), how to run tests, and how to read **HTML coverage** reports. Voice for *why* we test: [brand.md](brand.md). Structure: [architecture.md](architecture.md).
+Voxium aims for **high confidence in refactors** and a **repeatable** developer workflow — the same “**ground**” discipline you want before a **PTT** app ships: tests are the **copy** you trust. This document defines the **coverage fail-under** (see `pyproject.toml`), how to run tests, and how to read the **terminal coverage** report. Voice for *why* we test: [brand.md](brand.md). Structure: [architecture.md](architecture.md).
 
 ---
 
@@ -52,18 +52,18 @@ flowchart TB
 | Command | Purpose |
 |---------|---------|
 | `make test` | Pytest only; respects `PYTEST_ARGS` (e.g. `make test PYTEST_ARGS='-vv tests/test_foo.py'`) |
-| `make test-cov` | Pytest with **coverage**, **HTML** under `htmlcov/`, **fail** if below configured `fail_under` (see `pyproject.toml`; `mk.py` may add extra flags) |
+| `make test-cov` | Pytest with **coverage** (per-file/missing lines in the **console**), **fail** if below configured `fail_under` (see `pyproject.toml`; `mk.py` may add extra flags) |
 | `make install-dev` | Installs `.[dev]` (includes `pytest-cov`) once (via `.dev-install-stamp`) |
 
 **Plain shell (with venv activated):**
 
 ```bash
 pytest
-pytest --cov --cov-config=pyproject.toml --cov-report=html:htmlcov
+pytest --cov --cov-config=pyproject.toml --cov-report=term-missing:skip-covered
 # add --cov-fail-under=<N> to match [tool.coverage.report] fail_under, or use make test-cov
 ```
 
-Open **`htmlcov/index.html`** in a browser for a **line-by-line** view of missed branches and lines.
+`make test-cov` matches that style (see `scripts/mk.py`); add `--cov-report=html:htmlcov` by hand if you want a **browser** report for a deep dive.
 
 ---
 
@@ -74,7 +74,6 @@ Relevant sections in **`pyproject.toml`**:
 - `[tool.pytest.ini_options]` — `testpaths`, `markers`, `addopts`
 - `[tool.coverage.run]` — `include`, `omit`, `branch`
 - `[tool.coverage.report]` — `fail_under`, `exclude_lines`, `show_missing`
-- `[tool.coverage.html]` — `directory`, `title`
 
 **Excluding** code from coverage (only when justified):
 
@@ -102,7 +101,7 @@ flowchart LR
   A[Developer runs make test-cov] --> B[pytest + pytest-cov]
   B --> C[coverage.py collects lines]
   C --> D{Total included coverage >= fail_under?}
-  D -->|yes| E[Pass — optional: open htmlcov/]
+  D -->|yes| E[Pass — read terminal summary]
   D -->|no| F[Fail — fix tests or refactors]
 ```
 

@@ -1,6 +1,6 @@
 # Voxium architecture
 
-This document describes how **Voxium 1.0** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **vox** flow becomes text, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus **Apollo**-era “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **robot** automation (inference) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
+This document describes how **Voxium 0.0.1** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **vox** flow becomes text, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus **Apollo**-era “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **robot** automation (inference) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
 
 ---
 
@@ -105,7 +105,7 @@ sequenceDiagram
 
 ## 4. Repository layout
 
-**1.0 layout:** a **`src/voxium/`** installable package, console script `voxium` → `voxium.cli.main:main`, and `python -m voxium` for the same entry. Tests and tooling stay at the repo root.
+**Layout:** a **`src/voxium/`** installable package, console script `voxium` → `voxium.cli.main:main`, and `python -m voxium` for the same entry. Tests and tooling stay at the repo root.
 
 ```mermaid
 flowchart TB

@@ -4,7 +4,7 @@ from voxium.model_registry import DEFAULT_MODEL_NAME
 
 import os
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "0.0.1"
 SAMPLE_RATE = 16_000
 DEFAULT_SERVER_URL = "http://localhost:8002/transcribe"
 DEFAULT_SERVER_START_TIMEOUT = 180

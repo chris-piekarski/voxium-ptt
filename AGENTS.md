@@ -95,7 +95,7 @@ make lint
 
 Optional / extra (not a substitute for the above unless team policy changes):
 
-- **`make test-cov`**: pytest with **coverage** (HTML under `htmlcov/`, terminal report). The make script passes extra pytest coverage flags; consult `scripts/mk.py` (`cmd_test_cov`) for the exact `pytest` invocation. **`pyproject.toml` `[tool.coverage.*]`** defines `fail_under` and `omit` rules when using `--cov-config` directly.
+- **`make test-cov`**: pytest with **coverage** (terminal per-file / missing-line report, no HTML). The make script passes extra pytest coverage flags; consult `scripts/mk.py` (`cmd_test_cov`) for the exact `pytest` invocation. **`pyproject.toml` `[tool.coverage.*]`** defines `fail_under` and `omit` rules when using `--cov-config` directly.
 
 ### Coverage notes (current policy in `pyproject.toml`)
 
@@ -151,6 +151,7 @@ You may add a **scope** in parentheses when it helps, e.g. `fix(cli): normalize 
 
 ## Hints for AI / automation agents
 
+- **WSL and Windows on the same clone:** a **single** `.venv` cannot be shared—Windows venvs use `Scripts\` and `Lib\`, Linux venvs use `bin/`. If you develop in **WSL** but also use **Windows** Python in the same repo, use **separate** directories, e.g. default `.venv` for whichever OS you use most, and **`VENV=.venv-wsl` `make install`** for a Linux-only venv in WSL (add `.venv-wsl/` to `.gitignore` if not already). Close processes that hold locks before deleting a broken venv on a shared (`/mnt/...`) path.
 - Prefer **small, pure functions** in `src/voxium/` and **tests** over growing `app.py` / `whisper_server.py` when the change is testable in isolation.
 - **Do not** add unsolicited **root-level** documentation files beyond what maintainers request. **Exception:** updates and additions under **`docs/`** are welcome when they follow the [Operator documentation](#operator-documentation) section (verbose, operator-focused, **Mermaid** where it helps) and, for operator copy, the [Brand voice](#brand-voice) / [`docs/brand.md`](docs/brand.md) rules. This file (`AGENTS.md`) remains the place for **repo-wide policy and structure** for agents and humans.
 - Match **existing** naming, imports, and ruff/mypy expectations; avoid drive-by refactors outside the task.

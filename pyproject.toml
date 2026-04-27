@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxium"
-version = "1.0.0"
+version = "0.0.1"
 description = "Voxium — PTT vox-in local voice typing (radio + Apollo-stack tone; see docs/brand.md)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -124,6 +124,4 @@ exclude_lines = [
     "\\.\\.\\.",
 ]
 
-[tool.coverage.html]
-directory = "htmlcov"
-title = "Voxium coverage report"
+# Optional: `coverage html` (e.g. ad-hoc) would default to `htmlcov/` if you add a [tool.coverage.html] block.

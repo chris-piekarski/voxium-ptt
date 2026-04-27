@@ -846,7 +846,7 @@ def get_actual_device() -> dict:
 app = FastAPI(
     title="Voxium",
     description="Voxium local transcription HTTP API (faster-whisper). Not for direct use — prefer the voxium CLI.",
-    version="2.0.0"
+    version="0.0.1"
 )
 
                                         

@@ -358,7 +358,7 @@ def cmd_test(root: Path, venv_py: Path) -> int:
 
 
 def cmd_test_cov(root: Path, venv_py: Path) -> int:
-    """Run pytest with coverage: HTML report, terminal summary, fail-under from pyproject.toml."""
+    """Run pytest with coverage: terminal per-file report (term-missing), fail-under from pyproject.toml."""
     p = venv_py
     if not p.is_file():
         print(f"Missing {p}. Run: make install", file=sys.stderr)
@@ -378,7 +378,6 @@ def cmd_test_cov(root: Path, venv_py: Path) -> int:
             str(cfg),
             "--cov-fail-under=95",
             "--cov-report=term-missing:skip-covered",
-            "--cov-report=html:htmlcov",
             *extra,
         ],
         cwd=root,
@@ -434,7 +433,7 @@ def main() -> int:
 
     ptc = sp.add_parser(
         "test-cov",
-        help="Pytest + coverage (fail-under from pyproject, htmlcov/); use PYTEST_ARGS= for more pytest flags",
+        help="Pytest + coverage (terminal per-file report, fail-under from pyproject); use PYTEST_ARGS= for more pytest flags",
     )
     ptc.add_argument("--root", type=Path, required=True)
     ptc.add_argument("--venv-python", type=Path, required=True)

@@ -1,5 +1,6 @@
 # Virtualenv (keep ignoring root-level venv/ for old trees; standard is .venv/)
 .venv/
+.venv-wsl/
 .venv-*/
 venv/
 env/
