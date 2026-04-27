@@ -1,0 +1,21 @@
+# Generated from pyproject.toml for pip-only workflows: pip install -r requirements.txt
+# Prefer: pip install -e .
+#
+numpy>=1.24.0
+scipy>=1.10.0
+sounddevice>=0.4.6
+pynput>=1.7.6
+pyperclip>=1.8.2
+requests>=2.28.0
+rich>=13.0.0
+pyyaml>=6.0
+pydantic>=2.4
+faster-whisper==1.2.1
+huggingface-hub>=0.21
+nvidia-cublas-cu12; sys_platform == 'win32'
+nvidia-cudnn-cu12; sys_platform == 'win32'
+nvidia-cuda-nvrtc-cu12; sys_platform == 'win32'
+fastapi>=0.100.0
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+pyautogui>=0.9.53; sys_platform != 'linux'

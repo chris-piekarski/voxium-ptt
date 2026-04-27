@@ -1,0 +1,39 @@
+# Virtualenv (keep ignoring root-level venv/ for old trees; standard is .venv/)
+.venv/
+.venv-*/
+venv/
+env/
+
+# Editable / build metadata
+*.egg-info/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# Makefile dev stamp (pip install -e ".[dev]")
+.dev-install-stamp
+
+.codex
+
+# Local tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.cache/
+
+# Voxium data (see voxium.paths; same layout on all platforms)
+/models/
+/history/
+/logs/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
