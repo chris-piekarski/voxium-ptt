@@ -1,13 +1,17 @@
-"""PTT / Apollo-style RGB startup art for the client. Brand: docs/brand.md."""
+"""RGB block wordmark for the client: PTT & VOX, rig / shack (radio box) + local inference stack. Brand: docs/brand.md."""
 from __future__ import annotations
 
 import colorsys
+import random
 from collections.abc import Iterator
 
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
+
+from voxium.console_status import voxium_panel_width
 
 # 5 rows × 5 cols, █ = ink. One column gap in merge.
 _GLYPHS: dict[str, tuple[str, ...]] = {
@@ -57,6 +61,29 @@ _GLYPHS: dict[str, tuple[str, ...]] = {
 _GAP = 1
 _H0, _H1 = 0.5, 0.78
 _WORD = "VOXIUM"
+# Decorative rule when width is not passed (e.g. tests) — with content_width, rules scale to the panel.
+_DEFAULT_RULE_DOTS = 64
+
+# One line per startup; rotate for flavor. PTT & VOX, shack, light 10-codes, edge = local STT (see docs/brand.md).
+_BANNER_TAGLINES: tuple[str, ...] = (
+    "Local robot on loopback — chewing through this transmission.",
+    "Edge stack at the shack — VOX in one side, text out the other, copy.",
+    "PTT down, inference up — the silicon crew’s on it. 10-4.",
+    "Speech to text on the home wire — rig at the desk, robot on the headroom, no skip.",
+    "Breaker one-nine for the VOX — stack on automatic, readback’s on your screen.",
+    "You hold the key; the stack’s on deck — STT in the loop, standing by.",
+    "Chewing the carrier into words — edge inference, shack hot, all local on the bus.",
+    "VOX in the passband, text in the buffer — copy like CB, work like a machine.",
+    "10-4 on the transcript — you’re QRV on PTT, the model’s running the traffic.",
+    "No repeater, no phone patch — just loopback, VOX, and the words at your fist.",
+    "QRM? Not here. You, the mic, and a robot that never double-keys the PTT.",
+    "Rubber-duck the VOX, clear the VOX check — the stack’s already on your audio, over.",
+    "Rattle the VOX, grab the take — from squelch to script on this edge box.",
+    "What’s your 20? The loopback — VOX in, QSO with your own stack, 10-2 on copy.",
+    "Good buddy to your keyboard — local STT, breaker open when you need the words.",
+    "Monitor: PTT in, type out — the shack’s got a robot op chewing your transmission.",
+    "10-1 was bad; this pass is 10-2 — VOX to text, first flight on your own rig, copy.",
+)
 
 
 def _hsv(h: float, s: float, v: float) -> tuple[int, int, int]:
@@ -113,30 +140,39 @@ def _build_voxium_block() -> Text:
     return out
 
 
-def build_voxium_banner() -> Group:
-    top = Text("  PTT VOX Agent CLI", style="dim #64748b")
-    rule1 = Text("  " + "·" * 64, style="dim #475569")
+def _rule_text(content_width: int | None) -> Text:
+    n = _DEFAULT_RULE_DOTS if content_width is None else max(0, content_width - 2)
+    return Text("  " + "·" * n, style="dim #475569")
+
+
+def build_voxium_banner(*, tagline: str | None = None, content_width: int | None = None) -> Group:
+    # Radio box: PTT & VOX, rig, shack; robotics: inference stack (see docs/brand.md).
+    line = tagline if tagline is not None else random.choice(_BANNER_TAGLINES)
+    top = Text("  PTT & VOX box — VOX in, text out · shack, no uplink", style="dim #64748b")
+    rule1 = _rule_text(content_width)
     parts: list[Text | str] = [top, "\n", rule1, "\n", _build_voxium_block()]
     parts.append("\n")
-    parts.append(Text("  " + "·" * 64, style="dim #475569"))
-    parts.append(
-        Text.from_markup(
-            "\n  [dim]Local Voice Agent - No Uplink[/dim]"
-        )
-    )
+    parts.append(_rule_text(content_width))
+    parts.append(Text("\n  " + escape(line), style="dim #94a3b8"))
     return Group(*parts)
 
 
 def show_startup_banner(console: Console) -> None:
-    cw = getattr(console, "width", None) or 88
-    w = min(int(cw), 92)
+    w = voxium_panel_width(console)
+    # Border 2 + horizontal padding 1+1 — same inner width as transcribe/PTT panels (app.py).
+    inner_w = max(4, w - 4)
     panel = Panel(
-        build_voxium_banner(),
+        build_voxium_banner(content_width=inner_w),
         title=Text("Voxium", style="bold rgb(34,211,238)"),
-        subtitle=Text("On station  ·  PTT / vox  ·  loopback only", style="italic dim #94a3b8"),
+        title_align="left",
+        subtitle=Text(
+            "Rig on station  ·  PTT & VOX  ·  loopback  ·  you key, stack in the loop",
+            style="italic dim #94a3b8",
+        ),
+        subtitle_align="left",
         border_style="rgb(6,182,212)",
         padding=(0, 1),
-        width=max(60, w),
+        width=w,
     )
     console.print()
     console.print(panel)

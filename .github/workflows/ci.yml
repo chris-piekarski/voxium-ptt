@@ -1,0 +1,38 @@
+# PR checks against main: same bar as AGENTS.md (make test, make lint).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: System packages (PortAudio for sounddevice on Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends portaudio19-dev
+
+      - name: Install (editable + dev extras)
+        run: make install-dev
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test

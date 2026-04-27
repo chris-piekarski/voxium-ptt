@@ -12,9 +12,12 @@ def enrich_capture_with_recording(
     wall_seconds: float | None,
     callback_statuses: list[str],
     sample_rate: int,
+    *,
+    peak_abs: float | None = None,
+    rms_dbfs: float | None = None,
 ) -> dict:
     out = dict(base)
-    out["recording"] = {
+    rec: dict = {
         "captured_frames": int(captured_frames),
         "chunks": int(chunks),
         "capture_seconds": round_audio_float(
@@ -23,4 +26,9 @@ def enrich_capture_with_recording(
         "wall_seconds": round_audio_float(wall_seconds),
         "callback_statuses": list(callback_statuses),
     }
+    if peak_abs is not None:
+        rec["peak_abs"] = round_audio_float(peak_abs, 6)
+    if rms_dbfs is not None:
+        rec["rms_dbfs"] = round_audio_float(rms_dbfs, 2)
+    out["recording"] = rec
     return out

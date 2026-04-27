@@ -25,10 +25,6 @@ def models_dir() -> Path:
     return repo_root() / "models"
 
 
-def history_dir() -> Path:
-    return repo_root() / "history"
-
-
 def logs_dir() -> Path:
     return repo_root() / "logs"
 
@@ -42,5 +38,5 @@ def instance_lock_path() -> Path:
 
 
 def ensure_runtime_dirs() -> None:
-    for d in (models_dir(), history_dir(), logs_dir()):
+    for d in (models_dir(), logs_dir()):
         d.mkdir(parents=True, exist_ok=True)

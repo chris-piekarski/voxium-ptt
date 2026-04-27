@@ -39,7 +39,7 @@ clean: ## Remove tool caches, __pycache__, build/dist, coverage, root *.egg-info
 
 ##@ Info
 
-disk-usage: ## Show disk usage for models/, history/, and logs/ in the repo
+disk-usage: ## Show disk usage for models/ and logs/ in the repo
 	@"$(PYTHON)" "$(MKPY)" disk-usage --root "$(ROOT)" --venvd "$(VENVDIR)" --dev-stamp "$(DEV_STAMP)"
 
 mic-info: ## Print default mic, host APIs, and all PortAudio / sounddevice devices

@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.1-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.1-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
 
-**PTT (push-to-talk) voice typing for your terminal** — *vox* in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path.
+**PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path.
 
 It is the same muscle memory as a **radio key**: short transmissions, then **copy** to the screen. Under the hood you are **stacking** mic, CPU/GPU, and model in a very **Apollo** way: humans at the key, **robot** work in the inference path, **uncharted** only in the sense of *your* machine’s first clean run. Press a hotkey, speak, press again: text is pasted where you are typing. Default path is **GPU (CUDA)**; use `--server-device cpu` if you have no working CUDA stack. **Brand story (radio + space-race tone):** [docs/brand.md](docs/brand.md).
 
@@ -44,7 +44,7 @@ On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`*
 | `make test` | `python -m pytest tests` |
 | `make test-cov` | run `pytest` with the same options as in [docs/testing.md](docs/testing.md) and `pyproject.toml` (pytest-cov) |
 | `make repo-stats` | `python3 scripts/generate_repo_stats.py` to refresh [docs/repository-stats.md](docs/repository-stats.md) |
-| `make disk-usage` | show sizes of `models/`, `history/`, `logs/` under the repo (or use your shell’s `du`) |
+| `make disk-usage` | show sizes of `models/`, `logs/` under the repo (or use your shell’s `du`) |
 
 **Convenience (from a clone):** `scripts\windows\venv_bootstrap.cmd` creates `.venv` and editable-installs Voxium. After that, `scripts\windows\Voxium.cmd` (or `Voxium.ps1` with `ExecutionPolicy` bypass) runs `voxium`. The app sets a short window/tab title (default matches `VOXIUM_WINDOW_TITLE` in `voxium/app.py`; override with environment variable `VOXIUM_WINDOW_TITLE` before launch if needed).
 
@@ -77,6 +77,10 @@ hotkeys:
   record: f9
   recovery: f8
   retry: f7
+history:
+  limit: 100
+  max_total_chars: 512000
+  pending_audio_max_mib: 32
 ```
 
 ## Run
@@ -88,8 +92,9 @@ voxium -v --log-level DEBUG
 voxium --server-device cpu
 ```
 
-- **F9 (default):** start/stop recording and transcribe; **F8:** replay last transmission (re-paste last good text); **F7:** re-transmit (re-run transcription on pending audio).
-- **Local data (same paths on all platforms):** `models/` (Hugging Face downloads for faster-whisper), `history/` (transcription history and pending-audio), `logs/` (managed server log and client lock). Override the project root with `VOXIUM_REPO_ROOT` if needed. The server log defaults to `logs/voxium_server.log` (or `--server-log-file`).
+- **F9 (default):** start/stop recording and transcribe; **F8:** cycle replay of PTT/VOX transcripts from this run (re-paste, newest first, wraps); **F7:** re-transmit (re-run transcription on the last in-RAM capture when available).
+- **Transcript log:** session-only, in process RAM (bounded: `--history-limit`, `--history-max-chars`); use **`/history`** in the downlink to list, **`/history <n>`** to expand, **`/history copy <n>`** to put one line on the system clipboard.
+- **Local data (same paths on all platforms):** `models/` (Hugging Face downloads for faster-whisper), `logs/` (server log, client lock). Override the project root with `VOXIUM_REPO_ROOT` if needed. The server log defaults to `logs/voxium_server.log` (or `--server-log-file`).
 - **Health:** `voxium health`, `voxium stats`; foreground server: `voxium server --help`.
 
 Voxium only uses a **local loopback** HTTP server for transcription.

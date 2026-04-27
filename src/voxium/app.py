@@ -10,7 +10,6 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +17,7 @@ import pyperclip
 import requests
 import sounddevice as sd
 from pynput import keyboard
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -30,7 +29,9 @@ from voxium.console_status import (
     PttSessionStatusBox,
     build_status_box_panel,
     print_agent_telemetry_panel,
+    print_slash_command_downlink,
     status_uses_recording_hud_line,
+    voxium_panel_width,
 )
 from voxium.cli_argv import normalize_cli_args
 from voxium.constants import (
@@ -47,9 +48,20 @@ from voxium.constants import (
     LOG_LEVELS,
     SAMPLE_RATE,
 )
+from voxium.ensure_model_client import ensure_model_on_loopback_server
 from voxium.http_detail import http_error_detail_text
-from voxium.radio_readback import take_readback, take_readback_rexmit
-from voxium.recording_ui import format_recording_hud, format_recording_hud_minimal
+from voxium.radio_readback import (
+    take_edge_inference_detail,
+    take_edge_inference_rexmit_detail,
+    take_readback,
+    take_readback_rexmit,
+)
+from voxium.recording_ui import (
+    build_recording_hud_rich,
+    format_recording_hud,
+    format_recording_hud_minimal,
+    rms_to_dbfs,
+)
 from voxium.hotkey_rules import (
     hotkey_config_changed,
     normalize_hotkey_name,
@@ -58,13 +70,14 @@ from voxium.hotkey_rules import (
 from voxium.json_sanitize import json_safe_audio_value, round_audio_float
 from voxium.local_server_cmd import LocalServerLaunchConfig, argv_after_interpreter
 from voxium.loopback import (
+    get_gpu_url,
     get_health_url,
     get_server_endpoint_url,
     is_loopback_host,
     is_loopback_url,
     normalize_loopback_host,
 )
-from voxium.metrics_table import build_metrics_table
+from voxium.metrics_table import build_ptt_log_metrics_layout
 from voxium.metrics_text import describe_server
 from voxium.model_arg import trusted_model_arg
 from voxium.model_registry import (
@@ -73,9 +86,13 @@ from voxium.model_registry import (
     TRUSTED_MODELS,
     validate_model_name,
 )
-from voxium.paths import default_server_log_path, ensure_runtime_dirs, history_dir, instance_lock_path, repo_root
+from voxium.paths import default_server_log_path, ensure_runtime_dirs, instance_lock_path, repo_root
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
+from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
+from voxium.slash_commands import run_slash_line, slash_data_needs
+from voxium.session_history import SessionTranscriptHistory
 from voxium.speech_guards import has_speech, is_hallucination
+from voxium.standby_fft import set_spectrum_from_mono_float
 
 SYSTEM = platform.system()
 
@@ -113,6 +130,7 @@ class State:
     IDLE = 0
     RECORDING = 1
     TRANSCRIBING = 2
+    COMMAND_INPUT = 3
 
 state = State.IDLE
 state_lock = threading.Lock()
@@ -120,7 +138,14 @@ audio_chunks: list[np.ndarray] = []
 stream: sd.InputStream | None = None
 target_window = None
 config = None
-history = None                                 
+history = None
+
+
+def get_transcript_history() -> SessionTranscriptHistory | None:
+    """The single session :class:`SessionTranscriptHistory` (same object PTT/VOX and /history use)."""
+    return history
+
+
 last_transcription_metrics: dict | None = None
 current_audio_capture_info: dict | None = None
 last_audio_capture_info: dict | None = None
@@ -142,106 +167,33 @@ server_log_handle = None
                                                                
 _last_hotkey_time: float = 0.0
 _last_paste_time: float = 0.0
-HOTKEY_DEBOUNCE_MS = 300
+# PTT start: block accidental double-press. PTT stop: no extra delay (same key, clear intent).
+HOTKEY_DEBOUNCE_PTT_START_MS = 220
+HOTKEY_DEBOUNCE_PTT_STOP_MS = 0
+# Back-compat for slash / recovery handlers that read HOTKEY_DEBOUNCE_MS
+HOTKEY_DEBOUNCE_MS = HOTKEY_DEBOUNCE_PTT_START_MS
+RECORDING_HUD_THREAD_JOIN_S = 0.3
+# Operator ``/…`` line (Rich footer); only used when not ``--minimal``.
+_slash_buffer: str = ""
+_slash_tab_cycle: int = 0
+_SLASH_LINE_MAX = 2048
 PASTE_DEBOUNCE_MS = 500
 RECORDING_HUD_INTERVAL_S = 0.5
 RECORDING_REMINDER_INTERVAL_S = 15.0
 
-# Green status strip — PTT / vox / local stack (brand: docs/brand.md)
-STATUS_VOX_ON_STATION = "◉ VOX/PTT · ON STATION"
-STATUS_VOX_COPY = "🛰️ VOX/PTT · COPY"
-STATUS_VOX_COPY_REXMIT = "🛰️ VOX/PTT · COPY (RE-XMIT)"
+# Green status strip — PTT/VOX & local stack (brand: docs/brand.md)
+STATUS_VOX_ON_STATION = "◉ PTT/VOX · ON STATION"
+STATUS_VOX_COPY = "🖥️ PTT/VOX · COPY"
+STATUS_VOX_COPY_REXMIT = "🖥️ PTT/VOX · COPY (RE-XMIT)"
 STATUS_PTT_ACTIVE = "📻 PTT ACTIVE"
 STATUS_EDGE_INFERENCE = "🤖 EDGE INFERENCE"
 STATUS_EDGE_INFERENCE_REXMIT = "🤖 EDGE INFERENCE (RE-XMIT)"
-STATUS_VOX_LAST_COPY = "↩️ VOX/PTT · LAST COPY"
+STATUS_VOX_LAST_COPY = "↩️ PTT/VOX · LAST COPY"
 # One short window title: radio = PTT, robot = local inference (tab bar read; override: env VOXIUM_WINDOW_TITLE).
 VOXIUM_WINDOW_TITLE = "Voxium 📻🤖"
 
 DEBUG_PASTE = False
 
-class TranscriptionHistory:
-
-    def __init__(self, max_entries: int = 100):
-        self.max_entries = max_entries
-        h = history_dir()
-        self.history_file = h / "history.jsonl"
-        self.pending_audio = h / "pending.wav"
-        self._last: dict | None = None
-        self._ensure_dir()
-
-    def _ensure_dir(self):
-
-        self.history_file.parent.mkdir(parents=True, exist_ok=True)
-
-    def add(self, text: str):
-
-        entry = {"timestamp": datetime.now().isoformat(), "text": text}
-        self._last = entry
-        try:
-            with open(self.history_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
-            self._maybe_trim()
-        except Exception:
-            pass                                        
-
-    def get_last(self) -> str | None:
-
-        if self._last:
-            return self._last["text"]
-                                  
-        try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                if lines:
-                    return json.loads(lines[-1])["text"]
-        except Exception:
-            pass
-        return None
-
-    def _maybe_trim(self):
-
-        try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            if len(lines) > self.max_entries * 1.5:                           
-                with open(self.history_file, "w", encoding="utf-8") as f:
-                    f.writelines(lines[-self.max_entries:])
-        except Exception:
-            pass
-
-    def save_pending_audio(self, wav_buffer: io.BytesIO):
-
-        try:
-            wav_buffer.seek(0)
-            with open(self.pending_audio, "wb") as f:
-                f.write(wav_buffer.read())
-            wav_buffer.seek(0)                           
-        except Exception:
-            pass
-
-    def clear_pending_audio(self):
-
-        try:
-            self.pending_audio.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    def get_pending_audio(self) -> bytes | None:
-
-        try:
-            if self.pending_audio.exists():
-                                                   
-                age = time.time() - self.pending_audio.stat().st_mtime
-                if age > 3600:
-                    self.clear_pending_audio()
-                    return None
-                return self.pending_audio.read_bytes()
-        except Exception:
-            pass
-        return None
-
-                             
 CONFIG_PATH = Path.home() / ".config" / "voxium" / "config.yaml"
 
 
@@ -395,7 +347,7 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     hotkey_group.add_argument(
         "--recovery-hotkey",
         default=hotkeys.get("recovery", "f8"),
-        help="Hotkey (F1–F12) to replay last transmission: re-paste the last good transcript",
+        help="Hotkey (F1–F12) to cycle replay: re-paste PTT/VOX transcripts (newest first, wraps)",
     )
     hotkey_group.add_argument(
         "--retry-hotkey",
@@ -414,7 +366,20 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         "--history-limit",
         type=int,
         default=hist.get("limit", 100),
-        help="Maximum transcriptions to keep in history"
+        help="Maximum transcriptions to keep in this process (RAM; session-only)",
+    )
+    history_group.add_argument(
+        "--history-max-chars",
+        type=int,
+        default=hist.get("max_total_chars", 512_000),
+        help="Max total characters of transcript text in RAM (oldest entries dropped first)",
+    )
+    history_group.add_argument(
+        "--history-pending-mib",
+        type=int,
+        default=hist.get("pending_audio_max_mib", 32),
+        metavar="N",
+        help="Max MiB for the last capture in RAM (re-transmit / F7). Use 0 to disable storage",
     )
 
 def add_server_options(parser: argparse.ArgumentParser):
@@ -504,12 +469,12 @@ def build_parser(file_config: dict) -> argparse.ArgumentParser:
         usage="voxium [command] [options]",
         description=(
             "Voxium — PTT (push-to-talk) voice in, text out, over local loopback. "
-            "Radio: *vox* at the mic. Stack: an Apollo-style first flight of *your* hardware+software+model path."
+            "Radio: *VOX* at the mic. Stack: an Apollo-style first flight of *your* hardware+software+model path."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  voxium                                  Open the PTT / vox path (default command)
+  voxium                                  Open the PTT & VOX path (default command)
   voxium --model large-v3 -v              Same as: voxium run --model large-v3 -v
   voxium run --server-device cpu         CPU stack (default server device is cuda)
   voxium stats                            Ground readout: server totals
@@ -617,6 +582,29 @@ def get_server_health(timeout: float = 2.0) -> dict | None:
         resp = requests.get(get_health_url(config.server_url), timeout=timeout)
         resp.raise_for_status()
         return resp.json()
+    except Exception:
+        return None
+
+
+def get_server_gpu_metrics() -> dict | None:
+    """``GET /gpu`` JSON ``gpu`` field, or error shape on 503, or None if request fails."""
+    if config is None or not is_loopback_url(config.server_url):
+        return None
+    try:
+        resp = requests.get(get_gpu_url(config.server_url), timeout=2.0)
+        if resp.status_code == 503:
+            j = {}
+            try:
+                j = resp.json()
+            except Exception:
+                pass
+            return {
+                "_error": j.get("error", "gpu_metrics_unavailable"),
+                "_reason": j.get("reason", ""),
+            }
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("gpu") if isinstance(data, dict) else None
     except Exception:
         return None
 
@@ -779,16 +767,35 @@ def _end_recording_hud_line() -> None:
         pass
 
 
-def _write_recording_hud(line: str) -> None:
+def _recording_tail_samples(max_samples: int = 48_000) -> np.ndarray:
+    """Recent mono capture (float32) for the live PTT waveform — last *max_samples* from RAM."""
+    with recording_audio_lock:
+        if not audio_chunks:
+            return np.array([], dtype=np.float32)
+        # Only concat tail chunks to keep the HUD path cheap on long PTTs.
+        parts = audio_chunks[-96:]
+    if not parts:
+        return np.array([], dtype=np.float32)
+    cat = np.concatenate(parts, dtype=np.float32)
+    if cat.size > max_samples:
+        return cat[-max_samples:].copy()
+    return cat
+
+
+def _write_recording_hud(content: str | RenderableType) -> None:
     if is_client_shutting_down() or not config:
         return
     if config.minimal:
-        show_status(STATUS_PTT_ACTIVE, line)
+        if not isinstance(content, str):
+            return
+        show_status(STATUS_PTT_ACTIVE, content)
     elif ptt_status_box is not None:
-        ptt_status_box.update_recording_hud(line)
+        ptt_status_box.update_recording_hud(content)
     else:
+        if not isinstance(content, str):
+            return
         try:
-            sys.stdout.write(f"\r\033[2K{STATUS_PTT_ACTIVE}  {line}")
+            sys.stdout.write(f"\r\033[2K{STATUS_PTT_ACTIVE}  {content}")
             sys.stdout.flush()
         except OSError:
             pass
@@ -829,6 +836,19 @@ def _recording_monitor_loop() -> None:
         rem = _next_recording_reminder_in_s()
         if config and config.minimal:
             d = format_recording_hud_minimal(sc, ssq, pk, nc, SAMPLE_RATE, rem)
+        elif ptt_status_box is not None and config and not config.minimal:
+            tail = _recording_tail_samples()
+            inner_w = max(16, voxium_panel_width(console) - 4)
+            d = build_recording_hud_rich(
+                sc,
+                ssq,
+                pk,
+                nc,
+                SAMPLE_RATE,
+                rem,
+                tail,
+                panel_inner_width=inner_w,
+            )
         else:
             d = format_recording_hud(sc, ssq, pk, nc, SAMPLE_RATE, rem)
         _write_recording_hud(d)
@@ -885,9 +905,85 @@ def _emit_osc0_window_title(title: str) -> None:
             continue
         return
 
+
+def _standby_telemetry_context() -> dict:
+    """
+    Live values for the green-strip standby line: stream rate/channels, last on-wire / key-when
+    different from ``last_audio_capture_info``, and after a successful decode, last pass RTF, last
+    take peak/RMS, and model name (see :mod:`voxium.standby_telemetry`). Device name is not included
+    (``/mic`` for full capture path); keeps the on-station line short.
+    """
+    m = last_transcription_metrics
+    d: dict = {}
+
+    cap = last_audio_capture_info
+    if isinstance(cap, dict):
+        st = cap.get("stream") if isinstance(cap.get("stream"), dict) else {}
+        if st.get("samplerate") is not None:
+            try:
+                d["sample_rate_hz"] = int(float(st["samplerate"]))
+            except (TypeError, ValueError):
+                pass
+        if st.get("channels") is not None:
+            try:
+                d["channels"] = int(st["channels"])
+            except (TypeError, ValueError):
+                pass
+        fmt = cap.get("format") if isinstance(cap.get("format"), dict) else {}
+        if "sample_rate_hz" not in d and fmt.get("sample_rate_hz") is not None:
+            try:
+                d["sample_rate_hz"] = int(fmt["sample_rate_hz"])
+            except (TypeError, ValueError):
+                pass
+        if "channels" not in d and fmt.get("channels") is not None:
+            try:
+                d["channels"] = int(fmt["channels"])
+            except (TypeError, ValueError):
+                pass
+        rec = cap.get("recording") if isinstance(cap.get("recording"), dict) else {}
+        if rec.get("wall_seconds") is not None:
+            try:
+                d["last_ptt_wall_s"] = float(rec["wall_seconds"])
+            except (TypeError, ValueError):
+                pass
+        if rec.get("capture_seconds") is not None:
+            try:
+                d["last_ptt_audio_s"] = float(rec["capture_seconds"])
+            except (TypeError, ValueError):
+                pass
+        if rec.get("peak_abs") is not None:
+            try:
+                d["last_capture_peak"] = float(rec["peak_abs"])
+            except (TypeError, ValueError):
+                pass
+        if rec.get("rms_dbfs") is not None:
+            try:
+                d["last_capture_rms_dbfs"] = float(rec["rms_dbfs"])
+            except (TypeError, ValueError):
+                pass
+
+    if "sample_rate_hz" not in d:
+        d["sample_rate_hz"] = SAMPLE_RATE
+    if "channels" not in d:
+        d["channels"] = 1
+
+    if isinstance(m, dict) and m.get("transcription_seconds") is not None:
+        d["has_last_decode"] = True
+        if m.get("realtime_factor") is not None:
+            d["last_realtime_factor"] = m.get("realtime_factor")
+        if m.get("audio_seconds") is not None:
+            d["last_audio_seconds"] = m.get("audio_seconds")
+        mod = m.get("model")
+        if isinstance(mod, dict) and mod.get("name"):
+            d["last_model_name"] = str(mod.get("name"))[:32]
+    return d
+
+
 def show_status(status: str, detail: str = ""):
 
     if is_client_shutting_down():
+        return
+    if config is None:
         return
     if not config.minimal and ptt_status_box is not None:
         ptt_status_box.set_status(
@@ -897,7 +993,9 @@ def show_status(status: str, detail: str = ""):
         )
         return
     if not config.minimal and ptt_status_box is None:
-        console.print(build_status_box_panel(status, detail))
+        console.print(
+            build_status_box_panel(status, detail, box_width=voxium_panel_width(console))
+        )
         return
 
                                            
@@ -922,21 +1020,30 @@ def log_transcription_summary(text: str, metrics: dict | None):
     if ptt_status_box is not None and config and not config.minimal:
         ptt_status_box.freeze_before_external_output()
 
+    w_box = voxium_panel_width(console)
+    # Panel border 2 + horizontal padding 1+1 — extra width for metrics columns on small TTYs.
+    inner_w = max(4, w_box - 4)
     transcript = Text(text.strip() or "(empty)", style="#f8fafc")
-    metrics_table = build_metrics_table(metrics)
+    metrics_block = build_ptt_log_metrics_layout(
+        metrics,
+        available_width=inner_w,
+    )
     content = Group(
         Text("Transcribed text", style="bold #7dd3fc"),
-        Panel(transcript, border_style="#334155", padding=(0, 1)),
+        Panel(transcript, border_style="#334155", padding=(0, 1), width=inner_w),
         Text("Inference metrics", style="bold #a7f3d0"),
-        metrics_table,
+        metrics_block,
     )
     console.print()
     console.print(Panel(
         content,
         title="[bold #38bdf8]Voxium[/bold #38bdf8]",
-        subtitle="[dim]PTT / vox log — local loopback only[/dim]",
+        title_align="left",
+        subtitle="[dim]PTT & VOX log — local loopback only[/dim]",
+        subtitle_align="left",
         border_style="#38bdf8",
-        padding=(1, 2),
+        padding=(1, 1),
+        width=w_box,
     ))
 
                                          
@@ -1100,7 +1207,14 @@ def build_audio_capture_info(stream_obj: sd.InputStream | None = None) -> dict:
         capture_info["error"] = error
     return capture_info
 
-def finalize_audio_capture_info(captured_frames: int, chunks: int, wall_seconds: float | None) -> dict:
+def finalize_audio_capture_info(
+    captured_frames: int,
+    chunks: int,
+    wall_seconds: float | None,
+    *,
+    peak_abs: float | None = None,
+    rms_dbfs: float | None = None,
+) -> dict:
     base = current_audio_capture_info or build_audio_capture_info()
     return enrich_capture_with_recording(
         base,
@@ -1109,6 +1223,8 @@ def finalize_audio_capture_info(captured_frames: int, chunks: int, wall_seconds:
         wall_seconds,
         list(audio_capture_statuses),
         SAMPLE_RATE,
+        peak_abs=peak_abs,
+        rms_dbfs=rms_dbfs,
     )
 
                    
@@ -1170,6 +1286,8 @@ def stop_recording() -> np.ndarray:
 
     global stream, last_audio_capture_info, recording_started_at, recording_monitor_thread
     stop_time = time.perf_counter()
+    # Wake the HUD thread first so it is not stuck in wait(RECORDING_HUD_INTERVAL_S) during stream teardown.
+    recording_monitor_event.set()
     if stream:
         try:
             stream.stop()
@@ -1180,26 +1298,40 @@ def stop_recording() -> np.ndarray:
         except Exception:
             pass
         stream = None
-    recording_monitor_event.set()
     tmon = recording_monitor_thread
     if tmon and tmon.is_alive():
-        tmon.join(timeout=2.0)
+        tmon.join(timeout=RECORDING_HUD_THREAD_JOIN_S)
     recording_monitor_thread = None
     _end_recording_hud_line()
     beep_stop()
     set_terminal_title()
     show_status(
         STATUS_EDGE_INFERENCE,
-        "Local robot on loopback — chewing through this transmission.",
+        take_edge_inference_detail(),
     )
 
     with recording_audio_lock:
         captured_frames = recording_sample_count
         n_chunks = len(audio_chunks)
         to_concat = list(audio_chunks) if audio_chunks else []
+        ssq = recording_sum_sq
+        sc = recording_sample_count
+        pk = recording_peak_abs
 
     wall_seconds = stop_time - recording_started_at if recording_started_at is not None else None
-    last_audio_capture_info = finalize_audio_capture_info(captured_frames, n_chunks, wall_seconds)
+    peak_arg: float | None = None
+    rms_arg: float | None = None
+    if sc and captured_frames:
+        rms = float(np.sqrt(max(0.0, ssq / max(1, sc))))
+        peak_arg = float(pk)
+        rms_arg = rms_to_dbfs(rms)
+    last_audio_capture_info = finalize_audio_capture_info(
+        captured_frames,
+        n_chunks,
+        wall_seconds,
+        peak_abs=peak_arg,
+        rms_dbfs=rms_arg,
+    )
 
     if not to_concat:
         return np.array([], dtype=np.float32)
@@ -1295,17 +1427,17 @@ def transcribe(audio: np.ndarray) -> str:
     wav_buffer = io.BytesIO()
     wavfile.write(wav_buffer, SAMPLE_RATE, audio_int16)
 
-                                                                    
-    if history:
-        history.save_pending_audio(wav_buffer)
+    h = get_transcript_history()
+    if h is not None:
+        h.save_pending_audio(wav_buffer)
 
     wav_buffer.seek(0)
 
     text = transcribe_server(wav_buffer, last_audio_capture_info)
 
-                                    
-    if history and text:
-        history.clear_pending_audio()
+    h2 = get_transcript_history()
+    if h2 is not None and text:
+        h2.clear_pending_audio()
 
     return text
 
@@ -1391,10 +1523,12 @@ def transcribe_and_paste(audio: np.ndarray):
         if is_client_shutting_down():
             return
         if text and not is_hallucination(text):
-            paste_text(" " + text)                                   
-                                          
-            if history:
-                history.add(text)
+            set_spectrum_from_mono_float(audio, SAMPLE_RATE)
+            # Record before paste so /history and replay work even if clipboard or focus/paste fails.
+            h = get_transcript_history()
+            if h is not None:
+                h.add(text)
+            paste_text(" " + text)
             beep_success()
             set_terminal_title()
             show_status(STATUS_VOX_COPY, take_readback())
@@ -1404,8 +1538,9 @@ def transcribe_and_paste(audio: np.ndarray):
             set_terminal_title()
             show_status("❌ NO SPEECH", "Nothing detected")
                                                              
-            if history:
-                history.clear_pending_audio()
+            h_clear = get_transcript_history()
+            if h_clear is not None:
+                h_clear.clear_pending_audio()
     except Exception as e:
         if is_client_shutting_down():
             return
@@ -1440,9 +1575,17 @@ def create_hotkey_handler(hotkey):
         if key != hotkey:
             return
 
-                                            
         now = time.time() * 1000
-        if now - _last_hotkey_time < HOTKEY_DEBOUNCE_MS:
+        with state_lock:
+            st = state
+        if st not in (State.IDLE, State.RECORDING):
+            return
+        debounce = (
+            HOTKEY_DEBOUNCE_PTT_STOP_MS
+            if st == State.RECORDING
+            else HOTKEY_DEBOUNCE_PTT_START_MS
+        )
+        if now - _last_hotkey_time < debounce:
             return
         _last_hotkey_time = now
 
@@ -1458,7 +1601,6 @@ def create_hotkey_handler(hotkey):
                     args=(audio,),
                     daemon=True
                 ).start()
-                                  
 
     return on_press
 
@@ -1473,24 +1615,22 @@ def create_recovery_handler(recovery_key):
             if state != State.IDLE:
                 return                          
 
-        if not history:
+        h = get_transcript_history()
+        if h is None:
             beep_error()
             return
 
-        last_text = history.get_last()
-        if not last_text:
+        rep = h.next_replay_paste()
+        if not rep:
             beep_error()
             show_status("❌ NO HISTORY", "Nothing to replay")
             return
-
-                                                                 
+        last_text, k, n = rep
         target_window = get_active_window()
-
-                                         
         paste_text(" " + last_text)
         beep_success()
         set_terminal_title()
-        show_status(STATUS_VOX_LAST_COPY, last_text[:50])
+        show_status(STATUS_VOX_LAST_COPY, f"Replay {k}/{n} · {last_text[:50]}")
 
     return on_press
 
@@ -1505,11 +1645,12 @@ def create_retry_handler(retry_key):
             if state != State.IDLE:
                 return                        
 
-        if not history:
+        h = get_transcript_history()
+        if h is None:
             beep_error()
             return
 
-        pending = history.get_pending_audio()
+        pending = h.get_pending_audio()
         if not pending:
             beep_error()
             show_status("❌ NO PENDING", "Nothing to re-transmit")
@@ -1522,7 +1663,7 @@ def create_retry_handler(retry_key):
         set_terminal_title()
         show_status(
             STATUS_EDGE_INFERENCE_REXMIT,
-            "Same vox clip — new decode pass on the local wire.",
+            take_edge_inference_rexmit_detail(),
         )
 
         try:
@@ -1531,10 +1672,25 @@ def create_retry_handler(retry_key):
             metrics = last_transcription_metrics
 
             if text and not is_hallucination(text):
+                try:
+                    raw = io.BytesIO(pending)
+                    r_sr, r_data = wavfile.read(raw)
+                    if r_data.ndim > 1:
+                        r_data = r_data.mean(axis=1)
+                    if np.issubdtype(r_data.dtype, np.integer):
+                        arr = (r_data.astype(np.float32) / 32768.0).ravel()
+                    else:
+                        arr = r_data.astype(np.float32).ravel()
+                    set_spectrum_from_mono_float(arr, int(r_sr))
+                except Exception:
+                    pass
+                h2 = get_transcript_history()
+                if h2 is not None:
+                    h2.add(text)
                 paste_text(" " + text)
-                if history:
-                    history.add(text)
-                    history.clear_pending_audio()
+                h3 = get_transcript_history()
+                if h3 is not None:
+                    h3.clear_pending_audio()
                 beep_success()
                 set_terminal_title()
                 show_status(STATUS_VOX_COPY_REXMIT, take_readback_rexmit())
@@ -1542,8 +1698,9 @@ def create_retry_handler(retry_key):
             else:
                 beep_error()
                 show_status("❌ NO SPEECH", "Nothing detected")
-                if history:
-                    history.clear_pending_audio()
+                h4 = get_transcript_history()
+                if h4 is not None:
+                    h4.clear_pending_audio()
         except Exception as e:
             beep_error()
             set_terminal_title()
@@ -1635,7 +1792,15 @@ def print_server_response(title: str, data: dict, raw_json: bool):
     if raw_json:
         print(body)
         return
-    console.print(Panel(body, title=title, title_align="left", border_style="cyan"))
+    console.print(
+        Panel(
+            body,
+            title=title,
+            title_align="left",
+            border_style="cyan",
+            width=voxium_panel_width(console),
+        )
+    )
 
 def run_server_query(args, endpoint: str) -> int:
 
@@ -1671,7 +1836,7 @@ def run_models_command(args) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    table = Table(title="Trusted models (Systran stack — vox path allow-list)")
+    table = Table(title="Trusted models (Systran stack — VOX path allow-list)")
     table.add_column("Model", style="cyan", no_wrap=True)
     table.add_column("Repository", style="green")
     table.add_column("VRAM", justify="right")
@@ -1690,7 +1855,11 @@ def run_client(args, _raw_argv: list[str]) -> int:
     ensure_runtime_dirs()
     config = args
     _telemetry_log_buffer.clear()
-    ptt_status_box = PttSessionStatusBox(console) if not config.minimal else None
+    ptt_status_box = (
+        PttSessionStatusBox(console, standby_context=_standby_telemetry_context)
+        if not config.minimal
+        else None
+    )
     hotkeys_adjusted = apply_runtime_hotkey_safety(config) or getattr(
         config,
         "_config_hotkeys_adjusted",
@@ -1702,7 +1871,12 @@ def run_client(args, _raw_argv: list[str]) -> int:
     atexit.register(lambda: lock_fd.close())
     atexit.register(lambda: server_log_handle.close() if server_log_handle else None)
 
-    history = TranscriptionHistory(max_entries=config.history_limit)
+    _pending_b = int(config.history_pending_mib) * 1024 * 1024
+    history = SessionTranscriptHistory(
+        max_entries=config.history_limit,
+        max_total_chars=config.history_max_chars,
+        max_pending_bytes=_pending_b,
+    )
 
     if not config.quiet and not config.minimal:
         from voxium.startup_banner import show_startup_banner
@@ -1713,7 +1887,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
         cli_log(
             "Adjusted unsupported or duplicate hotkeys; active hotkeys are "
             f"record={config.hotkey.upper()} (PTT), "
-            f"recovery={config.recovery_hotkey.upper()} (replay last transmission), "
+            f"recovery={config.recovery_hotkey.upper()} (cycle replay PTT/VOX transcripts), "
             f"retry={config.retry_hotkey.upper()} (re-transmit).",
             "warning",
         )
@@ -1728,17 +1902,138 @@ def run_client(args, _raw_argv: list[str]) -> int:
     retry_key = get_hotkey(config.retry_hotkey)
     set_terminal_title()
 
+    if ptt_status_box is not None and not config.minimal:
+        ptt_status_box.set_ptt_hotkey_hint(config.hotkey.upper())
+
     if config.minimal:
-        show_status(STATUS_VOX_ON_STATION, f"PTT: {config.hotkey.upper()} to transmit (vox in)")
+        show_status(STATUS_VOX_ON_STATION, f"PTT: {config.hotkey.upper()} to transmit (VOX in)")
     elif not config.quiet:
         show_status(STATUS_VOX_ON_STATION, "Standing by.")
 
-                                     
     record_handler = create_hotkey_handler(hotkey)
     recovery_handler = create_recovery_handler(recovery_key)
     retry_handler = create_retry_handler(retry_key)
 
-    def combined_handler(key):
+    def _slash_refresh_footer(command_active: bool) -> None:
+        if ptt_status_box is None:
+            return
+        ptt_status_box.set_command_line(
+            _slash_buffer,
+            command_active,
+            hints=format_slash_command_hints(_slash_buffer) if command_active else "",
+        )
+
+    def pynput_typed_char(key: object) -> str | None:
+        if key == keyboard.Key.space:
+            return " "
+        if hasattr(key, "char") and key.char and len(key.char) == 1:
+            c = key.char
+            if c.isprintable():
+                return c
+        return None
+
+    def try_handle_slash_input(key: object) -> bool:
+        """True when the key was consumed (slash line / cancel / submit)."""
+        global state, _slash_buffer, _last_hotkey_time, _slash_tab_cycle
+        if config.minimal or ptt_status_box is None or config.quiet:
+            return False
+
+        with state_lock:
+            st = state
+
+        if st == State.COMMAND_INPUT:
+            if key == hotkey:
+                now = time.time() * 1000
+                if now - _last_hotkey_time < HOTKEY_DEBOUNCE_MS:
+                    return True
+                _last_hotkey_time = now
+                with state_lock:
+                    state = State.IDLE
+                _slash_buffer = ""
+                _slash_tab_cycle = 0
+                ptt_status_box.set_command_line("", False)
+                set_terminal_title()
+                return True
+            if key == keyboard.Key.tab:
+                out = apply_slash_tab(_slash_buffer, tab_cycle=_slash_tab_cycle)
+                _slash_buffer = out.new_buffer
+                _slash_tab_cycle = out.tab_cycle
+                _slash_refresh_footer(True)
+                return True
+            if key == keyboard.Key.enter:
+                line = _slash_buffer
+                _slash_buffer = ""
+                _slash_tab_cycle = 0
+                with state_lock:
+                    state = State.IDLE
+                ptt_status_box.set_command_line("", False)
+                needs = slash_data_needs(line)
+                sk: dict = {}
+                if needs.server_gpu:
+                    sk["gpu"] = get_server_gpu_metrics()
+                if needs.mic_capture:
+                    sk["mic_info"] = build_audio_capture_info()
+                out = run_slash_line(
+                    line,
+                    session_model=getattr(config, "model", None),
+                    transcript_history=get_transcript_history(),
+                    **sk,
+                )
+                print_slash_command_downlink(
+                    console, line, out.text, result_rich=out.result_rich
+                )
+                if out.selected_model is not None:
+                    config.model = out.selected_model
+
+                    def _freeze_for_ensure() -> None:
+                        if ptt_status_box is not None and config and not config.minimal:
+                            ptt_status_box.freeze_before_external_output()
+
+                    ensure_model_on_loopback_server(
+                        config.server_url,
+                        console,
+                        out.selected_model,
+                        freeze_for_external_output=_freeze_for_ensure,
+                    )
+                set_terminal_title()
+                return True
+            if key == keyboard.Key.backspace:
+                _slash_tab_cycle = 0
+                if _slash_buffer:
+                    _slash_buffer = _slash_buffer[:-1]
+                with state_lock:
+                    if not _slash_buffer:
+                        state = State.IDLE
+                    command_active = state == State.COMMAND_INPUT
+                if command_active:
+                    _slash_refresh_footer(True)
+                else:
+                    ptt_status_box.set_command_line("", False)
+                return True
+            ch = pynput_typed_char(key)
+            if ch and len(_slash_buffer) < _SLASH_LINE_MAX:
+                _slash_tab_cycle = 0
+                _slash_buffer += ch
+                _slash_refresh_footer(True)
+            return True
+
+        if st == State.IDLE:
+            ch0 = pynput_typed_char(key)
+            if ch0 == "/":
+                with state_lock:
+                    if state != State.IDLE:
+                        return False
+                    state = State.COMMAND_INPUT
+                _slash_buffer = "/"
+                _slash_tab_cycle = 0
+                _slash_refresh_footer(True)
+                return True
+
+        return False
+
+    def combined_handler(key: object) -> None:
+        if try_handle_slash_input(key):
+            return
         record_handler(key)
         recovery_handler(key)
         retry_handler(key)

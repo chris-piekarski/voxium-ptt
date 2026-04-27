@@ -7,10 +7,12 @@ import os
 import signal
 import shutil
 import sys
+import io
 import tempfile
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -77,6 +79,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 from huggingface_hub import snapshot_download
+from pydantic import BaseModel
+from tqdm import tqdm
 
 from voxium.model_registry import (
     DEFAULT_MODEL_NAME,
@@ -690,6 +694,27 @@ class GpuMetricsSampler:
             "energy_wh_estimate": _round_optional(energy_wh, 6),
         }
 
+
+def gpu_metrics_dict_from_probe_snapshot(snap: dict, provider: str) -> dict:
+    """One probe snapshot in the same shape as transcribe response ``metrics[\"gpu\"]``."""
+    u = snap.get("utilization_percent")
+    v_used = snap.get("vram_used_mb")
+    pw = snap.get("power_watts")
+    return {
+        "provider": provider,
+        "name": snap.get("name"),
+        "sample_count": 1,
+        "vram_used_peak_mb": _round_optional(v_used, 1),
+        "vram_total_mb": _round_optional(snap.get("vram_total_mb"), 1),
+        "utilization_avg_percent": _round_optional(u, 1),
+        "utilization_peak_percent": _round_optional(u, 1),
+        "power_avg_watts": _round_optional(pw, 2),
+        "power_peak_watts": _round_optional(pw, 2),
+        "power_limit_watts": _round_optional(snap.get("power_limit_watts"), 2),
+        "temperature_peak_c": _round_optional(snap.get("temperature_c"), 1),
+        "energy_wh_estimate": None,
+    }
+
                           
 def sanitize_metadata_value(value, depth: int = 0):
 
@@ -760,13 +785,65 @@ _HF_MODEL_ALLOW_PATTERNS = [
     "vocabulary.*",
 ]
 
+_vox_hf_progress_sink: Callable[[str], None] | None = None
 
-def _download_hf_snapshot_to_models_dir(repo_id: str, model_label: str) -> str:
+
+def _set_hf_progress_sink(sink: Callable[[str], None] | None) -> None:
+    global _vox_hf_progress_sink
+    _vox_hf_progress_sink = sink
+
+
+class VoxiumHubTqdm(tqdm):
+    """tqdm for huggingface_hub: mirror progress to operator sink or stderr."""
+
+    def __init__(self, *args, **kwargs):
+        if _vox_hf_progress_sink is not None:
+            kwargs = dict(kwargs)
+            kwargs.setdefault("file", io.StringIO())
+        super().__init__(*args, **kwargs)
+
+    def update(self, n=1):  # type: ignore[override]
+        r = super().update(n)
+        sink = _vox_hf_progress_sink
+        if sink is not None and getattr(self, "total", None):
+            try:
+                t = float(self.total)
+                if t > 0:
+                    n_done = float(self.n)
+                    pct = 100.0 * n_done / t
+                    desc = (self.desc or "file").strip()
+                    sink(f"{desc}  {pct:.0f}%")
+            except Exception:
+                pass
+        return r
+
+
+_model_key_locks: dict[tuple[str, str, str], threading.Lock] = {}
+_model_key_locks_main = threading.Lock()
+
+_ensure_jobs: dict[str, dict[str, Any]] = {}
+_ensure_jobs_lock = threading.Lock()
+_active_ensure_by_key: dict[tuple[str, str, str], str] = {}
+
+
+def _lock_for_model_key(key: tuple[str, str, str]) -> threading.Lock:
+    with _model_key_locks_main:
+        if key not in _model_key_locks:
+            _model_key_locks[key] = threading.Lock()
+        return _model_key_locks[key]
+
+
+def _download_hf_snapshot_to_models_dir(
+    repo_id: str,
+    model_label: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> str:
     """
     Run Hugging Face snapshot download with Voxium logging. Progress uses the
     default HF tqdm (stderr; merged into the server log when stderr is combined
-    with stdout in the parent process), then return the on-disk snapshot path
-    for WhisperModel(model_path, ...).
+    with stdout in the parent process) unless ``progress`` is set — then tqdm
+    also feeds the Downlink / ensure-model job, copy.
     """
     root = models_dir()
     root_abs = str(root.resolve())
@@ -776,12 +853,20 @@ def _download_hf_snapshot_to_models_dir(repo_id: str, model_label: str) -> str:
         repo_id,
     )
     logger.info("Voxium: local model / Hub cache root (see hub layout under this path): %s", root_abs)
-    snapshot_path = snapshot_download(
-        repo_id,
-        local_files_only=False,
-        allow_patterns=_HF_MODEL_ALLOW_PATTERNS,
-        cache_dir=root_abs,
-    )
+    tqdm_class = VoxiumHubTqdm if progress is not None else tqdm
+    try:
+        if progress is not None:
+            _set_hf_progress_sink(progress)
+        snapshot_path = snapshot_download(
+            repo_id,
+            local_files_only=False,
+            allow_patterns=_HF_MODEL_ALLOW_PATTERNS,
+            cache_dir=root_abs,
+            tqdm_class=tqdm_class,
+        )
+    finally:
+        if progress is not None:
+            _set_hf_progress_sink(None)
     snap_abs = str(Path(snapshot_path).resolve())
     logger.info("Voxium: Hugging Face snapshot available on disk: %s", snap_abs)
     return snapshot_path
@@ -796,12 +881,21 @@ def get_whisper_model_class():
         _whisper_model_class = WhisperModel
     return _whisper_model_class
 
-def get_model(name: str, device: str, compute: str):
+def get_model(
+    name: str,
+    device: str,
+    compute: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+):
 
     model_name = validate_model_name(name)
     repo_id = resolve_model_repo(model_name)
     key = (model_name, device, compute)
-    if key not in _models:
+    lock = _lock_for_model_key(key)
+    with lock:
+        if key in _models:
+            return _models[key]
         whisper_model = get_whisper_model_class()
         logger.info(
             "Voxium: loading model %r repo_id=%r (device=%s, compute=%s); "
@@ -811,7 +905,11 @@ def get_model(name: str, device: str, compute: str):
             device,
             compute,
         )
-        model_path = _download_hf_snapshot_to_models_dir(repo_id, model_name)
+        model_path = _download_hf_snapshot_to_models_dir(
+            repo_id, model_name, progress=progress
+        )
+        if progress:
+            progress("Loading model into memory (CTranslate2), copy.")
         _models[key] = whisper_model(
             model_path,
             device=device,
@@ -868,6 +966,48 @@ async def global_exception_handler(_request: Request, exc: Exception):
     )
 
                    
+class EnsureModelBody(BaseModel):
+    model: str
+
+
+def _run_ensure_model_job(job_id: str, model_name: str, key: tuple[str, str, str]) -> None:
+    def progress(msg: str) -> None:
+        one = (msg or "").strip().replace("\n", " ")
+        if len(one) > 240:
+            one = one[:237] + "…"
+        with _ensure_jobs_lock:
+            if job_id in _ensure_jobs:
+                _ensure_jobs[job_id]["progress_line"] = one
+
+    try:
+        with _ensure_jobs_lock:
+            if job_id in _ensure_jobs:
+                _ensure_jobs[job_id]["status"] = "running"
+                _ensure_jobs[job_id]["progress_line"] = (
+                    "Starting Hugging Face fetch for this model, copy."
+                )
+        get_model(model_name, config.device, config.compute, progress=progress)
+    except Exception as e:
+        logger.error("Voxium: ensure-model job failed: %s", e, exc_info=True)
+        with _ensure_jobs_lock:
+            if job_id in _ensure_jobs:
+                _ensure_jobs[job_id]["status"] = "error"
+                _ensure_jobs[job_id]["error"] = str(e)
+                _ensure_jobs[job_id]["done"] = True
+    else:
+        with _ensure_jobs_lock:
+            if job_id in _ensure_jobs:
+                _ensure_jobs[job_id]["status"] = "ready"
+                _ensure_jobs[job_id]["done"] = True
+                _ensure_jobs[job_id]["progress_line"] = (
+                    "Model on disk and loaded — ready for PTT, copy."
+                )
+    finally:
+        with _ensure_jobs_lock:
+            if _active_ensure_by_key.get(key) == job_id:
+                del _active_ensure_by_key[key]
+
+
 @app.get("/health")
 def health():
 
@@ -890,6 +1030,66 @@ def health():
         "faster_whisper": faster_whisper_distribution_info,
     }
 
+
+@app.post("/ensure-model")
+def ensure_model_start(body: EnsureModelBody):
+    if config is None:
+        raise HTTPException(503, "Voxium: server not ready")
+    try:
+        m = validate_model_name(body.model)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    key: tuple[str, str, str] = (m, config.device, config.compute)
+    if key in _models:
+        return {
+            "status": "ready",
+            "model": m,
+            "message": f"Model {m!r} is already loaded on this /transcribe server, copy.",
+        }
+    with _ensure_jobs_lock:
+        if key in _active_ensure_by_key:
+            jid = _active_ensure_by_key[key]
+            return JSONResponse(
+                status_code=202,
+                content={"status": "pending", "job_id": jid, "model": m, "reused": True},
+            )
+        job_id = uuid.uuid4().hex[:12]
+        _ensure_jobs[job_id] = {
+            "model": m,
+            "status": "pending",
+            "progress_line": "Queued — local server will pull from Hugging Face, copy.",
+            "error": None,
+            "done": False,
+        }
+        _active_ensure_by_key[key] = job_id
+    t = threading.Thread(
+        target=_run_ensure_model_job,
+        args=(job_id, m, key),
+        daemon=True,
+        name=f"voxium-ensure-model-{job_id}",
+    )
+    t.start()
+    return JSONResponse(
+        status_code=202,
+        content={"status": "pending", "job_id": job_id, "model": m},
+    )
+
+
+@app.get("/ensure-model/jobs/{job_id}")
+def ensure_model_job_status(job_id: str):
+    with _ensure_jobs_lock:
+        j = _ensure_jobs.get(job_id)
+    if not j:
+        raise HTTPException(404, f"Unknown job_id {job_id!r}, copy.")
+    return {
+        "status": j.get("status"),
+        "model": j.get("model"),
+        "lines": j.get("lines") or [],
+        "progress_line": j.get("progress_line"),
+        "error": j.get("error"),
+        "done": bool(j.get("done")),
+    }
+
 @app.get("/stats")
 def get_stats():
 
@@ -901,6 +1101,26 @@ def get_stats():
         "gpu_metrics_provider": gpu_probe.provider if gpu_probe else None,
         "faster_whisper": faster_whisper_distribution_info,
     }
+
+
+@app.get("/gpu")
+def get_gpu_snapshot():
+
+    if not gpu_probe or not gpu_probe.available:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "gpu_metrics_unavailable",
+                "reason": gpu_probe.unavailable_reason if gpu_probe else "no probe",
+            },
+        )
+    snap = gpu_probe.snapshot()
+    if not snap:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "gpu_snapshot_failed", "reason": "probe returned no data"},
+        )
+    return {"gpu": gpu_metrics_dict_from_probe_snapshot(snap, gpu_probe.provider)}
 
 @app.post("/transcribe")
 async def transcribe(
@@ -1143,7 +1363,7 @@ Examples:
 
     logger.info(
         f"Voxium: launch — /transcribe at http://{args.host}:{args.port} "
-        f"(PTT on client; vox over loopback here)"
+        f"(PTT on client; VOX over loopback here)"
     )
     logger.info(f"Voxium: config model={args.model} device={args.device} vad={config.vad_enabled} timeout={args.timeout}s")
     if gpu_probe.available:

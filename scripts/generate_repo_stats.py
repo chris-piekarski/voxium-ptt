@@ -37,7 +37,6 @@ IGNORE_DIRS = {
     ".eggs",
     "logs",
     "models",
-    "history",
     "node_modules",
     ".codex",
 }
@@ -217,7 +216,7 @@ def generate_markdown(stats: dict[str, Any]) -> str:
             "",
             "_Note: “Code LOC” is non-blank lines minus line-leading `#` comments (where applicable for that extension). "
             "Python virtualenvs (dirs named `venv/`, `env/`, and any `.venv*`) and runtime data dirs "
-            "(`models/`, `history/`, `logs/`, …) are excluded from scans._",
+            "(`models/`, `logs/`, …) are excluded from scans._",
         ]
     )
     return "\n".join(parts_out)

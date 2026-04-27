@@ -1,12 +1,12 @@
 # Voxium architecture
 
-This document describes how **Voxium 0.0.1** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **vox** flow becomes text, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus **Apollo**-era “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **robot** automation (inference) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
+This document describes how **Voxium 0.0.1** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **VOX** flow becomes text, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus **Apollo**-era “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **robot** automation (inference) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
 
 ---
 
 ## 1. System context
 
-Voxium is **local-first** **PTT** voice: the user runs a **client**; when possible a **local HTTP** worker (faster-whisper / CTranslate2) on the same machine does **/transcribe** only on **loopback** — a **vox** path with no cloud in the product pipeline.
+Voxium is **local-first** **PTT** voice: the user runs a **client**; when possible a **local HTTP** worker (faster-whisper / CTranslate2) on the same machine does **/transcribe** only on **loopback** — a **VOX** path with no cloud in the product pipeline.
 
 ```mermaid
 flowchart TB
@@ -18,7 +18,7 @@ flowchart TB
   os[(OS and apps\nclipboard · audio · focus)]
   hf[(Hugging Face\nmodel download optional)]
 
-  user -->|PTT / vox| voxium
+  user -->|PTT/VOX| voxium
   voxium -->|HTTP loopback| worker
   voxium <--> os
   worker <--> os
@@ -68,6 +68,10 @@ flowchart LR
 | Logical area | Current modules (indicative) | Role |
 |--------------|--------------------------------|------|
 | **CLI & run loop** | `voxium.app` (argparse, `run`, hotkeys) · entry: `voxium` / `python -m voxium` | User entry, spawns or reuses local server. |
+| **Session UI** | `voxium.console_status`, `voxium.recording_ui` | Green **Voxium** panel (Rich), on-station line, live PTT HUD + waveform strip. |
+| **Standby & path** | `voxium.standby_fft`, `voxium.standby_telemetry` | rFFT strip of last good take (animated, display-only), standby detail line. |
+| **In-RAM transcripts** | `voxium.session_history` | Bounded PTT/VOX text list for this process; **`/history`** — not persisted under a repo `history/` directory. |
+| **Slash & disk readouts** | `voxium.slash_commands`, `voxium.slash_complete`, `voxium.disk_usage_report` | ` /` downlink commands, tab completion, `make disk-usage` / `/disk` for `models/` and `logs/`. |
 | **Local server** | `voxium.whisper_server` | FastAPI, `/transcribe`, model load, metrics. |
 | **Trusted models** | `voxium.model_registry` | Allow-list and repo resolution for Systran models. |
 | **Config** | `voxium.config` (`VoxiumUserConfig`) | YAML at `~/.config/voxium/config.yaml` validated on load. |
@@ -95,9 +99,11 @@ sequenceDiagram
   Client->>Server: POST multipart (WAV) loopback
   Server->>Server: faster-whisper infer
   Server-->>Client: JSON + text
-  Client->>OS: Paste + optional history
+  Client->>OS: Paste + in-RAM session log (this process)
   OS-->>User: Text appears
 ```
+
+**Transcripts** for **`/history`**, F8 replay, and related flows live **only in RAM for the client process** (bounded by config). The product does **not** write a transcript log to a `history/` folder under the repository.
 
 **Errors** (500 from server, missing CUDA DLLs, etc.) are surfaced in the **client UI** and in **`voxium_server.log`**; see the main README troubleshooting section.
 
@@ -116,10 +122,14 @@ flowchart TB
   end
   subgraph srcpkg["src/voxium/"]
     app[app · client & CLI wiring]
+    ui[console_status · recording_ui]
+    st[standby_* · session_history · slash_*]
     srv[whisper_server]
     mreg[model_registry]
     cfg[config]
   end
+  app --> ui
+  app --> st
   t --> app
   t --> mreg
   sc --> p
@@ -156,5 +166,5 @@ Effective configuration is merged from (conceptually, in order of override):
 
 ## 6. Related reading
 
-- [testing.md](testing.md) — **95% coverage** gate, `make test-cov`, markers.
+- [testing.md](testing.md) — coverage **fail-under** gate (see `pyproject.toml`), `make test-cov`, markers.
 - Top-level [README.md](../README.md) — user-facing install and run.

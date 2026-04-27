@@ -53,3 +53,9 @@ def test_hotkey_config_changed_true_when_mismatch():
     clean = sanitize_hotkey_config({})
     source = {**clean, "record": "f12"}
     assert hotkey_config_changed(source, clean) is True
+
+
+def test_hotkey_config_changed_false_when_all_match_sanitized():
+    clean = sanitize_hotkey_config({})
+    source = {action: clean[action] for action in ("record", "recovery", "retry")}
+    assert hotkey_config_changed(source, clean) is False

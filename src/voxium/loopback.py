@@ -41,6 +41,10 @@ def get_health_url(server_url: str) -> str:
     return get_server_endpoint_url(server_url, "health")
 
 
+def get_gpu_url(server_url: str) -> str:
+    return get_server_endpoint_url(server_url, "gpu")
+
+
 def get_server_listen_args(server_url: str) -> tuple[str, str]:
     parsed = urlparse(server_url)
     host = parsed.hostname or "127.0.0.1"
