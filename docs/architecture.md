@@ -68,7 +68,8 @@ flowchart LR
 | Logical area | Current modules (indicative) | Role |
 |--------------|--------------------------------|------|
 | **CLI & run loop** | `voxium.app` (argparse, `run`, hotkeys) · entry: `voxium` / `python -m voxium` | User entry, spawns or reuses local server. |
-| **Session UI** | `voxium.console_status`, `voxium.recording_ui` | Green **Voxium** panel (Rich), on-station line, live PTT HUD + waveform strip. |
+| **Session UI** | `voxium.console_status`, `voxium.recording_ui` | Green **Voxium** panel (Rich), on-station line, live PTT / **VOX** HUD + waveform strip; fresh panel per on-station or VOX listen cycle. |
+| **VOX chunking** | `voxium.vox_chunker` | RMS / hangover utterance segmentation for open-mic mode (testable pure logic). |
 | **Standby & path** | `voxium.standby_fft`, `voxium.standby_telemetry` | rFFT strip of last good take (animated, display-only), standby detail line. |
 | **In-RAM transcripts** | `voxium.session_history` | Bounded PTT/VOX text list for this process; **`/history`** — not persisted under a repo `history/` directory. |
 | **Slash & disk readouts** | `voxium.slash_commands`, `voxium.slash_complete`, `voxium.disk_usage_report` | ` /` downlink commands, tab completion, `make disk-usage` / `/disk` for `models/` and `logs/`. |
@@ -106,6 +107,28 @@ sequenceDiagram
 **Transcripts** for **`/history`**, F8 replay, and related flows live **only in RAM for the client process** (bounded by config). The product does **not** write a transcript log to a `history/` folder under the repository.
 
 **Errors** (500 from server, missing CUDA DLLs, etc.) are surfaced in the **client UI** and in **`voxium_server.log`**; see the main README troubleshooting section.
+
+### 3.1 VOX (open mic) path
+
+**VOX** mode keeps a **continuous** capture stream (separate from PTT’s key-gated stream). Audio is fed to **`voxium.vox_chunker.UtteranceChunker`**, which emits mono utterance buffers when RMS-based end-pointing fires (hangover silence; threshold hysteresis so there is no dead band between “speech” and “silence”). Each chunk can be gated with **`speech_guards.has_speech`** before HTTP **POST** to **`/transcribe`**, same as PTT. The green **Voxium** panel treats **VOX re-arm** (listen again after copy) like **on station**: a **new** one-step `Live` block so scrollback stays one readable block per cycle—see `voxium.console_status` (`vox_open_listening_starts_fresh_panel`, `standing_by_ready_starts_new_panel`). Mode changes are echoed in the **violet downlink**, not merged into the green session steps.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant Mic as Open mic stream
+  participant Chunk as vox_chunker
+  participant Client as voxium.app
+  participant Server as Local /transcribe
+
+  User->>Client: Mode hotkey → VOX (armed)
+  loop While VOX on
+    Mic->>Chunk: PCM frames
+    Chunk->>Client: Utterance buffer (end-pointed)
+    Client->>Server: POST WAV (loopback)
+    Server-->>Client: JSON text
+    Client->>User: Clipboard + paste target window
+  end
+```
 
 ---
 

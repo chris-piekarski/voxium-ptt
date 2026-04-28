@@ -14,6 +14,12 @@ def test_is_hallucination_single_word_filler():
     assert is_hallucination(" no ") is True  # HALLUCINATION_WORDS
 
 
+def test_is_hallucination_whole_token_len_at_least_three() -> None:
+    """``t in HALLUCINATION_WORDS`` after length check (e.g. ``yes`` / ``yep`` are 3+ chars)."""
+    assert is_hallucination("yes") is True
+    assert is_hallucination("yep") is True
+
+
 def test_is_hallucination_phrase_in_short_text():
     assert is_hallucination("  Thanks for watching! ") is True
 

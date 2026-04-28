@@ -16,10 +16,11 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class _Entry:
     text: str
+    source: str = "ptt"  # "ptt" | "vox"
 
 
 class SessionTranscriptHistory:
-    """Session-scoped transcript ring + optional pending WAV bytes for F7 re-xmit.
+    """Session-scoped transcript ring + optional pending WAV bytes for re-transmit (default F6).
 
     .. note:: Implements ``__len__``; an *empty* buffer is falsy in boolean context.
        Callers that need “handle exists” (vs. None) must use ``h is not None``, not ``if h``.
@@ -46,13 +47,14 @@ class SessionTranscriptHistory:
         with self._lock:
             return len(self._entries)
 
-    def add(self, text: str) -> None:
+    def add(self, text: str, *, source: str = "ptt") -> None:
         """Append one transcription; resets replay cursor to latest-first."""
         t = text or ""
         if not t.strip():
             return
         if len(t) > self._max_total_chars:
             t = t[: self._max_total_chars]
+        src = "vox" if (source or "").lower() == "vox" else "ptt"
         new_chars = len(t)
         with self._lock:
             self._replay_cursor = 0
@@ -61,7 +63,7 @@ class SessionTranscriptHistory:
                 or self._char_count + new_chars > self._max_total_chars
             ):
                 self._pop_oldest()
-            self._entries.append(_Entry(text=t))
+            self._entries.append(_Entry(text=t, source=src))
             self._char_count += new_chars
 
     def _pop_oldest(self) -> None:
@@ -108,7 +110,7 @@ class SessionTranscriptHistory:
                     "  Short or junk-like text is filtered — use a clear phrase to get a line here."
                 )
             lines: list[str] = [
-                "  #1 = most recent PTT; higher # = older, copy.",
+                "  #1 = most recent; higher # = older — [PTT] = push-to-talk, [VOX] = open-mic utterance, copy.",
                 "",
             ]
             rev = list(reversed(self._entries))
@@ -117,7 +119,8 @@ class SessionTranscriptHistory:
                 t = e.text.replace("\n", " ").strip()
                 if len(t) > preview_chars:
                     t = t[: preview_chars - 1] + "…"
-                lines.append(f"  📋  #{i}  {t}")
+                tag = "VOX" if getattr(e, "source", "ptt") == "vox" else "PTT"
+                lines.append(f"  📋  #{i}  [{tag}]  {t}")
             lines.append("")
             tail = ""
             if len(rev) > max_lines:
@@ -178,7 +181,11 @@ class SessionTranscriptHistory:
         ]
         shown = matches[:max_lines]
         for display_num, prev in shown:
-            lines.append(f"  📋  #{display_num}  {prev}")
+            e = self._entries[-display_num] if 1 <= display_num <= len(self._entries) else None
+            tag = "PTT"
+            if e is not None and getattr(e, "source", "ptt") == "vox":
+                tag = "VOX"
+            lines.append(f"  📋  #{display_num}  [{tag}]  {prev}")
         lines.append("")
         tail = ""
         if len(matches) > max_lines:

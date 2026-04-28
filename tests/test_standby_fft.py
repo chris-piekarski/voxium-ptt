@@ -2,6 +2,7 @@
 
 import numpy as np
 
+import voxium.standby_fft as standby_fft
 from voxium.standby_fft import (
     SPECTRUM_BARS,
     SPECTRUM_DISPLAY_WIDTH,
@@ -17,6 +18,32 @@ def test_flat_line_if_too_short() -> None:
     line = get_spectrum_display_line()
     assert len(line) == SPECTRUM_DISPLAY_WIDTH
     assert line == SPECTRUM_BARS[0] * SPECTRUM_DISPLAY_WIDTH
+
+
+def test_spectrum_line_uses_flat_when_stored_mags_wrong_width() -> None:
+    """If the stored mag vector is the wrong width, the tick renderer falls back to a flat row."""
+    standby_fft.reset_spectrum_state()
+    standby_fft._last_spectrum_mags = np.ones(7, dtype=np.float64)  # noqa: SLF001
+    try:
+        assert spectrum_line_for_tick(0) == SPECTRUM_BARS[0] * SPECTRUM_DISPLAY_WIDTH
+    finally:
+        standby_fft.reset_spectrum_state()
+
+
+def test_set_spectrum_truncates_very_long_audio() -> None:
+    """``n > _MAX_FFT_SAMPLES`` path uses the tail of the buffer only."""
+    standby_fft.reset_spectrum_state()
+    n = 290_000  # noqa: SLF001 — above _MAX_FFT_SAMPLES (240k)
+    sr = 16_000
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    x = 0.1 * np.sin(2.0 * np.pi * 440.0 * t)
+    try:
+        set_spectrum_from_mono_float(x, sr)
+        line = get_spectrum_display_line()
+        assert len(line) == SPECTRUM_DISPLAY_WIDTH
+        assert not all(c == SPECTRUM_BARS[0] for c in line)
+    finally:
+        standby_fft.reset_spectrum_state()
 
 
 def test_sine_energy_peaks_toward_band() -> None:
