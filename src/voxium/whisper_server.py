@@ -20,10 +20,13 @@ from typing import Any, Dict, Tuple
 import uuid
 
 if __name__ == "__main__":
-    print("This module is internal — use: voxium server --help (PTT path is voxium run).", file=sys.stderr)
+    print(
+        "This module is internal — use: voxium server --help (PTT path is voxium run).",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
-                                                                    
+
 _DLL_DIR_HANDLES = []
 
 
@@ -72,6 +75,7 @@ def _setup_cuda_paths():
     else:
         _prepend_env_paths("LD_LIBRARY_PATH", candidates)
 
+
 _setup_cuda_paths()
 
 import ctranslate2
@@ -92,32 +96,29 @@ from voxium.loopback import is_loopback_host, normalize_loopback_host
 from voxium.model_arg import trusted_model_arg
 from voxium.paths import ensure_runtime_dirs, models_dir
 
-                       
 DEFAULT_MODEL = os.getenv("WHISPER_MODEL", DEFAULT_MODEL_NAME)
 DEFAULT_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 DEFAULT_COMPUTE = os.getenv("WHISPER_COMPUTE", "float16")
 EXPECTED_FASTER_WHISPER_HOME = "https://github.com/SYSTRAN/faster-whisper"
 
-                 
+
 def setup_logging(level: str = "INFO") -> logging.Logger:
 
     logger = logging.getLogger("voxium_whisper_server")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-                             
     logger.handlers.clear()
 
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+        "%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
     return logger
 
-                      
+
 @dataclass
 class ServerStats:
 
@@ -175,30 +176,45 @@ class ServerStats:
             self.model_sampled_request_count += 1
             self.decoder_tokens_generated += model.get("decoder_tokens") or 0
             self.output_words_generated += model.get("output_words") or 0
-            self.input_audio_frames_estimate += model.get("input_audio_frames_estimate") or 0
-            self.total_duration_after_vad_seconds += model.get("duration_after_vad_seconds") or 0.0
+            self.input_audio_frames_estimate += (
+                model.get("input_audio_frames_estimate") or 0
+            )
+            self.total_duration_after_vad_seconds += (
+                model.get("duration_after_vad_seconds") or 0.0
+            )
             self.total_vad_removed_seconds += model.get("vad_removed_seconds") or 0.0
 
             avg_logprob = model.get("avg_logprob")
             avg_no_speech = model.get("avg_no_speech_prob")
             avg_compression = model.get("avg_compression_ratio")
-            if avg_logprob is not None or avg_no_speech is not None or avg_compression is not None:
+            if (
+                avg_logprob is not None
+                or avg_no_speech is not None
+                or avg_compression is not None
+            ):
                 self.quality_sample_count += 1
             if avg_logprob is not None:
                 self.logprob_sample_count += 1
                 self.total_avg_logprob += avg_logprob
                 min_logprob = model.get("min_avg_logprob")
                 if min_logprob is not None:
-                    if self.min_avg_logprob is None or min_logprob < self.min_avg_logprob:
+                    if (
+                        self.min_avg_logprob is None
+                        or min_logprob < self.min_avg_logprob
+                    ):
                         self.min_avg_logprob = min_logprob
             if avg_no_speech is not None:
                 self.no_speech_sample_count += 1
                 self.total_avg_no_speech_prob += avg_no_speech
-                self._update_peak("peak_no_speech_prob", model.get("max_no_speech_prob"))
+                self._update_peak(
+                    "peak_no_speech_prob", model.get("max_no_speech_prob")
+                )
             if avg_compression is not None:
                 self.compression_sample_count += 1
                 self.total_avg_compression_ratio += avg_compression
-                self._update_peak("peak_compression_ratio", model.get("max_compression_ratio"))
+                self._update_peak(
+                    "peak_compression_ratio", model.get("max_compression_ratio")
+                )
 
         gpu = metrics.get("gpu")
         if gpu:
@@ -208,7 +224,9 @@ class ServerStats:
                 self.gpu_energy_sampled_request_count += 1
                 self.total_gpu_energy_wh += energy_wh
             self._update_peak("peak_vram_used_mb", gpu.get("vram_used_peak_mb"))
-            self._update_peak("peak_gpu_utilization_percent", gpu.get("utilization_peak_percent"))
+            self._update_peak(
+                "peak_gpu_utilization_percent", gpu.get("utilization_peak_percent")
+            )
             self._update_peak("peak_power_watts", gpu.get("power_peak_watts"))
             self._update_peak("peak_temperature_c", gpu.get("temperature_peak_c"))
 
@@ -317,20 +335,35 @@ class ServerStats:
                 "decoder_tokens_generated": self.decoder_tokens_generated,
                 "output_words_generated": self.output_words_generated,
                 "input_audio_frames_estimate": self.input_audio_frames_estimate,
-                "total_duration_after_vad_seconds": round(self.total_duration_after_vad_seconds, 1),
+                "total_duration_after_vad_seconds": round(
+                    self.total_duration_after_vad_seconds, 1
+                ),
                 "total_vad_removed_seconds": round(self.total_vad_removed_seconds, 1),
-                "avg_tokens_per_audio_second": round(self.avg_tokens_per_audio_second, 3),
-                "avg_tokens_per_inference_second": round(self.avg_tokens_per_inference_second, 3),
+                "avg_tokens_per_audio_second": round(
+                    self.avg_tokens_per_audio_second, 3
+                ),
+                "avg_tokens_per_inference_second": round(
+                    self.avg_tokens_per_inference_second, 3
+                ),
                 "quality_sample_count": self.quality_sample_count,
-                "avg_logprob": _round_optional(self._avg_quality(self.total_avg_logprob, self.logprob_sample_count), 4),
+                "avg_logprob": _round_optional(
+                    self._avg_quality(
+                        self.total_avg_logprob, self.logprob_sample_count
+                    ),
+                    4,
+                ),
                 "min_avg_logprob": self.min_avg_logprob,
                 "avg_no_speech_prob": _round_optional(
-                    self._avg_quality(self.total_avg_no_speech_prob, self.no_speech_sample_count),
+                    self._avg_quality(
+                        self.total_avg_no_speech_prob, self.no_speech_sample_count
+                    ),
                     4,
                 ),
                 "peak_no_speech_prob": self.peak_no_speech_prob,
                 "avg_compression_ratio": _round_optional(
-                    self._avg_quality(self.total_avg_compression_ratio, self.compression_sample_count),
+                    self._avg_quality(
+                        self.total_avg_compression_ratio, self.compression_sample_count
+                    ),
                     4,
                 ),
                 "peak_compression_ratio": self.peak_compression_ratio,
@@ -358,7 +391,7 @@ class ServerStats:
             },
         }
 
-                       
+
 @dataclass
 class ServerConfig:
 
@@ -372,7 +405,7 @@ class ServerConfig:
     gpu_metrics_enabled: bool
     metrics_sample_interval: float
 
-                     
+
 def _as_float(value) -> float | None:
 
     if value is None:
@@ -385,11 +418,13 @@ def _as_float(value) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
 def _round_optional(value: float | None, digits: int = 3) -> float | None:
 
     if value is None:
         return None
     return round(value, digits)
+
 
 def _avg(values: list[float | None]) -> float | None:
 
@@ -397,6 +432,7 @@ def _avg(values: list[float | None]) -> float | None:
     if not clean:
         return None
     return sum(clean) / len(clean)
+
 
 def _weighted_avg(values: list[float | None], weights: list[int]) -> float | None:
 
@@ -412,6 +448,7 @@ def _weighted_avg(values: list[float | None], weights: list[int]) -> float | Non
         return None
     return total / weight_total
 
+
 def _as_optional_float(value) -> float | None:
 
     if value is None:
@@ -420,6 +457,7 @@ def _as_optional_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
 
 def build_model_metrics(
     model_name: str,
@@ -448,25 +486,38 @@ def build_model_metrics(
         else:
             output_words += len((getattr(segment, "text", "") or "").split())
 
-    avg_logprobs = [_as_optional_float(getattr(segment, "avg_logprob", None)) for segment in segments]
-    no_speech_probs = [_as_optional_float(getattr(segment, "no_speech_prob", None)) for segment in segments]
-    compression_ratios = [_as_optional_float(getattr(segment, "compression_ratio", None)) for segment in segments]
-    temperatures = sorted({
-        round(value, 3)
-        for value in (
-            _as_optional_float(getattr(segment, "temperature", None))
-            for segment in segments
-        )
-        if value is not None
-    })
+    avg_logprobs = [
+        _as_optional_float(getattr(segment, "avg_logprob", None))
+        for segment in segments
+    ]
+    no_speech_probs = [
+        _as_optional_float(getattr(segment, "no_speech_prob", None))
+        for segment in segments
+    ]
+    compression_ratios = [
+        _as_optional_float(getattr(segment, "compression_ratio", None))
+        for segment in segments
+    ]
+    temperatures = sorted(
+        {
+            round(value, 3)
+            for value in (
+                _as_optional_float(getattr(segment, "temperature", None))
+                for segment in segments
+            )
+            if value is not None
+        }
+    )
 
     top_languages = []
     all_language_probs = getattr(info, "all_language_probs", None) or []
     for language, probability in list(all_language_probs)[:5]:
-        top_languages.append({
-            "language": language,
-            "probability": _round_optional(_as_optional_float(probability), 4),
-        })
+        top_languages.append(
+            {
+                "language": language,
+                "probability": _round_optional(_as_optional_float(probability), 4),
+            }
+        )
 
     tokens_per_audio_second = None
     if audio_duration and audio_duration > 0:
@@ -494,16 +545,22 @@ def build_model_metrics(
         "duration_after_vad_seconds": _round_optional(duration_after_vad, 3),
         "vad_removed_seconds": _round_optional(vad_removed, 3),
         "vad_removed_percent": _round_optional(vad_removed_percent, 2),
-        "input_audio_frames_estimate": int(round(audio_duration * 100)) if audio_duration else None,
+        "input_audio_frames_estimate": (
+            int(round(audio_duration * 100)) if audio_duration else None
+        ),
         "decoder_tokens": decoder_tokens,
         "output_words": output_words,
         "tokens_per_audio_second": _round_optional(tokens_per_audio_second, 3),
         "tokens_per_inference_second": _round_optional(tokens_per_inference_second, 3),
         "chars_per_token": _round_optional(chars_per_token, 3),
         "avg_logprob": _round_optional(_weighted_avg(avg_logprobs, token_counts), 4),
-        "min_avg_logprob": _round_optional(min((v for v in avg_logprobs if v is not None), default=None), 4),
+        "min_avg_logprob": _round_optional(
+            min((v for v in avg_logprobs if v is not None), default=None), 4
+        ),
         "avg_no_speech_prob": _round_optional(_avg(no_speech_probs), 4),
-        "max_no_speech_prob": _round_optional(max((v for v in no_speech_probs if v is not None), default=None), 4),
+        "max_no_speech_prob": _round_optional(
+            max((v for v in no_speech_probs if v is not None), default=None), 4
+        ),
         "avg_compression_ratio": _round_optional(_avg(compression_ratios), 4),
         "max_compression_ratio": _round_optional(
             max((v for v in compression_ratios if v is not None), default=None),
@@ -511,6 +568,7 @@ def build_model_metrics(
         ),
         "temperature_values": temperatures,
     }
+
 
 class GpuProbe:
 
@@ -526,6 +584,7 @@ class GpuProbe:
 
         try:
             import pynvml
+
             pynvml.nvmlInit()
             self._pynvml = pynvml
             self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -573,11 +632,15 @@ class GpuProbe:
             except Exception:
                 pass
             try:
-                power_limit_watts = nvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0
+                power_limit_watts = (
+                    nvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0
+                )
             except Exception:
                 pass
             try:
-                temperature_c = float(nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU))
+                temperature_c = float(
+                    nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
+                )
             except Exception:
                 pass
 
@@ -625,6 +688,7 @@ class GpuProbe:
             }
         except Exception:
             return None
+
 
 class GpuMetricsSampler:
 
@@ -682,15 +746,27 @@ class GpuMetricsSampler:
             "name": next((s.get("name") for s in self.samples if s.get("name")), None),
             "sample_count": len(self.samples),
             "vram_used_start_mb": _round_optional(vram_used[0], 1),
-            "vram_used_peak_mb": _round_optional(max((v for v in vram_used if v is not None), default=None), 1),
+            "vram_used_peak_mb": _round_optional(
+                max((v for v in vram_used if v is not None), default=None), 1
+            ),
             "vram_used_end_mb": _round_optional(vram_used[-1], 1),
-            "vram_total_mb": _round_optional(max((v for v in vram_total if v is not None), default=None), 1),
+            "vram_total_mb": _round_optional(
+                max((v for v in vram_total if v is not None), default=None), 1
+            ),
             "utilization_avg_percent": _round_optional(_avg(utilization), 1),
-            "utilization_peak_percent": _round_optional(max((v for v in utilization if v is not None), default=None), 1),
+            "utilization_peak_percent": _round_optional(
+                max((v for v in utilization if v is not None), default=None), 1
+            ),
             "power_avg_watts": _round_optional(power_avg, 2),
-            "power_peak_watts": _round_optional(max((v for v in power if v is not None), default=None), 2),
-            "power_limit_watts": _round_optional(max((v for v in power_limit if v is not None), default=None), 2),
-            "temperature_peak_c": _round_optional(max((v for v in temperature if v is not None), default=None), 1),
+            "power_peak_watts": _round_optional(
+                max((v for v in power if v is not None), default=None), 2
+            ),
+            "power_limit_watts": _round_optional(
+                max((v for v in power_limit if v is not None), default=None), 2
+            ),
+            "temperature_peak_c": _round_optional(
+                max((v for v in temperature if v is not None), default=None), 1
+            ),
             "energy_wh_estimate": _round_optional(energy_wh, 6),
         }
 
@@ -715,7 +791,7 @@ def gpu_metrics_dict_from_probe_snapshot(snap: dict, provider: str) -> dict:
         "energy_wh_estimate": None,
     }
 
-                          
+
 def sanitize_metadata_value(value, depth: int = 0):
 
     if depth > 5:
@@ -733,6 +809,7 @@ def sanitize_metadata_value(value, depth: int = 0):
         return clean
     return str(value)[:200]
 
+
 def parse_capture_metadata(raw: str | None) -> dict | None:
 
     if not raw:
@@ -744,10 +821,11 @@ def parse_capture_metadata(raw: str | None) -> dict | None:
     clean = sanitize_metadata_value(parsed)
     return clean if isinstance(clean, dict) else None
 
-                     
+
 _models: Dict[Tuple[str, str, str], Any] = {}
 _whisper_model_class = None
 faster_whisper_distribution_info: dict | None = None
+
 
 def verify_faster_whisper_distribution() -> dict:
 
@@ -762,7 +840,9 @@ def verify_faster_whisper_distribution() -> dict:
     source_text = "\n".join([home_page, *project_urls]).lower()
 
     if package_name != "faster-whisper":
-        raise RuntimeError(f"Unexpected faster-whisper package name: {package_name or 'unknown'}")
+        raise RuntimeError(
+            f"Unexpected faster-whisper package name: {package_name or 'unknown'}"
+        )
     if EXPECTED_FASTER_WHISPER_HOME.lower() not in source_text:
         raise RuntimeError(
             "Installed faster-whisper package metadata does not point to "
@@ -775,6 +855,7 @@ def verify_faster_whisper_distribution() -> dict:
         "home_page": home_page,
         "location": str(dist.locate_file("")),
     }
+
 
 # Same as faster_whisper.utils.download_model — keep in sync with faster-whisper.
 _HF_MODEL_ALLOW_PATTERNS = [
@@ -852,7 +933,10 @@ def _download_hf_snapshot_to_models_dir(
         model_label,
         repo_id,
     )
-    logger.info("Voxium: local model / Hub cache root (see hub layout under this path): %s", root_abs)
+    logger.info(
+        "Voxium: local model / Hub cache root (see hub layout under this path): %s",
+        root_abs,
+    )
     tqdm_class = VoxiumHubTqdm if progress is not None else tqdm
     try:
         if progress is not None:
@@ -878,8 +962,10 @@ def get_whisper_model_class():
     if _whisper_model_class is None:
         faster_whisper_distribution_info = verify_faster_whisper_distribution()
         from faster_whisper import WhisperModel
+
         _whisper_model_class = WhisperModel
     return _whisper_model_class
+
 
 def get_model(
     name: str,
@@ -918,7 +1004,7 @@ def get_model(
         logger.info("Voxium: CTranslate2 model loaded from disk successfully")
     return _models[key]
 
-                          
+
 def get_actual_device() -> dict:
 
     cuda_count = ctranslate2.get_cuda_device_count()
@@ -930,9 +1016,9 @@ def get_actual_device() -> dict:
         "cuda_device_count": cuda_count,
     }
 
-                                                 
     try:
         import torch
+
         if torch.cuda.is_available():
             device_info["cuda_device_name"] = torch.cuda.get_device_name(0)
     except ImportError:
@@ -940,20 +1026,20 @@ def get_actual_device() -> dict:
 
     return device_info
 
-                     
+
 app = FastAPI(
     title="Voxium",
     description="Voxium local transcription HTTP API (faster-whisper). Not for direct use — prefer the voxium CLI.",
-    version="0.0.1"
+    version="0.0.1",
 )
 
-                                        
+
 stats: ServerStats = None
 config: ServerConfig = None
 logger: logging.Logger = None
 gpu_probe: GpuProbe = None
 
-                                  
+
 @app.exception_handler(Exception)
 async def global_exception_handler(_request: Request, exc: Exception):
 
@@ -962,15 +1048,17 @@ async def global_exception_handler(_request: Request, exc: Exception):
         stats.record_error()
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Voxium server error: {type(exc).__name__}"}
+        content={"detail": f"Voxium server error: {type(exc).__name__}"},
     )
 
-                   
+
 class EnsureModelBody(BaseModel):
     model: str
 
 
-def _run_ensure_model_job(job_id: str, model_name: str, key: tuple[str, str, str]) -> None:
+def _run_ensure_model_job(
+    job_id: str, model_name: str, key: tuple[str, str, str]
+) -> None:
     def progress(msg: str) -> None:
         one = (msg or "").strip().replace("\n", " ")
         if len(one) > 240:
@@ -983,9 +1071,9 @@ def _run_ensure_model_job(job_id: str, model_name: str, key: tuple[str, str, str
         with _ensure_jobs_lock:
             if job_id in _ensure_jobs:
                 _ensure_jobs[job_id]["status"] = "running"
-                _ensure_jobs[job_id]["progress_line"] = (
-                    "Starting Hugging Face fetch for this model, copy."
-                )
+                _ensure_jobs[job_id][
+                    "progress_line"
+                ] = "Starting Hugging Face fetch for this model, copy."
         get_model(model_name, config.device, config.compute, progress=progress)
     except Exception as e:
         logger.error("Voxium: ensure-model job failed: %s", e, exc_info=True)
@@ -999,9 +1087,9 @@ def _run_ensure_model_job(job_id: str, model_name: str, key: tuple[str, str, str
             if job_id in _ensure_jobs:
                 _ensure_jobs[job_id]["status"] = "ready"
                 _ensure_jobs[job_id]["done"] = True
-                _ensure_jobs[job_id]["progress_line"] = (
-                    "Model on disk and loaded — ready for PTT, copy."
-                )
+                _ensure_jobs[job_id][
+                    "progress_line"
+                ] = "Model on disk and loaded — ready for PTT, copy."
     finally:
         with _ensure_jobs_lock:
             if _active_ensure_by_key.get(key) == job_id:
@@ -1025,7 +1113,9 @@ def health():
         "timeout_seconds": config.timeout,
         "gpu_metrics_enabled": bool(gpu_probe and gpu_probe.available),
         "gpu_metrics_provider": gpu_probe.provider if gpu_probe else None,
-        "gpu_metrics_unavailable_reason": gpu_probe.unavailable_reason if gpu_probe else None,
+        "gpu_metrics_unavailable_reason": (
+            gpu_probe.unavailable_reason if gpu_probe else None
+        ),
         "metrics_sample_interval_seconds": config.metrics_sample_interval,
         "faster_whisper": faster_whisper_distribution_info,
     }
@@ -1051,7 +1141,12 @@ def ensure_model_start(body: EnsureModelBody):
             jid = _active_ensure_by_key[key]
             return JSONResponse(
                 status_code=202,
-                content={"status": "pending", "job_id": jid, "model": m, "reused": True},
+                content={
+                    "status": "pending",
+                    "job_id": jid,
+                    "model": m,
+                    "reused": True,
+                },
             )
         job_id = uuid.uuid4().hex[:12]
         _ensure_jobs[job_id] = {
@@ -1090,6 +1185,7 @@ def ensure_model_job_status(job_id: str):
         "done": bool(j.get("done")),
     }
 
+
 @app.get("/stats")
 def get_stats():
 
@@ -1118,9 +1214,13 @@ def get_gpu_snapshot():
     if not snap:
         return JSONResponse(
             status_code=503,
-            content={"error": "gpu_snapshot_failed", "reason": "probe returned no data"},
+            content={
+                "error": "gpu_snapshot_failed",
+                "reason": "probe returned no data",
+            },
         )
     return {"gpu": gpu_metrics_dict_from_probe_snapshot(snap, gpu_probe.provider)}
+
 
 @app.post("/transcribe")
 async def transcribe(
@@ -1139,14 +1239,15 @@ async def transcribe(
         raise HTTPException(400, str(exc)) from exc
     capture_metrics = parse_capture_metadata(capture_metadata)
 
-    logger.info(f"Voxium: transcription request | id={request_id} model={m} language={language or 'auto'}")
+    logger.info(
+        f"Voxium: transcription request | id={request_id} model={m} language={language or 'auto'}"
+    )
 
-                            
     try:
         content = await file.read()
         if len(content) == 0:
             raise HTTPException(400, "Voxium: empty audio file")
-        if len(content) > 50 * 1024 * 1024:              
+        if len(content) > 50 * 1024 * 1024:
             raise HTTPException(400, "Voxium: audio file too large (max 50MB)")
     except HTTPException:
         raise
@@ -1155,13 +1256,11 @@ async def transcribe(
         stats.record_error()
         raise HTTPException(400, f"Voxium: invalid audio file: {e}")
 
-                       
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     try:
         tmp.write(content)
         tmp.close()
 
-                                     
         try:
             whisper = get_model(m, config.device, config.compute)
         except Exception as e:
@@ -1169,7 +1268,6 @@ async def transcribe(
             stats.record_error()
             raise HTTPException(503, "Voxium: model not available — try again later")
 
-                                                                                   
         gpu_sampler = GpuMetricsSampler(gpu_probe, config.metrics_sample_interval)
         gpu_sampler.start()
         transcribe_start = time.perf_counter()
@@ -1195,13 +1293,19 @@ async def transcribe(
                     "end": s.end,
                     "text": s.text,
                     "decoder_tokens": len(getattr(s, "tokens", None) or []),
-                    "avg_logprob": _round_optional(_as_optional_float(getattr(s, "avg_logprob", None)), 4),
+                    "avg_logprob": _round_optional(
+                        _as_optional_float(getattr(s, "avg_logprob", None)), 4
+                    ),
                     "compression_ratio": _round_optional(
                         _as_optional_float(getattr(s, "compression_ratio", None)),
                         4,
                     ),
-                    "no_speech_prob": _round_optional(_as_optional_float(getattr(s, "no_speech_prob", None)), 4),
-                    "temperature": _round_optional(_as_optional_float(getattr(s, "temperature", None)), 3),
+                    "no_speech_prob": _round_optional(
+                        _as_optional_float(getattr(s, "no_speech_prob", None)), 4
+                    ),
+                    "temperature": _round_optional(
+                        _as_optional_float(getattr(s, "temperature", None)), 3
+                    ),
                 }
                 for s in segment_objs
             ]
@@ -1212,16 +1316,21 @@ async def transcribe(
             gpu_metrics = gpu_sampler.stop(transcribe_duration)
             logger.error(f"Voxium: transcription failed: {e}")
             stats.record_error()
-            raise HTTPException(500, f"Voxium: transcription failed: {type(e).__name__}: {e}")
+            raise HTTPException(
+                500, f"Voxium: transcription failed: {type(e).__name__}: {e}"
+            )
         else:
             transcribe_duration = time.perf_counter() - transcribe_start
             gpu_metrics = gpu_sampler.stop(transcribe_duration)
 
-                        
         total_duration = time.perf_counter() - request_start
-        audio_duration = getattr(info, 'duration', 0) or 0
-        realtime_factor = transcribe_duration / audio_duration if audio_duration else None
-        model_metrics = build_model_metrics(m, info, segment_objs, text, transcribe_duration)
+        audio_duration = getattr(info, "duration", 0) or 0
+        realtime_factor = (
+            transcribe_duration / audio_duration if audio_duration else None
+        )
+        model_metrics = build_model_metrics(
+            m, info, segment_objs, text, transcribe_duration
+        )
 
         request_metrics = {
             "request_id": request_id,
@@ -1284,19 +1393,19 @@ async def transcribe(
         }
 
     finally:
-                                   
+
         try:
             os.unlink(tmp.name)
         except Exception:
             pass
 
-                         
+
 def handle_shutdown(_signum, _frame):
 
     logger.info("Voxium: shutdown — safing the stack, cleaning up...")
     sys.exit(0)
 
-              
+
 def main(argv: list[str] | None = None):
     global config, logger, stats, gpu_probe
 
@@ -1309,28 +1418,63 @@ Examples:
   voxium server --model medium     # Better accuracy
   voxium server --device cpu       # CPU only
   voxium server --no-vad           # Disable VAD
-        """
+        """,
     )
-    parser.add_argument("--model", "-m", type=trusted_model_arg, default=DEFAULT_MODEL,
-                        help=f"Voxium model (Systran faster-whisper): {TRUSTED_MODEL_HELP} (default: {DEFAULT_MODEL})")
-    parser.add_argument("--device", "-d", default=DEFAULT_DEVICE,
-                        help=f"Device: auto, cuda, cpu (default: {DEFAULT_DEVICE})")
-    parser.add_argument("--compute", "-c", default=DEFAULT_COMPUTE,
-                        help=f"Compute type: auto, float16, int8 (default: {DEFAULT_COMPUTE})")
-    parser.add_argument("--port", "-p", type=int, default=8002,
-                        help="Port to run on (default: 8002)")
-    parser.add_argument("--host", default="127.0.0.1",
-                        help="Loopback host to bind to (default: 127.0.0.1)")
-    parser.add_argument("--timeout", "-t", type=int, default=120,
-                        help="Transcription timeout in seconds (default: 120)")
-    parser.add_argument("--no-vad", action="store_true",
-                        help="Disable VAD (voice activity detection) filtering")
-    parser.add_argument("--no-gpu-metrics", action="store_true",
-                        help="Disable per-request GPU metrics sampling")
-    parser.add_argument("--metrics-sample-interval", type=float, default=0.25,
-                        help="GPU metrics sampling interval in seconds (default: 0.25)")
-    parser.add_argument("--log-level", default="INFO",
-                        help="Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=trusted_model_arg,
+        default=DEFAULT_MODEL,
+        help=f"Voxium model (Systran faster-whisper): {TRUSTED_MODEL_HELP} (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--device",
+        "-d",
+        default=DEFAULT_DEVICE,
+        help=f"Device: auto, cuda, cpu (default: {DEFAULT_DEVICE})",
+    )
+    parser.add_argument(
+        "--compute",
+        "-c",
+        default=DEFAULT_COMPUTE,
+        help=f"Compute type: auto, float16, int8 (default: {DEFAULT_COMPUTE})",
+    )
+    parser.add_argument(
+        "--port", "-p", type=int, default=8002, help="Port to run on (default: 8002)"
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Loopback host to bind to (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--timeout",
+        "-t",
+        type=int,
+        default=120,
+        help="Transcription timeout in seconds (default: 120)",
+    )
+    parser.add_argument(
+        "--no-vad",
+        action="store_true",
+        help="Disable VAD (voice activity detection) filtering",
+    )
+    parser.add_argument(
+        "--no-gpu-metrics",
+        action="store_true",
+        help="Disable per-request GPU metrics sampling",
+    )
+    parser.add_argument(
+        "--metrics-sample-interval",
+        type=float,
+        default=0.25,
+        help="GPU metrics sampling interval in seconds (default: 0.25)",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)",
+    )
     args = parser.parse_args(argv)
     try:
         args.model = validate_model_name(args.model)
@@ -1357,7 +1501,6 @@ Examples:
     )
     gpu_probe = GpuProbe(config.gpu_metrics_enabled)
 
-                            
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
@@ -1365,13 +1508,16 @@ Examples:
         f"Voxium: launch — /transcribe at http://{args.host}:{args.port} "
         f"(PTT on client; VOX over loopback here)"
     )
-    logger.info(f"Voxium: config model={args.model} device={args.device} vad={config.vad_enabled} timeout={args.timeout}s")
+    logger.info(
+        f"Voxium: config model={args.model} device={args.device} vad={config.vad_enabled} timeout={args.timeout}s"
+    )
     if gpu_probe.available:
-        logger.info(f"Voxium: GPU metrics enabled via {gpu_probe.provider} (interval={config.metrics_sample_interval}s)")
+        logger.info(
+            f"Voxium: GPU metrics enabled via {gpu_probe.provider} (interval={config.metrics_sample_interval}s)"
+        )
     else:
         logger.info(f"Voxium: GPU metrics unavailable: {gpu_probe.unavailable_reason}")
 
-                    
     try:
         get_model(config.model, config.device, config.compute)
         if faster_whisper_distribution_info:
@@ -1384,8 +1530,8 @@ Examples:
         logger.error(f"Voxium: failed to load model: {e}")
         sys.exit(1)
 
-    logger.info("Voxium: server on station — /transcribe open for traffic (roger, copy)")
+    logger.info(
+        "Voxium: server on station — /transcribe open for traffic (roger, copy)"
+    )
 
-
-                                                    
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

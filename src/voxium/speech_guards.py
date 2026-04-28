@@ -89,7 +89,9 @@ def is_hallucination(text: str) -> bool:
     return False
 
 
-def has_speech(audio: np.ndarray, sample_rate: int, threshold: float = 0.01, segment_ms: int = 50) -> bool:
+def has_speech(
+    audio: np.ndarray, sample_rate: int, threshold: float = 0.01, segment_ms: int = 50
+) -> bool:
     segment_samples = int(sample_rate * segment_ms / 1000)
 
     for i in range(0, len(audio), segment_samples):

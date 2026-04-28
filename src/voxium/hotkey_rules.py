@@ -36,8 +36,8 @@ def normalize_hotkey_name(value) -> str:
     """
     if value is None:
         return ""
-    # bool is a subclass of int; reject so True does not become f1
-    if type(value) is bool:
+    # bool is a subclass of int; check bool first so True does not become f1
+    if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, (int, float)) and 1 <= int(value) <= 12:
         return f"f{int(value)}"

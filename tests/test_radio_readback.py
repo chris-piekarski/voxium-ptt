@@ -1,4 +1,5 @@
 """Rotating CB/HAM readback lines."""
+
 from voxium import radio_readback as rb
 
 

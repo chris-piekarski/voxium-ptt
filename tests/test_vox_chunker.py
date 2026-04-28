@@ -117,9 +117,7 @@ def test_max_utterance_splits_with_mid_stream_emit() -> None:
         hangover_ms=2_000.0,
     )
     n = 3 * 480  # 1440 > 800
-    loud = (
-        np.sin(np.linspace(0, 8 * np.pi, n)).astype(np.float32) * 0.2
-    )
+    loud = np.sin(np.linspace(0, 8 * np.pi, n)).astype(np.float32) * 0.2
     done: list = []
     for i in range(0, n, 480):
         done.extend(ch.feed(loud[i : i + 480]))

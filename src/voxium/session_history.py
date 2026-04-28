@@ -146,9 +146,7 @@ class SessionTranscriptHistory:
         """
         q = (query or "").strip()
         if not q:
-            return (
-                "Add words to search after /history search — e.g. /history search meeting notes, copy."
-            )
+            return "Add words to search after /history search — e.g. /history search meeting notes, copy."
         q_lower = q.lower()
         with self._lock:
             if not self._entries:
@@ -181,17 +179,25 @@ class SessionTranscriptHistory:
         ]
         shown = matches[:max_lines]
         for display_num, prev in shown:
-            e = self._entries[-display_num] if 1 <= display_num <= len(self._entries) else None
+            # Not `e`: that name is still bound from `for i, e in enumerate(rev)` above (leaked loop var).
+            hit_entry = (
+                self._entries[-display_num]
+                if 1 <= display_num <= len(self._entries)
+                else None
+            )
             tag = "PTT"
-            if e is not None and getattr(e, "source", "ptt") == "vox":
+            if hit_entry is not None and getattr(hit_entry, "source", "ptt") == "vox":
                 tag = "VOX"
             lines.append(f"  📋  #{display_num}  [{tag}]  {prev}")
         lines.append("")
         tail = ""
         if len(matches) > max_lines:
-            tail = f"  … and {len(matches) - max_lines} more matches (not shown), copy.\n"
+            tail = (
+                f"  … and {len(matches) - max_lines} more matches (not shown), copy.\n"
+            )
         lines.append(
-            tail + "  /history copy <n> — same #n as the full list (1 = most recent), copy."
+            tail
+            + "  /history copy <n> — same #n as the full list (1 = most recent), copy."
         )
         return "\n".join(lines)
 

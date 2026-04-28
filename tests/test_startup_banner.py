@@ -1,4 +1,5 @@
 """Unit tests for startup banner (pure merge + no crash)."""
+
 from voxium.startup_banner import (
     _BANNER_TAGLINES,
     _GLYPHS,

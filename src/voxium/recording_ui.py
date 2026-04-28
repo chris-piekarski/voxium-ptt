@@ -1,9 +1,11 @@
 """Recording HUD strings (PTT) — pure helpers for tests, brand in caller."""
+
 from __future__ import annotations
 
 import math
 
 import numpy as np
+import numpy.typing as npt
 from rich.console import Group
 from rich.text import Text
 
@@ -97,7 +99,7 @@ def colored_mono_waveform_text(
     in time), normalized by *peak_ref* (e.g. running capture peak) so the strip tracks real level.
     """
     n = max(8, min(int(n_columns), 200))
-    x = np.asarray(samples, dtype=np.float64).ravel()
+    x: npt.NDArray[np.float64] = np.asarray(samples, dtype=np.float64).ravel()
     if x.size < 2:
         return Text("  " + "·" * min(40, n), style="dim #4b5563")
     x = x - float(np.mean(x))

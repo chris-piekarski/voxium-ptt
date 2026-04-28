@@ -36,12 +36,30 @@ def test_run_slash_without_leading_slash() -> None:
 
 
 def test_slash_data_needs() -> None:
-    assert slash_data_needs("/help").server_gpu is False and slash_data_needs("/help").mic_capture is False
-    assert slash_data_needs("/gpu").server_gpu is True and slash_data_needs("/gpu").mic_capture is False
-    assert slash_data_needs("/mic").mic_capture is True and slash_data_needs("/mic").server_gpu is False
-    assert slash_data_needs("/models").server_gpu is False and slash_data_needs("/models").mic_capture is False
-    assert slash_data_needs("/history").server_gpu is False and slash_data_needs("/history").mic_capture is False
-    assert slash_data_needs("/disk").server_gpu is False and slash_data_needs("/disk").mic_capture is False
+    assert (
+        slash_data_needs("/help").server_gpu is False
+        and slash_data_needs("/help").mic_capture is False
+    )
+    assert (
+        slash_data_needs("/gpu").server_gpu is True
+        and slash_data_needs("/gpu").mic_capture is False
+    )
+    assert (
+        slash_data_needs("/mic").mic_capture is True
+        and slash_data_needs("/mic").server_gpu is False
+    )
+    assert (
+        slash_data_needs("/models").server_gpu is False
+        and slash_data_needs("/models").mic_capture is False
+    )
+    assert (
+        slash_data_needs("/history").server_gpu is False
+        and slash_data_needs("/history").mic_capture is False
+    )
+    assert (
+        slash_data_needs("/disk").server_gpu is False
+        and slash_data_needs("/disk").mic_capture is False
+    )
 
 
 def test_run_slash_models_lists_all_trusted() -> None:
@@ -96,7 +114,9 @@ def test_run_slash_disk_matches_make_disk_usage_shape() -> None:
 
 def test_run_slash_history_with_gpu_sk_does_not_replace_buffer() -> None:
     """``/history`` must use *transcript_history*; extra ``**sk`` (e.g. ``gpu``) is separate."""
-    mem = SessionTranscriptHistory(max_entries=3, max_total_chars=1_000, max_pending_bytes=0)
+    mem = SessionTranscriptHistory(
+        max_entries=3, max_total_chars=1_000, max_pending_bytes=0
+    )
     mem.add("ground truth line")
     out = run_slash_line(
         "/history",
@@ -109,7 +129,9 @@ def test_run_slash_history_with_gpu_sk_does_not_replace_buffer() -> None:
 
 
 def test_run_slash_history_list_and_expand_and_copy() -> None:
-    mem = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    mem = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     mem.add("alpha bravo")
     mem.add("charlie")
     out0 = run_slash_line("/history", transcript_history=mem)
@@ -123,7 +145,9 @@ def test_run_slash_history_list_and_expand_and_copy() -> None:
 
 
 def test_run_slash_history_clear() -> None:
-    mem = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=100)
+    mem = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=100
+    )
     mem.add("x")
     out = run_slash_line("/history clear", transcript_history=mem)
     assert "Cleared" in out.text and "1 transcript line" in out.text
@@ -137,7 +161,9 @@ def test_run_slash_history_clear() -> None:
 
 
 def test_run_slash_history_search() -> None:
-    mem = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    mem = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     mem.add("alpha meeting notes")
     mem.add("bravo only")
     out = run_slash_line("/history search meeting", transcript_history=mem)
@@ -178,8 +204,17 @@ def test_format_gpu_metrics_plaintext_matches_inference_box_shape() -> None:
 
 def test_run_slash_mic() -> None:
     mic = {
-        "backend": {"library": "python-sounddevice", "api": "PortAudio", "sounddevice_version": "0.4.6"},
-        "device": {"index": 0, "name": "Test Mic", "max_input_channels": 2, "default_samplerate_hz": 48000.0},
+        "backend": {
+            "library": "python-sounddevice",
+            "api": "PortAudio",
+            "sounddevice_version": "0.4.6",
+        },
+        "device": {
+            "index": 0,
+            "name": "Test Mic",
+            "max_input_channels": 2,
+            "default_samplerate_hz": 48000.0,
+        },
         "host_api": {"name": "MME"},
         "format": {"sample_rate_hz": 16000, "channels": 1, "dtype": "float32"},
     }
@@ -190,7 +225,9 @@ def test_run_slash_mic() -> None:
 
 
 def test_format_gpu_unavailable() -> None:
-    t = format_gpu_metrics_plaintext({"_error": "gpu_metrics_unavailable", "_reason": "disabled"})
+    t = format_gpu_metrics_plaintext(
+        {"_error": "gpu_metrics_unavailable", "_reason": "disabled"}
+    )
     assert "unavailable" in t.lower() or "disabled" in t.lower()
 
 

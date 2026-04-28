@@ -8,6 +8,7 @@ from collections.abc import Callable
 import requests
 from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
 from rich.text import Text
 
 from voxium.console_status import (
@@ -30,7 +31,9 @@ def _freeze_ptt(freeze: Callable[[], None] | None) -> None:
             pass
 
 
-def _model_fetch_panel(console: Console, model: str, job_id: str, progress_line: str) -> object:
+def _model_fetch_panel(
+    console: Console, model: str, job_id: str, progress_line: str
+) -> Panel:
     """One Downlink box, one line: model, job id, and current HF / load status (updating), copy."""
     pl = (progress_line or "…").strip().replace("\n", " ")
     line = f"Model {model!r}  ·  job {job_id}  ·  {pl}"
@@ -83,7 +86,9 @@ def ensure_model_on_loopback_server(
         )
         return False
     if r.status_code == 200:
-        msg = (r.json() or {}).get("message") or f"Model {model!r} is on the server stack, copy."
+        msg = (r.json() or {}).get(
+            "message"
+        ) or f"Model {model!r} is on the server stack, copy."
         _freeze_ptt(freeze_for_external_output)
         print_agent_telemetry_panel(
             console,
@@ -102,7 +107,10 @@ def ensure_model_on_loopback_server(
         print_agent_telemetry_panel(
             console,
             [
-                (f"Model preflight on the local server failed ({r.status_code}).", "error"),
+                (
+                    f"Model preflight on the local server failed ({r.status_code}).",
+                    "error",
+                ),
                 (str(detail)[:2000], "error"),
             ],
         )
@@ -141,7 +149,10 @@ def ensure_model_on_loopback_server(
                 print_agent_telemetry_panel(
                     console,
                     [
-                        (f"Lost contact with the server during model fetch: {exc}", "error"),
+                        (
+                            f"Lost contact with the server during model fetch: {exc}",
+                            "error",
+                        ),
                     ],
                 )
                 return False
@@ -149,7 +160,10 @@ def ensure_model_on_loopback_server(
                 print_agent_telemetry_panel(
                     console,
                     [
-                        (f"Model job status read failed with HTTP {pr.status_code}, copy.", "error"),
+                        (
+                            f"Model job status read failed with HTTP {pr.status_code}, copy.",
+                            "error",
+                        ),
                     ],
                 )
                 return False
@@ -184,7 +198,12 @@ def ensure_model_on_loopback_server(
     if not done_ok:
         print_agent_telemetry_panel(
             console,
-            [("Model fetch timed out while waiting on the local server, copy.", "error")],
+            [
+                (
+                    "Model fetch timed out while waiting on the local server, copy.",
+                    "error",
+                )
+            ],
         )
         return False
 

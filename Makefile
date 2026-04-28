@@ -59,9 +59,9 @@ repo-stats: ## Regenerate docs/repository-stats.md (LOC, Mermaid pies; stdlib on
 $(DEV_STAMP): $(PYPROJECT)
 	@"$(PYTHON)" "$(MKPY)" dev-stamp --root "$(ROOT)" --venvd "$(VENVDIR)" --dev-stamp "$(DEV_STAMP)" --python "$(PYTHON)"
 
-install-dev: $(DEV_STAMP) ## Install editable + dev deps (ruff, pytest, pytest-cov)
+install-dev: $(DEV_STAMP) ## Install editable + dev deps (black, ruff, pylint, mypy, pytest, …)
 
-lint: $(DEV_STAMP) ## Run ruff on the repo (installs .[dev] once via stamp)
+lint: $(DEV_STAMP) ## black + ruff + mypy + pylint (installs .[dev] once via stamp)
 	@"$(PYTHON)" "$(MKPY)" lint --root "$(ROOT)" --venv-python "$(VENV_PYTHON)"
 
 # Extra pytest flags: use PYTEST_ARGS=...  (one shell word-splitting layer from Make)

@@ -8,6 +8,7 @@ see the project README.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -39,6 +40,7 @@ _HELP_SECTION_RGB: tuple[tuple[int, int, int], ...] = (
     (250, 204, 21),  # gold
     (168, 85, 247),  # purple
 )
+
 
 def _help_section_sgr(n: int) -> str:
     r, g, b = _HELP_SECTION_RGB[n % len(_HELP_SECTION_RGB)]
@@ -283,15 +285,118 @@ def cmd_dev_stamp(
     return 0
 
 
+def _ruff_lint_file_count(venv_py: Path, root: Path) -> tuple[int, int]:
+    """
+    Return (count of .py/.pyi paths, count of all paths) Ruff would check under *root*
+    (same config as ``ruff check``). Used for a post-run summary line.
+    """
+    r = subprocess.run(
+        [str(venv_py), "-m", "ruff", "check", str(root), "--show-files"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    pyi = sum(1 for ln in lines if ln.endswith((".py", ".pyi")))
+    return (pyi, len(lines))
+
+
+def _ruff_violation_count(venv_py: Path, root: Path) -> int:
+    """
+    Return the number of Ruff findings (one row per rule location) via ``--output-format=json``.
+    Second pass after a failing ``ruff check``; success path does not need this.
+    """
+    r = subprocess.run(
+        [str(venv_py), "-m", "ruff", "check", str(root), "--output-format=json"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        data = json.loads((r.stdout or "").strip() or "[]")
+    except json.JSONDecodeError:
+        return 0
+    if isinstance(data, list):
+        return len(data)
+    return 0
+
+
+def _lint_score_ten(n_violations: int) -> int:
+    """Map finding count to 0..10 (0 findings → 10/10; otherwise 10 − *n*, floored at 0)."""
+    return max(0, 10 - n_violations)
+
+
 def cmd_lint(root: Path, venv_py: Path) -> int:
     p = venv_py
     if not p.is_file():
         print(f"Missing {p}. Run: make install", file=sys.stderr)
         return 1
+    black_targets = [str(root / d) for d in ("src", "tests", "scripts")]
+    failed = 0
+
+    print("--- black --check ---", flush=True)
+    b = subprocess.run(
+        [str(p), "-m", "black", "--check", *black_targets],
+        cwd=root,
+    )
+    if b.returncode != 0:
+        failed = 1
+
+    print("--- ruff check ---", flush=True)
     r = subprocess.run(
         [str(p), "-m", "ruff", "check", str(root)],
+        cwd=root,
     )
-    return r.returncode
+    n_py, n_paths = _ruff_lint_file_count(p, root)
+    if r.returncode == 0:
+        s10 = _lint_score_ten(0)
+        print(
+            f"Ruff sub-score: {s10}/10  ·  0 Ruff finding(s)  ·  {n_py} Python file(s) in scope "
+            f"({n_paths} path(s) under {root}).",
+            file=sys.stdout,
+        )
+    else:
+        failed = 1
+        n_viol = _ruff_violation_count(p, root)
+        s10 = _lint_score_ten(n_viol)
+        print(
+            f"Ruff sub-score: {s10}/10  ·  {n_viol} Ruff finding(s)  ·  {n_py} Python file(s) in scope "
+            f"({n_paths} path(s) under {root}).  (Ruff exit {r.returncode}.)",
+            file=sys.stderr,
+        )
+
+    print("--- mypy ---", flush=True)
+    m = subprocess.run(
+        [str(p), "-m", "mypy"],
+        cwd=root,
+    )
+    if m.returncode != 0:
+        failed = 1
+
+    print("--- pylint ---", flush=True)
+    y = subprocess.run(
+        [
+            str(p),
+            "-m",
+            "pylint",
+            "src/voxium",
+            "tests",
+            "scripts",
+            "--recursive=y",
+        ],
+        cwd=root,
+    )
+    if y.returncode != 0:
+        failed = 1
+
+    if failed == 0:
+        print("Lint: black OK  ·  ruff OK  ·  mypy OK  ·  pylint OK.", file=sys.stdout)
+    else:
+        print(
+            "Lint: one or more of black, ruff, mypy, or pylint failed (see output above).",
+            file=sys.stderr,
+        )
+    return failed
 
 
 def _pytest_extra() -> list[str]:
@@ -347,7 +452,9 @@ def main() -> int:
     )
     sp = ap.add_subparsers(dest="cmd", required=True)
 
-    ph = sp.add_parser("help", help="List make targets (parses the Makefile ## markers)")
+    ph = sp.add_parser(
+        "help", help="List make targets (parses the Makefile ## markers)"
+    )
     ph.add_argument("--makefile", type=Path, required=True)
 
     pi = sp.add_parser("install", help="Create venv and pip install -e .")
@@ -382,7 +489,7 @@ def main() -> int:
     pds.add_argument("--dev-stamp", type=Path, required=True)
     pds.add_argument("--python", type=str, required=True)
 
-    pl = sp.add_parser("lint", help="Run ruff in the venv")
+    pl = sp.add_parser("lint", help="Run black, ruff, mypy, and pylint in the venv")
     pl.add_argument("--root", type=Path, required=True)
     pl.add_argument("--venv-python", type=Path, required=True)
 

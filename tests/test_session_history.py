@@ -20,7 +20,9 @@ def test_add_and_char_cap_drops_oldest() -> None:
 
 
 def test_entry_cap() -> None:
-    h = SessionTranscriptHistory(max_entries=2, max_total_chars=1_000_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=2, max_total_chars=1_000_000, max_pending_bytes=0
+    )
     h.add("a")
     h.add("b")
     h.add("c")
@@ -31,7 +33,9 @@ def test_entry_cap() -> None:
 
 
 def test_replay_cycle() -> None:
-    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     h.add("first")
     h.add("second")
     r0 = h.next_replay_paste()
@@ -49,7 +53,9 @@ def test_replay_cycle() -> None:
 
 
 def test_add_resets_replay() -> None:
-    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     h.add("a")
     h.add("b")
     h.next_replay_paste()
@@ -60,7 +66,9 @@ def test_add_resets_replay() -> None:
 
 
 def test_pending_audio_respects_max() -> None:
-    h = SessionTranscriptHistory(max_entries=1, max_total_chars=100, max_pending_bytes=4)
+    h = SessionTranscriptHistory(
+        max_entries=1, max_total_chars=100, max_pending_bytes=4
+    )
     bio = io.BytesIO(b"abcdef")
     h.save_pending_audio(bio)
     assert h.get_pending_audio() is None
@@ -71,7 +79,9 @@ def test_pending_audio_respects_max() -> None:
 
 
 def test_format_list_empty() -> None:
-    h = SessionTranscriptHistory(max_entries=3, max_total_chars=100, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=3, max_total_chars=100, max_pending_bytes=0
+    )
     assert "No transcriptions" in h.format_list_text()
 
 
@@ -107,38 +117,50 @@ def test_concurrent_add_and_list_text() -> None:
 
 def test_empty_buffer_is_falsy_callers_should_use_is_not_none() -> None:
     """``__len__`` makes an empty ring falsy; optional handles need ``is not None``."""
-    h = SessionTranscriptHistory(max_entries=5, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=10_000, max_pending_bytes=0
+    )
     assert len(h) == 0
     assert not h
 
 
 def test_add_skips_whitespace_only() -> None:
-    h = SessionTranscriptHistory(max_entries=5, max_total_chars=100, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=100, max_pending_bytes=0
+    )
     h.add("   \n\t  ")
     assert len(h) == 0
 
 
 def test_add_truncates_when_text_exceeds_max_total_chars() -> None:
     # _max_total_chars is at least 1024; use a cap above that to test truncation to the cap.
-    h = SessionTranscriptHistory(max_entries=5, max_total_chars=1500, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=1500, max_pending_bytes=0
+    )
     h.add("x" * 3000)
     assert h.text_by_display_index(1) == "x" * 1500
 
 
 def test_next_replay_paste_empty_buffer() -> None:
-    h = SessionTranscriptHistory(max_entries=3, max_total_chars=100, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=3, max_total_chars=100, max_pending_bytes=0
+    )
     assert h.next_replay_paste() is None
 
 
 def test_text_by_display_index_out_of_range() -> None:
-    h = SessionTranscriptHistory(max_entries=3, max_total_chars=100, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=3, max_total_chars=100, max_pending_bytes=0
+    )
     h.add("one")
     assert h.text_by_display_index(0) is None
     assert h.text_by_display_index(2) is None
 
 
 def test_format_list_preview_truncate_and_max_lines_tail() -> None:
-    h = SessionTranscriptHistory(max_entries=30, max_total_chars=100_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=30, max_total_chars=100_000, max_pending_bytes=0
+    )
     long_line = "w" * 150
     h.add(long_line)
     out = h.format_list_text(max_lines=1, preview_chars=20)
@@ -156,7 +178,9 @@ def test_save_pending_max_zero_short_circuits() -> None:
 
 
 def test_format_list_text_filtered_substring() -> None:
-    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     h.add("the quick BROWN fox")
     h.add("lazy dog")
     h.add("other")
@@ -169,7 +193,9 @@ def test_format_list_text_filtered_substring() -> None:
 
 
 def test_purge_all_clears_entries_and_pending() -> None:
-    h = SessionTranscriptHistory(max_entries=5, max_total_chars=1_000, max_pending_bytes=1_000)
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=1_000, max_pending_bytes=1_000
+    )
     h.add("a")
     h.add("b")
     h.save_pending_audio(io.BytesIO(b"RIFF..."))
@@ -183,13 +209,17 @@ def test_purge_all_clears_entries_and_pending() -> None:
 
 
 def test_format_list_text_filtered_empty_buffer_with_query() -> None:
-    h = SessionTranscriptHistory(max_entries=5, max_total_chars=1_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=1_000, max_pending_bytes=0
+    )
     out = h.format_list_text_filtered("anything")
     assert "No transcriptions in this run yet" in out
 
 
 def test_format_list_text_filtered_vox_tag() -> None:
-    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     h.add("open mic phrase", source="vox")
     out = h.format_list_text_filtered("mic")
     assert "[VOX]" in out
@@ -197,7 +227,9 @@ def test_format_list_text_filtered_vox_tag() -> None:
 
 def test_format_list_text_filtered_match_truncates_with_ellipsis() -> None:
     """Search hit preview can shorten with an ellipsis (``…``) when over ``preview_chars``."""
-    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=10, max_total_chars=10_000, max_pending_bytes=0
+    )
     h.add("TAILKEY" + " x" * 80)  # query at start; still long so preview must truncate
     out = h.format_list_text_filtered("TAILKEY", preview_chars=25)
     assert "…" in out
@@ -205,7 +237,9 @@ def test_format_list_text_filtered_match_truncates_with_ellipsis() -> None:
 
 
 def test_format_list_text_filtered_tail_when_many_matches() -> None:
-    h = SessionTranscriptHistory(max_entries=50, max_total_chars=100_000, max_pending_bytes=0)
+    h = SessionTranscriptHistory(
+        max_entries=50, max_total_chars=100_000, max_pending_bytes=0
+    )
     for i in range(12):
         h.add(f"commonword {i} extra")
     out = h.format_list_text_filtered("commonword", max_lines=3)

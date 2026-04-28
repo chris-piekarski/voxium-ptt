@@ -1,4 +1,5 @@
 """PTT status strip (green, Live) + violet downlink panel (title varies: telemetry, /history, /gpu, etc.). Brand: docs/brand.md."""
+
 from __future__ import annotations
 
 import textwrap
@@ -109,7 +110,11 @@ def build_status_box_panel(
     top = Text(title, style="bold")
     if recording_hud is not None:
         de = Text(detail, style=_DETAIL_STYLE) if detail else Text("")
-        hud = Text(recording_hud, style=_HUD_METER_STYLE) if recording_hud else Text(" ", style=_HUD_METER_STYLE)
+        hud = (
+            Text(recording_hud, style=_HUD_METER_STYLE)
+            if recording_hud
+            else Text(" ", style=_HUD_METER_STYLE)
+        )
         body: RenderableType = Group(top, de, hud)
     elif detail:
         body = Group(top, Text(detail, style=_DETAIL_STYLE))
@@ -142,12 +147,12 @@ def status_uses_recording_hud_line(status: str) -> bool:
     return "VOX" in u and "OPEN" in u
 
 
-def standing_by_ready_starts_new_panel(title: str, recording_hud: str | None) -> bool:
+def standing_by_ready_starts_new_panel(
+    title: str, recording_hud: str | RenderableType | None
+) -> bool:
     """True when returning to on-station PTT/VOX — ends prior panel, opens a fresh one."""
     return (
-        recording_hud is None
-        and "PTT/VOX" in title
-        and "ON STATION" in title.upper()
+        recording_hud is None and "PTT/VOX" in title and "ON STATION" in title.upper()
     )
 
 
@@ -334,7 +339,9 @@ def print_slash_command_downlink(
     ptitle = format_downlink_title(sub)
     if result_rich is not None:
         body = Text()
-        body.append(f"Command: {line.rstrip()}\n\n", style=_TELEMETRY_LINE_STYLES["info"])
+        body.append(
+            f"Command: {line.rstrip()}\n\n", style=_TELEMETRY_LINE_STYLES["info"]
+        )
         body.append(result_rich)
         console.print()
         console.print(build_downlink_telemetry_panel(console, body, title=ptitle))
@@ -430,7 +437,9 @@ class PttSessionStatusBox:
         recording_hud: str | RenderableType | None = None,
     ) -> None:
         with self._lock:
-            is_on_station_fresh = standing_by_ready_starts_new_panel(title, recording_hud)
+            is_on_station_fresh = standing_by_ready_starts_new_panel(
+                title, recording_hud
+            )
             is_vox_fresh = vox_open_listening_starts_fresh_panel(title, recording_hud)
             if is_on_station_fresh or is_vox_fresh:
                 if self._main_live and self._main_live.is_started:
@@ -459,7 +468,12 @@ class PttSessionStatusBox:
         with self._lock:
             if self._live_unavailable:
                 return
-            if self._suspended or not self._main_running or not self._main_live or not self._session_steps:
+            if (
+                self._suspended
+                or not self._main_running
+                or not self._main_live
+                or not self._session_steps
+            ):
                 return
             if self._session_steps[-1].live_hud is None:
                 return
@@ -591,11 +605,14 @@ class PttSessionStatusBox:
     def _build_footer(self) -> Panel:
         w = self._box_width()
         inner = max(16, w - 6)
+        body: RenderableType
         if self._command_line_active:
             wrapped = wrap_telemetry_block(self._command_text, inner)
             if self._command_hints:
                 hwrap = wrap_telemetry_block(self._command_hints, inner)
-                line_block = Text(wrapped or " ", style="white") + Text(" ▎", style="dim #38bdf8")
+                line_block = Text(wrapped or " ", style="white") + Text(
+                    " ▎", style="dim #38bdf8"
+                )
                 body = Group(
                     Text("▶ ", style="bold #38bdf8") + line_block,
                     Text(hwrap or " ", style="dim #6b7b96"),

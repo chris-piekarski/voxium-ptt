@@ -29,7 +29,9 @@ def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int, str, str]:
 def _print_nvidia() -> None:
     exe = shutil.which("nvidia-smi")
     if not exe:
-        print("NVIDIA: nvidia-smi not on PATH (driver/toolkit not installed, or not in this environment).")
+        print(
+            "NVIDIA: nvidia-smi not on PATH (driver/toolkit not installed, or not in this environment)."
+        )
         return
     print(f"NVIDIA: using {exe}")
     print()
@@ -100,7 +102,11 @@ def _print_pynvml() -> None:
         for i in range(n):
             h = pynvml.nvmlDeviceGetHandleByIndex(i)
             raw = pynvml.nvmlDeviceGetName(h)
-            name = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            name = (
+                raw.decode("utf-8", errors="replace")
+                if isinstance(raw, bytes)
+                else str(raw)
+            )
             print(f"  [{i}] {name}")
     except Exception as e:
         print(f"  (unavailable) {type(e).__name__}: {e}")
@@ -112,7 +118,9 @@ def _print_pynvml() -> None:
 
 
 def main() -> int:
-    print("Voxium — GPU / accelerator readout (Apollo stack: humans + silicon + robot math)")
+    print(
+        "Voxium — GPU / accelerator readout (Apollo stack: humans + silicon + robot math)"
+    )
     print()
     try:
         print(f"Platform:  {platform.platform()}")

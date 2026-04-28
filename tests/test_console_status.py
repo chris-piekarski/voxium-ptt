@@ -1,4 +1,5 @@
 """Session status box: layout helper and recording-HUD switch."""
+
 from rich.console import Console
 
 from voxium.standby_fft import SPECTRUM_BARS, SPECTRUM_DISPLAY_WIDTH
@@ -44,7 +45,9 @@ def test_build_status_box_panel_layout() -> None:
     assert p1 is not None
     assert "Voxium" in str(p1.title)
     p2 = build_status_box_panel("📻 PTT ACTIVE", "F9 drops carrier", recording_hud="")
-    p3 = build_status_box_panel("📻 PTT ACTIVE", "F9 drops carrier", recording_hud="0.0s  •  1 ch")
+    p3 = build_status_box_panel(
+        "📻 PTT ACTIVE", "F9 drops carrier", recording_hud="0.0s  •  1 ch"
+    )
     assert p2 != p3
 
 

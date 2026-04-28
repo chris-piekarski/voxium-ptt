@@ -21,14 +21,26 @@ def main() -> int:
     try:
         import sounddevice as sd
     except ImportError as e:
-        print("Could not import sounddevice (used for microphone access).", file=sys.stderr)
+        print(
+            "Could not import sounddevice (used for microphone access).",
+            file=sys.stderr,
+        )
         print("Install the project in a venv:  make install", file=sys.stderr)
         print(f"  ({e})", file=sys.stderr)
         return 1
     except OSError as e:
-        print("sounddevice could not load PortAudio (the audio I/O library).", file=sys.stderr)
-        print("On many Linux systems you need:  libportaudio2  (e.g. sudo apt install portaudio19-dev or libportaudio2)", file=sys.stderr)
-        print("Then reinstall / rebuild python-sounddevice in your venv if needed.", file=sys.stderr)
+        print(
+            "sounddevice could not load PortAudio (the audio I/O library).",
+            file=sys.stderr,
+        )
+        print(
+            "On many Linux systems you need:  libportaudio2  (e.g. sudo apt install portaudio19-dev or libportaudio2)",
+            file=sys.stderr,
+        )
+        print(
+            "Then reinstall / rebuild python-sounddevice in your venv if needed.",
+            file=sys.stderr,
+        )
         print(f"  ({e})", file=sys.stderr)
         return 1
 
@@ -65,7 +77,9 @@ def main() -> int:
                 hostapis = [ha_raw[i] for i in range(len(ha_raw))]  # type: ignore[index]
             except Exception:
                 hostapis = list(ha_raw) if ha_raw else []
-    names_by_id = {h["index"]: h["name"] for h in hostapis if isinstance(h, dict) and "index" in h}
+    names_by_id = {
+        h["index"]: h["name"] for h in hostapis if isinstance(h, dict) and "index" in h
+    }
 
     default_in: int | None = None
     default_out: int | None = None
@@ -154,7 +168,20 @@ def main() -> int:
         ha: str,
         name: str,
     ) -> str:
-        return mark + idx.rjust(w_idx) + "  " + ins.rjust(w_in) + "  " + outs.rjust(w_out) + "  " + sr.ljust(w_sr) + "  " + ha.ljust(w_ha) + "  " + name
+        return (
+            mark
+            + idx.rjust(w_idx)
+            + "  "
+            + ins.rjust(w_in)
+            + "  "
+            + outs.rjust(w_out)
+            + "  "
+            + sr.ljust(w_sr)
+            + "  "
+            + ha.ljust(w_ha)
+            + "  "
+            + name
+        )
 
     print("All devices  (in/out = max input / output channel count; — = none)")
     print(row("", "idx", "in", "out", "Hz (def)", "host API", "name"))
@@ -175,9 +202,18 @@ def main() -> int:
         m_in = d.get("max_input_channels", 0) or 0
         m_out = d.get("max_output_channels", 0) or 0
         sr = d.get("default_samplerate")
-        sr_s = f"{int(sr)}" if isinstance(sr, (int, float)) and sr == int(sr) else (f"{sr}" if sr is not None else "?")
+        sr_s = (
+            f"{int(sr)}"
+            if isinstance(sr, (int, float)) and sr == int(sr)
+            else (f"{sr}" if sr is not None else "?")
+        )
 
-        mark = "* " if (default_in is not None and i == default_in) or (default_out is not None and i == default_out) else "  "
+        mark = (
+            "* "
+            if (default_in is not None and i == default_in)
+            or (default_out is not None and i == default_out)
+            else "  "
+        )
 
         nm = str(d.get("name", "?"))[:200]
         print(
@@ -194,8 +230,12 @@ def main() -> int:
 
     print()
     if default_in is not None or default_out is not None:
-        print("Rows marked with * are the current default input and/or default output device.")
-    print("Note: the actual list depends on the OS, drivers, and whether PulseAudio / PipeWire / JACK, etc. are in use (Linux), or the default sound control panel (Windows, macOS).")
+        print(
+            "Rows marked with * are the current default input and/or default output device."
+        )
+    print(
+        "Note: the actual list depends on the OS, drivers, and whether PulseAudio / PipeWire / JACK, etc. are in use (Linux), or the default sound control panel (Windows, macOS)."
+    )
     return 0
 
 

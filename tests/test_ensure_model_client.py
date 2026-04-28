@@ -19,7 +19,9 @@ def test_ensure_model_http_200_ready(monkeypatch) -> None:
 
     monkeypatch.setattr(emc.requests, "post", fake_post)
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
-    assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is True
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is True
+    )
 
 
 def test_ensure_model_http_202_then_ready(monkeypatch) -> None:
@@ -66,7 +68,9 @@ def test_ensure_model_http_202_then_ready(monkeypatch) -> None:
     monkeypatch.setattr(emc.requests, "post", fake_post)
     monkeypatch.setattr(emc.requests, "get", fake_get)
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
-    assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "tiny") is True
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "tiny") is True
+    )
     assert calls and "abc123" in calls[0]
 
 
@@ -89,7 +93,9 @@ def test_ensure_model_post_oserror(monkeypatch) -> None:
 
     monkeypatch.setattr(emc.requests, "post", boom)
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
-    assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is False
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is False
+    )
 
 
 def test_ensure_model_http_200_default_message(monkeypatch) -> None:
@@ -115,7 +121,9 @@ def test_ensure_model_non_202_error_json_detail(monkeypatch) -> None:
 
     monkeypatch.setattr(emc.requests, "post", lambda *a, **k: Resp())
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
-    assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is False
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is False
+    )
 
 
 def test_ensure_model_202_missing_job_id(monkeypatch) -> None:
@@ -196,7 +204,19 @@ def test_ensure_model_poll_non_200(monkeypatch) -> None:
     class GetResp:
         status_code = 500
 
-    monkeypatch.setattr(emc, "Live", lambda *a, **k: type("L", (), {"__enter__": lambda s: s, "__exit__": lambda *a: None, "update": lambda *a, **k: None})())
+    monkeypatch.setattr(
+        emc,
+        "Live",
+        lambda *a, **k: type(
+            "L",
+            (),
+            {
+                "__enter__": lambda s: s,
+                "__exit__": lambda *a: None,
+                "update": lambda *a, **k: None,
+            },
+        )(),
+    )
     monkeypatch.setattr(emc, "_ENSURE_POLL_INTERVAL", 0.0)
     monkeypatch.setattr(emc.requests, "post", lambda *a, **k: PostResp())
     monkeypatch.setattr(emc.requests, "get", lambda *a, **k: GetResp())
@@ -217,7 +237,19 @@ def test_ensure_model_poll_error_state(monkeypatch) -> None:
         def json(self) -> dict:
             return {"status": "error", "error": "load failed", "progress_line": "p"}
 
-    monkeypatch.setattr(emc, "Live", lambda *a, **k: type("L", (), {"__enter__": lambda s: s, "__exit__": lambda *a: None, "update": lambda *a, **k: None})())
+    monkeypatch.setattr(
+        emc,
+        "Live",
+        lambda *a, **k: type(
+            "L",
+            (),
+            {
+                "__enter__": lambda s: s,
+                "__exit__": lambda *a: None,
+                "update": lambda *a, **k: None,
+            },
+        )(),
+    )
     monkeypatch.setattr(emc, "_ENSURE_POLL_INTERVAL", 0.0)
     monkeypatch.setattr(emc.requests, "post", lambda *a, **k: PostResp())
     monkeypatch.setattr(emc.requests, "get", lambda *a, **k: GetResp())
@@ -260,7 +292,9 @@ def test_ensure_model_ready_with_pline_updates_live(monkeypatch) -> None:
     monkeypatch.setattr(emc.requests, "post", lambda *a, **k: PostResp())
     monkeypatch.setattr(emc.requests, "get", lambda *a, **k: GetOnce())
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
-    assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "tiny") is True
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "tiny") is True
+    )
     assert len(updates) >= 1
 
 

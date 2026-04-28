@@ -7,7 +7,8 @@ param(
     [switch] $Dev
 )
 $ErrorActionPreference = "Continue"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
+# Not required: Setup-Voxium.cmd passes -ExecutionPolicy Bypass. Skipping Set-ExecutionPolicy avoids
+# failures on GPO-locked systems (same rationale as Voxium.ps1).
 
 function Write-SetupLog {
     param([string]$Line)

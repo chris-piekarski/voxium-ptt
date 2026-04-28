@@ -1,6 +1,7 @@
-  ····················································································
+```text
+····················································································
   PTT & VOX  —  VOX in, text out on the loopback  —  you key, the stack is in the loop
-  ····················································································
+····················································································
 
   █   █  ███  █   █  ███  █   █ █   █
   █   █ █   █ █   █   █   █   █ ██ ██
@@ -8,7 +9,8 @@
    █ █  █   █ █   █   █   █   █ █   █
     █    ███  █   █  ███   ███  █   █
 
-  ····················································································
+····················································································
+```
 
 # Voxium 0.0.1
 
@@ -36,6 +38,8 @@ make install       # venv + pip install -e .  (installs .venv/bin/voxium)
 make start         # same as: .venv/bin/voxium run
 ```
 
+If **`.venv` was created on Windows** (it has `Scripts\` / `Lib\`, not `bin/`), `make install` will fail in WSL. Remove that folder from **Windows** or a working shell, then run `make install` again in WSL, **or** keep a separate Linux venv and point Make at it: `make install VENV=.venv-wsl` (and the same `VENV=...` for `make install-dev`, `make lint`, `make test`). The pattern `.venv-*/` is gitignored.
+
 **Developers:** `make install-dev`, `make lint`, `make test`, `make test-cov` (coverage gate; see [docs/testing.md](docs/testing.md)). Full documentation, diagrams, and package layout: **[docs/README.md](docs/README.md)**.
 
 **Optional:** `make start TT_ARGS="--server-device cpu"` passes extra flags to `voxium run` (same as typing them after `voxium run`).
@@ -52,7 +56,7 @@ On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`*
 |---------------------|----------------------------|
 | `make start` | `voxium run` (or `voxium`; same default) |
 | `make start` with extra flags | `voxium run --your-flags` |
-| `make lint` | `python -m ruff check .` |
+| `make lint` | `python -m black --check src tests scripts`, then `python -m ruff check .`, then `python -m mypy`, then `python -m pylint src/voxium tests scripts --recursive=y` (order matches `scripts/mk.py` `cmd_lint`) |
 | `make test` | `python -m pytest tests` |
 | `make test-cov` | run `pytest` with the same options as in [docs/testing.md](docs/testing.md) and `pyproject.toml` (pytest-cov) |
 | `make repo-stats` | `python3 scripts/generate_repo_stats.py` to refresh [docs/repository-stats.md](docs/repository-stats.md) |

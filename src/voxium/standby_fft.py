@@ -13,6 +13,7 @@ import threading
 from typing import Final
 
 import numpy as np
+import numpy.typing as npt
 from rich.text import Text
 
 from voxium.recording_ui import rgb_hex_for_level
@@ -121,7 +122,7 @@ def set_spectrum_from_mono_float(audio: np.ndarray, sample_rate: int) -> None:
     global _last_spectrum_mags
 
     sr = int(sample_rate) if sample_rate > 0 else 1
-    x = np.asarray(audio, dtype=np.float64).ravel()
+    x: npt.NDArray[np.float64] = np.asarray(audio, dtype=np.float64).ravel()
     n = int(x.size)
     zflat = np.zeros(SPECTRUM_DISPLAY_WIDTH, dtype=np.float64)
     if n < 64:

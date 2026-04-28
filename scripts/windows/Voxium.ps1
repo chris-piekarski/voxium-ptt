@@ -1,12 +1,16 @@
+#Requires -Version 5.1
 # Launch Voxium. Tab title is set by the app (SetConsoleTitleW + VT); optional: $env:VOXIUM_WINDOW_TITLE = "My title"
 # Usage: pwsh -File scripts\windows\Voxium.ps1 run
-# Double-click: use scripts\windows\Voxium.cmd so the window pauses on errors.
+# Double-click: use Voxium.cmd in the repo root (or scripts\windows\Voxium.cmd) so the window pauses on errors.
+#
+# Do not call Set-ExecutionPolicy here: the .cmd wrapper already passes -ExecutionPolicy Bypass, and
+# Set-ExecutionPolicy -Scope Process can throw under strict Group Policy. With $ErrorActionPreference
+# Stop, that would exit this script before voxium runs.
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $VoxiumArgs
 )
 $ErrorActionPreference = "Stop"
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $RepoRoot
 

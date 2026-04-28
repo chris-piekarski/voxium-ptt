@@ -61,7 +61,11 @@ def format_mic_report(mic_info: dict | None) -> str:
     be = mic_info.get("backend") or {}
     lines.append(
         f"  • stack: {be.get('api', '—')} / {be.get('library', '—')}"
-        + (f" {be.get('sounddevice_version', '')}" if be.get("sounddevice_version") else "")
+        + (
+            f" {be.get('sounddevice_version', '')}"
+            if be.get("sounddevice_version")
+            else ""
+        )
     )
     if be.get("portaudio_version_text"):
         lines.append(f"  • PortAudio: {be['portaudio_version_text']}")
@@ -133,7 +137,9 @@ def build_models_catalog_rich(session_model: str | None) -> tuple[str, Text]:
         body.append(line_text + "\n", style=line_style)
         body.append(f"      {repo}\n", style="dim #a78bfa")
     plain_lines.append("")
-    plain_lines.append("  [ACTIVE] — session model for this client.  [ON DISK] — snapshot under models/, copy.")
+    plain_lines.append(
+        "  [ACTIVE] — session model for this client.  [ON DISK] — snapshot under models/, copy."
+    )
     plain_lines.append("")
     plain_lines.append("  Select:  /models <id>   example:  /models large-v3")
     body.append("\n")
@@ -141,7 +147,9 @@ def build_models_catalog_rich(session_model: str | None) -> tuple[str, Text]:
         "  [ACTIVE] — session model for this client.  [ON DISK] — snapshot under models/, copy.\n\n",
         style="dim #94a3b8",
     )
-    body.append("  Select:  /models <id>   example:  /models large-v3", style="dim #94a3b8")
+    body.append(
+        "  Select:  /models <id>   example:  /models large-v3", style="dim #94a3b8"
+    )
     return "\n".join(plain_lines), body
 
 
@@ -178,7 +186,9 @@ def _run_history_line(
     transcript_history: SessionTranscriptHistory | None,
 ) -> SlashLineResult:
     if transcript_history is None:
-        return SlashLineResult(text="Session history is not available in this mode, copy.")
+        return SlashLineResult(
+            text="Session history is not available in this mode, copy."
+        )
     if len(parts) == 1:
         return SlashLineResult(text=transcript_history.format_list_text())
     if len(parts) >= 2 and parts[1].lower() == "clear":
@@ -221,9 +231,7 @@ def _run_history_line(
             )
         t = transcript_history.text_by_display_index(n)
         if t is None:
-            return SlashLineResult(
-                text=f"No entry #{n} in this session buffer, copy."
-            )
+            return SlashLineResult(text=f"No entry #{n} in this session buffer, copy.")
         try:
             pyperclip.copy(t)
         except Exception as e:
@@ -242,9 +250,7 @@ def _run_history_line(
         )
     t = transcript_history.text_by_display_index(n)
     if t is None:
-        return SlashLineResult(
-            text=f"No entry #{n} in this session buffer, copy."
-        )
+        return SlashLineResult(text=f"No entry #{n} in this session buffer, copy.")
     return SlashLineResult(text=f"#{n} (full text)\n\n{t}\n")
 
 
