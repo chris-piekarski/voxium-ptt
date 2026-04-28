@@ -23,8 +23,9 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.typing as npt
 
-Frame = np.ndarray  # 1D float32 mono
+Frame = npt.NDArray[np.float32]  # 1D float32 mono
 
 
 def _rms(x: np.ndarray) -> float:
@@ -73,10 +74,10 @@ class UtteranceChunker:
         self._min_start = max(1, int(min_speech_frames_to_start))
         self._w_uncertain = float(uncertain_silence_weight)
 
-        self._spill = np.empty(0, dtype=np.float32)
+        self._spill: npt.NDArray[np.float32] = np.empty(0, dtype=np.float32)
         self._pre: list[Frame] = []
         self._in = False
-        self._utt: np.ndarray = np.empty(0, dtype=np.float32)
+        self._utt: npt.NDArray[np.float32] = np.empty(0, dtype=np.float32)
         self._sil_accum = 0.0
         self._ema: float | None = None
         self._pre_speech_streak = 0
@@ -164,7 +165,9 @@ class UtteranceChunker:
     def feed(self, samples: Frame) -> list[Frame]:
         s = np.asarray(samples, dtype=np.float32, order="C").ravel()
         if s.size:
-            self._spill = s if not self._spill.size else np.concatenate([self._spill, s])
+            self._spill = (
+                s if not self._spill.size else np.concatenate([self._spill, s])
+            )
         done: list[Frame] = []
         while self._spill.size >= self._fn:
             fr = self._spill[: self._fn]

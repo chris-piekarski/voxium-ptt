@@ -1,4 +1,5 @@
 """RGB block wordmark for the client: PTT & VOX, rig / shack (radio box) + local inference stack. Brand: docs/brand.md."""
+
 from __future__ import annotations
 
 import colorsys
@@ -145,10 +146,14 @@ def _rule_text(content_width: int | None) -> Text:
     return Text("  " + "·" * n, style="dim #475569")
 
 
-def build_voxium_banner(*, tagline: str | None = None, content_width: int | None = None) -> Group:
+def build_voxium_banner(
+    *, tagline: str | None = None, content_width: int | None = None
+) -> Group:
     # Radio box: PTT & VOX, rig, shack; robotics: inference stack (see docs/brand.md).
     line = tagline if tagline is not None else random.choice(_BANNER_TAGLINES)
-    top = Text("  PTT & VOX box — VOX in, text out · shack, no uplink", style="dim #64748b")
+    top = Text(
+        "  PTT & VOX box — VOX in, text out · shack, no uplink", style="dim #64748b"
+    )
     rule1 = _rule_text(content_width)
     parts: list[Text | str] = [top, "\n", rule1, "\n", _build_voxium_block()]
     parts.append("\n")

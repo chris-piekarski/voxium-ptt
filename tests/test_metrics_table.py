@@ -14,7 +14,9 @@ from voxium.metrics_table import (
 def test_build_metrics_table_empty_shows_message():
     t = build_metrics_table(None)
     out = StringIO()
-    Console(file=out, width=80, legacy_windows=False, force_terminal=False).print(t, end="")
+    Console(file=out, width=80, legacy_windows=False, force_terminal=False).print(
+        t, end=""
+    )
     assert "No server metrics" in out.getvalue()
 
 
@@ -129,7 +131,13 @@ def test_ptt_log_metrics_layout_has_fewer_render_lines_than_vertical_table() -> 
     assert "Request" in full.getvalue()
     assert "Request" not in wide_out.getvalue()
     w = wide_out.getvalue()
-    assert "Audio" in w and "infer" in w and "end-to-end" in w and "Model" in w and "Tokens" in w
+    assert (
+        "Audio" in w
+        and "infer" in w
+        and "end-to-end" in w
+        and "Model" in w
+        and "Tokens" in w
+    )
     # Vertical stack is one line per field; compact multi-column layout uses fewer lines.
     assert full.getvalue().count("\n") > wide_out.getvalue().count("\n")
 

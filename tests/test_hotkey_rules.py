@@ -53,9 +53,12 @@ def test_sanitize_ignores_invalid_dict():
 
 def test_hotkey_config_changed_false_for_empty():
     assert hotkey_config_changed(None, sanitize_hotkey_config({})) is False
-    assert hotkey_config_changed(
-        {}, {"record": "f1", "recovery": "f2", "retry": "f3", "mode": "f4"}
-    ) is False
+    assert (
+        hotkey_config_changed(
+            {}, {"record": "f1", "recovery": "f2", "retry": "f3", "mode": "f4"}
+        )
+        is False
+    )
 
 
 def test_hotkey_config_changed_file_only_has_some_keys_skips_unset() -> None:
@@ -74,7 +77,9 @@ def test_hotkey_config_changed_true_when_mismatch():
 
 def test_hotkey_config_changed_false_when_all_match_sanitized():
     clean = sanitize_hotkey_config({})
-    source = {action: clean[action] for action in ("record", "recovery", "retry", "mode")}
+    source = {
+        action: clean[action] for action in ("record", "recovery", "retry", "mode")
+    }
     assert hotkey_config_changed(source, clean) is False
 
 

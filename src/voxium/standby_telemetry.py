@@ -2,6 +2,7 @@
 On-station standby line: **real** local + Zulu, rFFT / log-band strip of the last good STT take, path
 from capture, tail from last decode (docs/brand.md).
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

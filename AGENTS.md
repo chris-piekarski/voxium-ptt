@@ -21,7 +21,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 ## Requirements
 
 - **Python** ≥ 3.10 (see `pyproject.toml`).
-- **Development** optional extras: `ruff`, `pytest`, `pytest-cov`, `mypy`, `httpx`, type stubs (see `[project.optional-dependencies] dev`).
+- **Development** optional extras: `black`, `pylint`, `ruff`, `pytest`, `pytest-cov`, `mypy`, `httpx`, type stubs (see `[project.optional-dependencies] dev`).
 
 ---
 
@@ -34,7 +34,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 | `scripts/` | `mk.py` — Python backend for **GNU make** (venv, install, lint, test); `scripts/windows/` — `venv_bootstrap.cmd`, `Voxium.ps1` / `Voxium.cmd` to launch `voxium` on Windows with a short tab title |
 | `Makefile` | Dev workflow: `make install`, `make install-dev`, `make lint`, `make test`, `make test-cov`, etc. |
 | `docs/` | **Operator-oriented** documentation, **Mermaid** diagrams, and **brand** (`docs/brand.md`): see [Operator documentation](#operator-documentation) and [Brand voice](#brand-voice) |
-| `pyproject.toml` | Project metadata, **ruff**, **mypy** (with overrides for large modules), **pytest**, **coverage** |
+| `pyproject.toml` | Project metadata, **black**, **pylint**, **ruff**, **mypy** (with overrides for large modules), **pytest**, **coverage** |
 
 On **Windows**, the README may point to PowerShell / the `voxium` CLI instead of `make`.
 
@@ -93,7 +93,7 @@ make lint
 ```
 
 - **`make test`**: runs **`pytest tests/`** via the project venv (no coverage gate; see `scripts/mk.py` → `cmd_test`).
-- **`make lint`**: runs **`ruff check <repo root>`** on the full tree.
+- **`make lint`**: runs **`black --check`** on `src/`, `tests/`, and `scripts/`, then **`ruff check <repo root>`**, then **`mypy`**, then **`pylint`** on `src/voxium`, `tests`, and `scripts` (see `[tool.mypy]` and `[tool.pylint.*]` in `pyproject.toml`). A **Ruff sub-score 0–10/10** (one point per Ruff finding, from 10 down) and file scope counts are printed after Ruff. The target fails if any step fails.
 
 Optional / extra (not a substitute for the above unless team policy changes):
 
@@ -111,13 +111,13 @@ Optional / extra (not a substitute for the above unless team policy changes):
 
 ### Type-checking
 
-- **mypy** is configured in `pyproject.toml`; `voxium.app` and `voxium.whisper_server` have `ignore_errors = true` so the rest of the tree can be checked without being blocked. Running mypy is **not** part of the standard `make` targets above unless you add a target or run it by hand.
+- **mypy** is configured in `pyproject.toml`; `voxium.app` and `voxium.whisper_server` have `ignore_errors = true` so the rest of the tree can be checked without being blocked. **`make lint`** runs **mypy** after Black and Ruff.
 
 ---
 
 ## Code style and linting
 
-- **Ruff** lints the repository (`make lint`). Per-file ignores: `src/voxium/whisper_server.py` → `E402` (imports after side-effect / CUDA path setup) in `pyproject.toml`.
+- **Black** (format, check-only) and **Ruff** (lint) run under **`make lint`**, plus **mypy** (types) and **pylint** (config under `[tool.pylint]`, with large entrypoints ignored to match the mypy/coverage story). Ruff per-file ignore: `src/voxium/whisper_server.py` → `E402` (imports after side-effect / CUDA path setup) in `pyproject.toml`.
 
 ---
 

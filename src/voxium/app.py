@@ -89,7 +89,12 @@ from voxium.model_registry import (
     TRUSTED_MODELS,
     validate_model_name,
 )
-from voxium.paths import default_server_log_path, ensure_runtime_dirs, instance_lock_path, repo_root
+from voxium.paths import (
+    default_server_log_path,
+    ensure_runtime_dirs,
+    instance_lock_path,
+    repo_root,
+)
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
 from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
 from voxium.slash_commands import run_slash_line, slash_data_needs
@@ -119,22 +124,38 @@ sd: Any = _SoundDeviceProxy()
 
 SYSTEM = platform.system()
 
-                             
+
 TERMINALS = {
     "Linux": [
-        "gnome-terminal", "xterm", "konsole", "alacritty", "kitty",
-        "terminator", "tilix", "xfce4-terminal", "urxvt", "st",
-        "sakura", "guake", "tilda", "hyper", "wezterm"
+        "gnome-terminal",
+        "xterm",
+        "konsole",
+        "alacritty",
+        "kitty",
+        "terminator",
+        "tilix",
+        "xfce4-terminal",
+        "urxvt",
+        "st",
+        "sakura",
+        "guake",
+        "tilda",
+        "hyper",
+        "wezterm",
     ],
     "Windows": [
-        "WindowsTerminal", "cmd.exe", "powershell", "pwsh",
-        "ConEmu", "mintty", "Hyper", "Terminus"
+        "WindowsTerminal",
+        "cmd.exe",
+        "powershell",
+        "pwsh",
+        "ConEmu",
+        "mintty",
+        "Hyper",
+        "Terminus",
     ],
-    "Darwin": [
-        "Terminal", "iTerm", "iTerm2", "Hyper", "kitty",
-        "alacritty", "wezterm"
-    ]
+    "Darwin": ["Terminal", "iTerm", "iTerm2", "Hyper", "kitty", "alacritty", "wezterm"],
 }
+
 
 class SmartDefaultsFormatter(argparse.ArgumentDefaultsHelpFormatter):
 
@@ -148,12 +169,13 @@ class SmartDefaultsFormatter(argparse.ArgumentDefaultsHelpFormatter):
             return action.help
         return super()._get_help_string(action)
 
-               
+
 class State:
     IDLE = 0
     RECORDING = 1
     TRANSCRIBING = 2
     COMMAND_INPUT = 3
+
 
 state = State.IDLE
 state_lock = threading.Lock()
@@ -187,7 +209,7 @@ _telemetry_log_buffer: list[tuple[str, str]] = []
 managed_server_process: subprocess.Popen | None = None
 server_log_handle = None
 
-                                                               
+
 _last_hotkey_time: float = 0.0
 _last_paste_time: float = 0.0
 # PTT start: block accidental double-press. PTT stop: no extra delay (same key, clear intent).
@@ -251,7 +273,7 @@ def load_config_file() -> dict:
     except Exception:
         return {}
 
-                          
+
 def add_output_options(
     parser: argparse.ArgumentParser,
     *,
@@ -261,23 +283,26 @@ def add_output_options(
 
     if include_verbose:
         parser.add_argument(
-            "-v", "--verbose",
+            "-v",
+            "--verbose",
             action="count",
             default=0,
-            help="Increase console detail. Repeat for more detail."
+            help="Increase console detail. Repeat for more detail.",
         )
     parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
-        help="Suppress nonessential console output."
+        help="Suppress nonessential console output.",
     )
     if include_log_level:
         parser.add_argument(
             "--log-level",
             choices=LOG_LEVELS,
             default=None,
-            help="Server log level. Overrides --verbose/--quiet for server logs."
+            help="Server log level. Overrides --verbose/--quiet for server logs.",
         )
+
 
 def apply_runtime_hotkey_safety(args) -> bool:
 
@@ -295,11 +320,14 @@ def apply_runtime_hotkey_safety(args) -> bool:
     left = {name: normalize_hotkey_name(value) for name, value in requested.items()}
     return any(left.get(k) != clean.get(k) for k in clean)
 
+
 def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
 
     configured_hotkeys = file_config.get("hotkeys", {})
     hotkeys = sanitize_hotkey_config(configured_hotkeys)
-    parser.set_defaults(_config_hotkeys_adjusted=hotkey_config_changed(configured_hotkeys, hotkeys))
+    parser.set_defaults(
+        _config_hotkeys_adjusted=hotkey_config_changed(configured_hotkeys, hotkeys)
+    )
     trans = file_config.get("transcription", {})
     ui = file_config.get("ui", {})
     hist = file_config.get("history", {})
@@ -311,81 +339,84 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
 
     server_group = parser.add_argument_group(
         "Voxium server",
-        "Local transcription server (faster-whisper) that Voxium starts or reuses."
+        "Local transcription server (faster-whisper) that Voxium starts or reuses.",
     )
     server_group.add_argument(
         "--server-url",
         default=server_url_default,
-        help="HTTP loopback transcription URL"
+        help="HTTP loopback transcription URL",
     )
     server_group.add_argument(
         "--server-start-timeout",
         type=int,
         default=trans.get("server_start_timeout", DEFAULT_SERVER_START_TIMEOUT),
-        help="Seconds to wait for server startup/model load"
+        help="Seconds to wait for server startup/model load",
     )
     server_group.add_argument(
         "--server-log-file",
         default=server.get("log_file", str(default_server_log_path())),
-        help="Managed server log path"
+        help="Managed server log path",
     )
     server_group.add_argument(
         "--server-device",
         choices=("auto", "cuda", "cpu"),
         default=server.get("device") or DEFAULT_SERVER_DEVICE,
-        help="Device for the local server (default: cuda — local GPU; use cpu if CUDA is unavailable)"
+        help="Device for the local server (default: cuda — local GPU; use cpu if CUDA is unavailable)",
     )
     server_group.add_argument(
         "--server-compute",
         choices=("auto", "float16", "int8"),
         default=server.get("compute") or DEFAULT_SERVER_COMPUTE,
-        help="Compute type for the local server (default: float16 for GPU)"
+        help="Compute type for the local server (default: float16 for GPU)",
     )
     server_group.add_argument(
         "--server-timeout",
         type=int,
         default=server.get("timeout", DEFAULT_SERVER_TIMEOUT),
-        help="Per-request server timeout in seconds"
+        help="Per-request server timeout in seconds",
     )
     server_group.add_argument(
         "--server-vad",
         action=argparse.BooleanOptionalAction,
         default=server.get("vad_enabled", True),
-        help="Enable/disable server VAD filtering when Voxium starts the server"
+        help="Enable/disable server VAD filtering when Voxium starts the server",
     )
     server_group.add_argument(
         "--server-gpu-metrics",
         action=argparse.BooleanOptionalAction,
         default=server.get("gpu_metrics_enabled", True),
-        help="Enable/disable per-request GPU metrics when Voxium starts the server"
+        help="Enable/disable per-request GPU metrics when Voxium starts the server",
     )
     server_group.add_argument(
         "--metrics-sample-interval",
         type=float,
         default=server.get("metrics_sample_interval", DEFAULT_METRICS_SAMPLE_INTERVAL),
-        help="GPU metrics sampling interval in seconds"
+        help="GPU metrics sampling interval in seconds",
     )
 
     transcription_group = parser.add_argument_group("Transcription")
     transcription_group.add_argument(
-        "--model", "-m",
+        "--model",
+        "-m",
         type=trusted_model_arg,
         default=trans.get("model"),
         metavar="MODEL",
-        help=f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP}"
+        help=f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP}",
     )
     transcription_group.add_argument(
-        "--language", "-l",
+        "--language",
+        "-l",
         default=trans.get("language"),
-        help="Language code for transcription"
+        help="Language code for transcription",
     )
 
     hotkey_group = parser.add_argument_group("Hotkeys and UI")
     # Parser defaults: coerce YAML ints (e.g. 6) to f6 / f7 (strings) so we never compare 7 to f7.
     hotkey_group.add_argument(
-        "--hotkey", "-k",
+        "--hotkey",
+        "-k",
         default=normalize_hotkey_name(hotkeys.get("record", "f9") or "f9"),
-        help="Record/stop F1-F12 hotkey. Examples: f8, f10, f12"
+        help="Record/stop F1-F12 hotkey. Examples: f8, f10, f12",
     )
     hotkey_group.add_argument(
         "--recovery-hotkey",
@@ -403,10 +434,11 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         help="Hotkey (F1–F12) to toggle PTT (push-to-talk) vs VOX (open-mic, utterance gating)",
     )
     hotkey_group.add_argument(
-        "--minimal", "-M",
+        "--minimal",
+        "-M",
         action="store_true",
         default=ui.get("minimal", False),
-        help="Minimal UI - only show status"
+        help="Minimal UI - only show status",
     )
 
     history_group = parser.add_argument_group("History")
@@ -430,62 +462,61 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         help="Max MiB for the last capture in RAM (re-transmit; default F6). Use 0 to disable",
     )
 
+
 def add_server_options(parser: argparse.ArgumentParser):
 
     parser.add_argument(
-        "--model", "-m",
+        "--model",
+        "-m",
         type=trusted_model_arg,
         default=DEFAULT_SERVER_MODEL,
         metavar="MODEL",
-        help=f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP}"
+        help=f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP}",
     )
     parser.add_argument(
-        "--device", "-d",
+        "--device",
+        "-d",
         choices=("auto", "cuda", "cpu"),
         default=DEFAULT_SERVER_DEVICE,
-        help="Device: auto, cuda, cpu"
+        help="Device: auto, cuda, cpu",
     )
     parser.add_argument(
-        "--compute", "-c",
+        "--compute",
+        "-c",
         choices=("auto", "float16", "int8"),
         default=DEFAULT_SERVER_COMPUTE,
-        help="Compute type: auto, float16, int8"
+        help="Compute type: auto, float16, int8",
     )
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="HTTP loopback host to bind to"
+        "--host", default="127.0.0.1", help="HTTP loopback host to bind to"
     )
+    parser.add_argument("--port", "-p", type=int, default=8002, help="Port to bind to")
     parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=8002,
-        help="Port to bind to"
-    )
-    parser.add_argument(
-        "--timeout", "-t",
+        "--timeout",
+        "-t",
         type=int,
         default=DEFAULT_SERVER_TIMEOUT,
-        help="Transcription timeout in seconds"
+        help="Transcription timeout in seconds",
     )
     parser.add_argument(
         "--vad",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable/disable VAD filtering"
+        help="Enable/disable VAD filtering",
     )
     parser.add_argument(
         "--gpu-metrics",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable/disable per-request GPU metrics sampling"
+        help="Enable/disable per-request GPU metrics sampling",
     )
     parser.add_argument(
         "--metrics-sample-interval",
         type=float,
         default=DEFAULT_METRICS_SAMPLE_INTERVAL,
-        help="GPU metrics sampling interval in seconds"
+        help="GPU metrics sampling interval in seconds",
     )
+
 
 def add_server_query_options(parser: argparse.ArgumentParser, file_config: dict):
 
@@ -496,19 +527,17 @@ def add_server_query_options(parser: argparse.ArgumentParser, file_config: dict)
     parser.add_argument(
         "--server-url",
         default=server_url_default,
-        help="HTTP loopback transcription URL"
+        help="HTTP loopback transcription URL",
     )
     parser.add_argument(
-        "--timeout",
-        type=float,
-        default=3.0,
-        help="HTTP request timeout in seconds"
+        "--timeout", type=float, default=3.0, help="HTTP request timeout in seconds"
     )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print raw JSON instead of a formatted panel"
+        help="Print raw JSON instead of a formatted panel",
     )
+
 
 def build_parser(file_config: dict) -> argparse.ArgumentParser:
 
@@ -529,7 +558,7 @@ Examples:
   voxium models                           List trusted models (Systran)
   voxium health --json                    Downlink: server health as JSON
   voxium server --help                    Foreground server (diagnostics; normal use: voxium run)
-        """
+        """,
     )
     parser.add_argument("--version", action="version", version=f"Voxium {APP_VERSION}")
 
@@ -582,9 +611,10 @@ Examples:
     models_parser.add_argument(
         "--json",
         action="store_true",
-        help="Print raw JSON instead of a formatted table"
+        help="Print raw JSON instead of a formatted table",
     )
     return parser
+
 
 def parse_args(argv: list[str] | None = None):
 
@@ -599,7 +629,7 @@ def parse_args(argv: list[str] | None = None):
             parser.error(str(exc))
     return args
 
-                           
+
 def check_dependencies():
     """Fail with a **single** report: Linux used to exit before the PortAudio check, hiding multiple fixes."""
     problems: list[str] = []
@@ -658,6 +688,7 @@ def check_dependencies():
         )
         sys.exit(1)
 
+
 def get_server_health(timeout: float = 2.0) -> dict | None:
 
     try:
@@ -690,12 +721,14 @@ def get_server_gpu_metrics() -> dict | None:
     except Exception:
         return None
 
+
 def resolve_log_level(args) -> str:
     return resolve_log_level_pure(
         log_level=getattr(args, "log_level", None),
         quiet=bool(getattr(args, "quiet", False)),
         verbose=int(getattr(args, "verbose", 0) or 0),
     )
+
 
 def cli_log(message: str, level: str = "info"):
 
@@ -731,6 +764,7 @@ def flush_client_telemetry_block(*, include_ops_cheat: bool = False) -> None:
         return
     print_agent_telemetry_panel(console, to_print)
     _telemetry_log_buffer.clear()
+
 
 def start_local_server():
 
@@ -772,14 +806,19 @@ def start_local_server():
 
     managed_server_process = subprocess.Popen(cmd, **kwargs)
     model_detail = config.model or "server default"
-    cli_log(f"Bringing local /transcribe online: model={model_detail}, url={config.server_url}")
+    cli_log(
+        f"Bringing local /transcribe online: model={model_detail}, url={config.server_url}"
+    )
     cli_log(f"Server log: {log_path}")
     cli_log(f"Server command: {subprocess.list2cmdline(cmd)}", "debug")
+
 
 def ensure_local_server():
 
     if not is_loopback_url(config.server_url):
-        print("Voxium: only local loopback for the transcribe server (no off-world URL).")
+        print(
+            "Voxium: only local loopback for the transcribe server (no off-world URL)."
+        )
         print(f"Use a loopback URL such as: {DEFAULT_SERVER_URL}")
         sys.exit(1)
 
@@ -810,7 +849,7 @@ def ensure_local_server():
     print(f"Check {config.server_log_file} for details.")
     sys.exit(1)
 
-                        
+
 def beep(freq: float, duration: float, volume: float = 0.12):
 
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
@@ -818,16 +857,20 @@ def beep(freq: float, duration: float, volume: float = 0.12):
     try:
         sd.play(wave, SAMPLE_RATE)
     except Exception:
-        pass                       
+        pass
+
 
 def beep_start():
     beep(880, 0.08)
 
+
 def beep_stop():
     beep(440, 0.12)
 
+
 def beep_error():
     beep(220, 0.2)
+
 
 def beep_success():
     beep(660, 0.08)
@@ -1000,9 +1043,11 @@ def _vox_monitor_loop() -> None:
         sc = int(tail.size) if tail.size else 0
         ssq = float(np.sum(tail * tail)) if tail.size else 0.0
         pk = float(np.max(np.abs(tail))) if tail.size else 0.0
-        st_lbl = (vox_chunker.state_label() if vox_chunker else "idle")
+        st_lbl = vox_chunker.state_label() if vox_chunker else "idle"
         if config and config.minimal:
-            d: str | RenderableType = f"VOX  {st_lbl}  ·  pk{pk:5.2f}  {sc // max(1, SAMPLE_RATE):4.1f}s"
+            d: str | RenderableType = (
+                f"VOX  {st_lbl}  ·  pk{pk:5.2f}  {sc // max(1, SAMPLE_RATE):4.1f}s"
+            )
         elif ptt_status_box is not None and config and not config.minimal and tail.size:
             inner_w = max(16, voxium_panel_width(console) - 4)
             d = build_recording_hud_rich(
@@ -1228,21 +1273,23 @@ def show_status(status: str, detail: str = ""):
         return
     if not config.minimal and ptt_status_box is None:
         console.print(
-            build_status_box_panel(status, detail, box_width=voxium_panel_width(console))
+            build_status_box_panel(
+                status, detail, box_width=voxium_panel_width(console)
+            )
         )
         return
 
-                                           
-    sys.stdout.write("\033[2J\033[H")                             
-    sys.stdout.write("\n" * 8)                    
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.write("\n" * 8)
     sys.stdout.write(f"{'─' * 40}\n")
     sys.stdout.write(f"{status:^40}\n")
     if detail:
-                                     
+
         detail = detail[:36] + "..." if len(detail) > 36 else detail
         sys.stdout.write(f"{detail:^40}\n")
     sys.stdout.write(f"{'─' * 40}\n")
     sys.stdout.flush()
+
 
 def _arm_status_after_log_scrollback() -> None:
     """After the blue PTT&VOX log :class:`Panel` (post-freeze), show one fresh green status — not a re-render of the take chain.
@@ -1290,38 +1337,43 @@ def log_transcription_summary(text: str, metrics: dict | None):
         metrics_block,
     )
     console.print()
-    console.print(Panel(
-        content,
-        title="[bold #38bdf8]Voxium[/bold #38bdf8]",
-        title_align="left",
-        subtitle="[dim]PTT & VOX log — local loopback only[/dim]",
-        subtitle_align="left",
-        border_style="#38bdf8",
-        padding=(1, 1),
-        width=w_box,
-    ))
+    console.print(
+        Panel(
+            content,
+            title="[bold #38bdf8]Voxium[/bold #38bdf8]",
+            title_align="left",
+            subtitle="[dim]PTT & VOX log — local loopback only[/dim]",
+            subtitle_align="left",
+            border_style="#38bdf8",
+            padding=(1, 1),
+            width=w_box,
+        )
+    )
     if config and not config.minimal:
         _arm_status_after_log_scrollback()
 
-                                         
+
 def get_active_window():
 
     try:
         if SYSTEM == "Linux":
             return subprocess.check_output(
-                ["xdotool", "getactivewindow"],
-                stderr=subprocess.DEVNULL
+                ["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL
             ).strip()
         elif SYSTEM == "Windows":
             import ctypes
+
             return ctypes.windll.user32.GetForegroundWindow()
         elif SYSTEM == "Darwin":
             script = 'tell application "System Events" to get name of first process whose frontmost is true'
-            result = subprocess.check_output(["osascript", "-e", script], stderr=subprocess.DEVNULL)
+            result = subprocess.check_output(
+                ["osascript", "-e", script], stderr=subprocess.DEVNULL
+            )
             return result.strip()
     except Exception:
         return None
     return None
+
 
 def focus_window(window_id):
 
@@ -1331,46 +1383,59 @@ def focus_window(window_id):
         if SYSTEM == "Linux":
             subprocess.run(
                 ["xdotool", "windowactivate", "--sync", window_id],
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
         elif SYSTEM == "Windows":
             import ctypes
+
             ctypes.windll.user32.SetForegroundWindow(window_id)
         elif SYSTEM == "Darwin":
-                                          
+
             script = f'tell application "{window_id.decode()}" to activate'
             subprocess.run(["osascript", "-e", script], stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
+
 def is_terminal_window(window_id) -> bool:
 
     try:
         if SYSTEM == "Linux":
-            wm_class = subprocess.check_output(
-                ["xprop", "-id", window_id, "WM_CLASS"],
-                stderr=subprocess.DEVNULL
-            ).decode().lower()
+            wm_class = (
+                subprocess.check_output(
+                    ["xprop", "-id", window_id, "WM_CLASS"], stderr=subprocess.DEVNULL
+                )
+                .decode()
+                .lower()
+            )
             return any(t in wm_class for t in TERMINALS.get("Linux", []))
 
         elif SYSTEM == "Windows":
             import ctypes
+
             buffer = ctypes.create_unicode_buffer(256)
             ctypes.windll.user32.GetWindowTextW(window_id, buffer, 256)
             title = buffer.value.lower()
             class_buffer = ctypes.create_unicode_buffer(256)
             ctypes.windll.user32.GetClassNameW(window_id, class_buffer, 256)
             class_name = class_buffer.value
-            return any(t.lower() in title or t.lower() in class_name.lower()
-                      for t in TERMINALS.get("Windows", []))
+            return any(
+                t.lower() in title or t.lower() in class_name.lower()
+                for t in TERMINALS.get("Windows", [])
+            )
 
         elif SYSTEM == "Darwin":
-                                            
-            app_name = window_id.decode() if isinstance(window_id, bytes) else str(window_id)
-            return any(t.lower() in app_name.lower() for t in TERMINALS.get("Darwin", []))
+
+            app_name = (
+                window_id.decode() if isinstance(window_id, bytes) else str(window_id)
+            )
+            return any(
+                t.lower() in app_name.lower() for t in TERMINALS.get("Darwin", [])
+            )
     except Exception:
         pass
     return False
+
 
 def query_default_audio_input() -> tuple[dict | None, dict | None, str | None]:
 
@@ -1389,6 +1454,7 @@ def query_default_audio_input() -> tuple[dict | None, dict | None, str | None]:
 
     return device, host_api, None
 
+
 def describe_audio_capture_source() -> str:
 
     device, host_api, error = query_default_audio_input()
@@ -1396,13 +1462,16 @@ def describe_audio_capture_source() -> str:
         return f"unavailable ({error})"
     name = device.get("name") if device else None
     host_api_name = host_api.get("name") if host_api else None
-    default_rate = round_audio_float(device.get("default_samplerate"), 0) if device else None
+    default_rate = (
+        round_audio_float(device.get("default_samplerate"), 0) if device else None
+    )
     details = [name or "default input"]
     if host_api_name:
         details.append(f"via {host_api_name}")
     if default_rate:
         details.append(f"default={default_rate:.0f} Hz")
     return ", ".join(details)
+
 
 def build_audio_capture_info(stream_obj: sd.InputStream | None = None) -> dict:
 
@@ -1426,9 +1495,15 @@ def build_audio_capture_info(stream_obj: sd.InputStream | None = None) -> dict:
             "index": device.get("index"),
             "name": device.get("name"),
             "max_input_channels": device.get("max_input_channels"),
-            "default_samplerate_hz": round_audio_float(device.get("default_samplerate")),
-            "default_low_input_latency_seconds": round_audio_float(device.get("default_low_input_latency")),
-            "default_high_input_latency_seconds": round_audio_float(device.get("default_high_input_latency")),
+            "default_samplerate_hz": round_audio_float(
+                device.get("default_samplerate")
+            ),
+            "default_low_input_latency_seconds": round_audio_float(
+                device.get("default_low_input_latency")
+            ),
+            "default_high_input_latency_seconds": round_audio_float(
+                device.get("default_high_input_latency")
+            ),
         }
 
     host_api_info = {}
@@ -1464,6 +1539,7 @@ def build_audio_capture_info(stream_obj: sd.InputStream | None = None) -> dict:
         capture_info["error"] = error
     return capture_info
 
+
 def finalize_audio_capture_info(
     captured_frames: int,
     chunks: int,
@@ -1484,7 +1560,7 @@ def finalize_audio_capture_info(
         rms_dbfs=rms_dbfs,
     )
 
-                   
+
 def audio_callback(indata, _frames, _time_info, status):
     global audio_chunks, audio_capture_statuses, recording_sum_sq, recording_sample_count, recording_peak_abs
     if status:
@@ -1502,6 +1578,7 @@ def audio_callback(indata, _frames, _time_info, status):
         if p > recording_peak_abs:
             recording_peak_abs = p
 
+
 def start_recording():
 
     global stream, audio_chunks, target_window, current_audio_capture_info
@@ -1516,10 +1593,7 @@ def start_recording():
     target_window = get_active_window()
     recording_started_at = time.perf_counter()
     stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype='float32',
-        callback=audio_callback
+        samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback
     )
     stream.start()
     current_audio_capture_info = build_audio_capture_info(stream)
@@ -1538,6 +1612,7 @@ def start_recording():
             f"reminder ping every {RECORDING_REMINDER_INTERVAL_S:.0f}s"
         ),
     )
+
 
 def stop_recording() -> np.ndarray:
 
@@ -1575,7 +1650,9 @@ def stop_recording() -> np.ndarray:
         sc = recording_sample_count
         pk = recording_peak_abs
 
-    wall_seconds = stop_time - recording_started_at if recording_started_at is not None else None
+    wall_seconds = (
+        stop_time - recording_started_at if recording_started_at is not None else None
+    )
     peak_arg: float | None = None
     rms_arg: float | None = None
     if sc and captured_frames:
@@ -1594,9 +1671,11 @@ def stop_recording() -> np.ndarray:
         return np.array([], dtype=np.float32)
     return np.concatenate(to_concat).flatten()
 
+
 def is_client_shutting_down() -> bool:
 
     return client_shutdown_event.is_set()
+
 
 def cleanup_client_runtime():
 
@@ -1631,6 +1710,7 @@ def cleanup_client_runtime():
         finally:
             ptt_status_box = None
 
+
 def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) -> str:
 
     global last_transcription_metrics
@@ -1638,7 +1718,9 @@ def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) 
     wav_buffer.seek(0)
 
     if not is_loopback_url(config.server_url):
-        raise ValueError("Remote transcription URLs are not supported; use http://localhost:8002/transcribe")
+        raise ValueError(
+            "Remote transcription URLs are not supported; use http://localhost:8002/transcribe"
+        )
 
     files = {"file": ("audio.wav", wav_buffer, "audio/wav")}
     data = {}
@@ -1655,7 +1737,6 @@ def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) 
     except requests.HTTPError as e:
         raise RuntimeError(http_error_detail_text(e)) from e
 
-                                                               
     try:
         result = resp.json()
         metrics = result.get("metrics") if isinstance(result, dict) else None
@@ -1669,19 +1750,18 @@ def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) 
         last_transcription_metrics = {"capture": capture_info} if capture_info else None
         return resp.text.strip()
 
+
 def transcribe(audio: np.ndarray) -> str:
 
     global last_transcription_metrics
     last_transcription_metrics = None
 
-    if len(audio) < SAMPLE_RATE * 0.5:           
+    if len(audio) < SAMPLE_RATE * 0.5:
         return ""
 
-                                                         
     if not has_speech(audio, SAMPLE_RATE):
         return ""
 
-                          
     audio_int16 = (audio * 32767).astype(np.int16)
     wav_buffer = io.BytesIO()
     wavfile.write(wav_buffer, SAMPLE_RATE, audio_int16)
@@ -1700,79 +1780,82 @@ def transcribe(audio: np.ndarray) -> str:
 
     return text
 
-               
+
 def paste_text(text: str):
 
     global _last_paste_time
     if is_client_shutting_down():
         return
 
-                                                              
     now = time.time() * 1000
     if now - _last_paste_time < PASTE_DEBOUNCE_MS:
         if DEBUG_PASTE:
-            print(f"[DEBUG] paste_text BLOCKED by debounce (delta={now - _last_paste_time:.0f}ms)")
-        return                        
+            print(
+                f"[DEBUG] paste_text BLOCKED by debounce (delta={now - _last_paste_time:.0f}ms)"
+            )
+        return
     _last_paste_time = now
 
     if DEBUG_PASTE:
         import traceback
+
         print(f"[DEBUG] paste_text called at {now:.0f}ms")
         print(f"[DEBUG] text length: {len(text)}, preview: {text[:50]!r}")
         print(f"[DEBUG] call stack:\n{''.join(traceback.format_stack()[-4:-1])}")
 
-                        
     try:
         old_clipboard = pyperclip.paste()
     except Exception:
         old_clipboard = None
 
-                       
     pyperclip.copy(text)
     time.sleep(0.05)
 
-                           
     focus_window(target_window)
     time.sleep(0.05)
 
-                              
     is_terminal = is_terminal_window(target_window) if target_window else False
 
     if SYSTEM == "Linux":
         key = "ctrl+shift+v" if is_terminal else "ctrl+v"
         if DEBUG_PASTE:
             print(f"[DEBUG] xdotool sending: {key} (is_terminal={is_terminal})")
-                                                                              
-                                                 
-        subprocess.run(["xdotool", "key", "--clearmodifiers", "--delay", "50", key], stderr=subprocess.DEVNULL)
+
+        subprocess.run(
+            ["xdotool", "key", "--clearmodifiers", "--delay", "50", key],
+            stderr=subprocess.DEVNULL,
+        )
         if DEBUG_PASTE:
             print("[DEBUG] xdotool completed")
 
     elif SYSTEM == "Windows":
         import pyautogui
+
         if is_terminal:
-                                                              
-            pyautogui.hotkey('ctrl', 'v')
+
+            pyautogui.hotkey("ctrl", "v")
         else:
-            pyautogui.hotkey('ctrl', 'v')
+            pyautogui.hotkey("ctrl", "v")
 
     elif SYSTEM == "Darwin":
         import pyautogui
-        pyautogui.hotkey('command', 'v', interval=0.05)                                                
 
-                                                                                
+        pyautogui.hotkey("command", "v", interval=0.05)
+
     if old_clipboard:
+
         def restore():
-                                                            
+
             delay = min(3.0, max(1.0, 1.0 + len(text) * 0.0001))
             time.sleep(delay)
             try:
                 pyperclip.copy(old_clipboard)
             except Exception:
                 pass
+
         threading.Thread(target=restore, daemon=True).start()
 
-                    
+
 def transcribe_and_paste(
     audio: np.ndarray, *, source: str = "ptt", paste_target: Any | None = None
 ):
@@ -1857,13 +1940,12 @@ def transcribe_and_paste(
         # re-armed after the blue log; we only add pacing sleep here. No-speech / error paths re-arm
         # above and skip the sleep so the green strip and VOX HUD return immediately.
 
+
 def get_hotkey(key_name: str):
 
-    key_map = {
-        key: getattr(keyboard.Key, key)
-        for key in HOTKEY_ORDER
-    }
+    key_map = {key: getattr(keyboard.Key, key) for key in HOTKEY_ORDER}
     return key_map[normalize_hotkey_name(key_name)]
+
 
 def create_hotkey_handler(hotkey):
 
@@ -1898,12 +1980,11 @@ def create_hotkey_handler(hotkey):
                 state = State.TRANSCRIBING
                 audio = stop_recording()
                 threading.Thread(
-                    target=transcribe_and_paste,
-                    args=(audio,),
-                    daemon=True
+                    target=transcribe_and_paste, args=(audio,), daemon=True
                 ).start()
 
     return on_press
+
 
 def create_recovery_handler(recovery_key):
 
@@ -1914,7 +1995,7 @@ def create_recovery_handler(recovery_key):
 
         with state_lock:
             if state != State.IDLE:
-                return                          
+                return
 
         h = get_transcript_history()
         if h is None:
@@ -1935,6 +2016,7 @@ def create_recovery_handler(recovery_key):
 
     return on_press
 
+
 def create_retry_handler(retry_key):
 
     def on_press(key):
@@ -1944,7 +2026,7 @@ def create_retry_handler(retry_key):
 
         with state_lock:
             if state != State.IDLE:
-                return                        
+                return
 
         h = get_transcript_history()
         if h is None:
@@ -1957,10 +2039,8 @@ def create_retry_handler(retry_key):
             show_status("❌ NO PENDING", "Nothing to re-transmit")
             return
 
-                                                                 
         target_window = get_active_window()
 
-                                      
         set_terminal_title()
         show_status(
             STATUS_EDGE_INFERENCE_REXMIT,
@@ -2006,7 +2086,6 @@ def create_retry_handler(retry_key):
             beep_error()
             set_terminal_title()
             show_status("❌ RE-TRANSMIT FAILED", str(e)[:200])
-                                                          
 
     return on_press
 
@@ -2057,7 +2136,10 @@ def create_mode_toggle_handler(mode_key, mode_hotkey_label: str):
                 if ptt_status_box is not None:
                     ptt_status_box.restore_live_after_scrollback_output()
             else:
-                print("Voxium: input mode VOX (open mic, utterance gating).", file=sys.stderr)
+                print(
+                    "Voxium: input mode VOX (open mic, utterance gating).",
+                    file=sys.stderr,
+                )
         else:
             _stop_vox_listening()
             _set_input_mode("ptt")
@@ -2090,9 +2172,11 @@ class _WindowsLock:
 
     def close(self):
         import ctypes
+
         if self._handle:
             ctypes.windll.kernel32.CloseHandle(self._handle)
             self._handle = None
+
 
 def acquire_instance_lock():
 
@@ -2100,25 +2184,29 @@ def acquire_instance_lock():
 
     if SYSTEM == "Windows":
         import ctypes
+
         handle = ctypes.windll.kernel32.CreateMutexW(None, True, "VoxiumSingleInstance")
-        if ctypes.windll.kernel32.GetLastError() == 183:                        
+        if ctypes.windll.kernel32.GetLastError() == 183:
             try:
-                with open(lock_file, 'r') as f:
+                with open(lock_file, "r") as f:
                     pid = f.read().strip()
                 print(f"Another PTT session is already on the air (PID {pid})")
             except Exception:
-                print("Voxium is already running — one operator at a time (single instance).")
+                print(
+                    "Voxium is already running — one operator at a time (single instance)."
+                )
             ctypes.windll.kernel32.CloseHandle(handle)
             sys.exit(1)
         try:
-            with open(lock_file, 'w') as f:
+            with open(lock_file, "w") as f:
                 f.write(str(os.getpid()))
         except Exception:
             pass
         return _WindowsLock(handle)
     else:
         import fcntl
-        lock_fd = open(lock_file, 'w')
+
+        lock_fd = open(lock_file, "w")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             lock_fd.write(str(os.getpid()))
@@ -2126,12 +2214,15 @@ def acquire_instance_lock():
             return lock_fd
         except BlockingIOError:
             try:
-                with open(lock_file, 'r') as f:
+                with open(lock_file, "r") as f:
                     pid = f.read().strip()
                 print(f"Another PTT session is already on the air (PID {pid})")
             except Exception:
-                print("Voxium is already running — one operator at a time (single instance).")
+                print(
+                    "Voxium is already running — one operator at a time (single instance)."
+                )
             sys.exit(1)
+
 
 def run_server_command(args) -> int:
 
@@ -2144,14 +2235,22 @@ def run_server_command(args) -> int:
 
     host = normalize_loopback_host(args.host)
     server_argv = [
-        "--model", args.model,
-        "--device", args.device,
-        "--compute", args.compute,
-        "--host", host,
-        "--port", str(args.port),
-        "--timeout", str(args.timeout),
-        "--metrics-sample-interval", str(args.metrics_sample_interval),
-        "--log-level", resolve_log_level(args),
+        "--model",
+        args.model,
+        "--device",
+        args.device,
+        "--compute",
+        args.compute,
+        "--host",
+        host,
+        "--port",
+        str(args.port),
+        "--timeout",
+        str(args.timeout),
+        "--metrics-sample-interval",
+        str(args.metrics_sample_interval),
+        "--log-level",
+        resolve_log_level(args),
     ]
     if not args.vad:
         server_argv.append("--no-vad")
@@ -2160,6 +2259,7 @@ def run_server_command(args) -> int:
 
     whisper_server.main(server_argv)
     return 0
+
 
 def print_server_response(title: str, data: dict, raw_json: bool):
 
@@ -2177,10 +2277,13 @@ def print_server_response(title: str, data: dict, raw_json: bool):
         )
     )
 
+
 def run_server_query(args, endpoint: str) -> int:
 
     if not is_loopback_url(args.server_url):
-        print("Voxium: only HTTP loopback for server queries (keep the link on the ground).")
+        print(
+            "Voxium: only HTTP loopback for server queries (keep the link on the ground)."
+        )
         print(f"Use a URL such as: {DEFAULT_SERVER_URL}")
         return 2
 
@@ -2197,14 +2300,14 @@ def run_server_query(args, endpoint: str) -> int:
     print_server_response(f"Downlink /{endpoint}", data, args.json)
     return 0
 
+
 def run_models_command(args) -> int:
 
     payload = {
         "default": DEFAULT_MODEL_NAME,
         "trusted_namespace": "Systran",
         "models": [
-            {"name": name, **metadata}
-            for name, metadata in TRUSTED_MODELS.items()
+            {"name": name, **metadata} for name, metadata in TRUSTED_MODELS.items()
         ],
     }
     if args.json:
@@ -2218,9 +2321,12 @@ def run_models_command(args) -> int:
     table.add_column("Notes")
     for name, metadata in TRUSTED_MODELS.items():
         label = f"{name} (default)" if name == DEFAULT_MODEL_NAME else name
-        table.add_row(label, metadata["repo"], metadata["vram"], metadata["description"])
+        table.add_row(
+            label, metadata["repo"], metadata["vram"], metadata["description"]
+        )
     console.print(table)
     return 0
+
 
 def run_client(args, _raw_argv: list[str]) -> int:
 
@@ -2241,7 +2347,6 @@ def run_client(args, _raw_argv: list[str]) -> int:
         False,
     )
 
-                            
     lock_fd = acquire_instance_lock()
     atexit.register(lambda: lock_fd.close())
     atexit.register(lambda: server_log_handle.close() if server_log_handle else None)
@@ -2490,6 +2595,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
         print("\nVoxium: going clear. Stopped.")
     return 0
 
+
 def main(argv: list[str] | None = None):
     try:
         raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -2508,6 +2614,7 @@ def main(argv: list[str] | None = None):
         cleanup_client_runtime()
         print("\nVoxium: going clear. Stopped.")
         return 130
+
 
 if __name__ == "__main__":
     sys.exit(main())

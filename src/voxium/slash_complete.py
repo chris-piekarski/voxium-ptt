@@ -5,13 +5,21 @@ When the first token (after ``/``) is still being edited, we match primary comma
 (``help``, ``mic``, ``gpu``, ``models``) and all aliases. After the operator types a
 space, command completion and hints stop (first word committed).
 """
+
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
 # One canonical name per public command; order = Tab cycle when ambiguous.
-SLASH_COMMAND_ORDER: tuple[str, ...] = ("help", "history", "disk", "mic", "gpu", "models")
+SLASH_COMMAND_ORDER: tuple[str, ...] = (
+    "help",
+    "history",
+    "disk",
+    "mic",
+    "gpu",
+    "models",
+)
 
 # (typed token, primary) — all forms accepted by :func:`voxium.slash_commands.run_slash_line`.
 SLASH_ALIASES: tuple[tuple[str, str], ...] = (

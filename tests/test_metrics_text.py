@@ -52,7 +52,9 @@ def test_format_optional_seconds_list():
 
 
 def test_describe_server():
-    assert "model=foo" in describe_server({"model": "foo", "device": "cuda", "compute": "f16"})
+    assert "model=foo" in describe_server(
+        {"model": "foo", "device": "cuda", "compute": "f16"}
+    )
 
 
 def test_describe_server_minimal():

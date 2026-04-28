@@ -2,7 +2,11 @@
 
 import pytest
 
-from voxium.model_registry import TRUSTED_MODELS, resolve_model_repo, validate_model_name
+from voxium.model_registry import (
+    TRUSTED_MODELS,
+    resolve_model_repo,
+    validate_model_name,
+)
 
 
 def test_validate_model_name_accepts_default():

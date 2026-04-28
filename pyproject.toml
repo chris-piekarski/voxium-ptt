@@ -39,6 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "black>=24.3",
+    "pylint>=3.2",
     "ruff>=0.4",
     "pytest>=7",
     "pytest-cov>=4.1",
@@ -61,6 +63,49 @@ include = ["voxium*"]
 [tool.ruff.lint.per-file-ignores]
 "src/voxium/whisper_server.py" = ["E402"]
 
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+extend-exclude = "/(\\.venv.*|build|dist|htmlcov|\\.mypy_cache|\\.ruff_cache)/"
+
+# Pylint: semantic / complexity checks Ruff does not own. Line length and import order are
+# Black / Ruff; large entrypoints match mypy (ignored here for noise and scan time).
+[tool.pylint.main]
+py-version = "3.10"
+jobs = 0
+ignore = ["app.py", "whisper_server.py"]
+
+[tool.pylint."messages control"]
+disable = [
+  "line-too-long",
+  "too-many-lines",
+  "missing-module-docstring",
+  "missing-class-docstring",
+  "missing-function-docstring",
+  "import-outside-toplevel",
+  "too-few-public-methods",
+  "too-many-arguments",
+  "too-many-locals",
+  "too-many-branches",
+  "too-many-statements",
+  "too-many-positional-arguments",
+  "too-many-return-statements",
+  "too-many-instance-attributes",
+  "subprocess-run-check",
+  "consider-using-f-string",
+  "unused-argument",
+  "broad-exception-caught",
+  "protected-access",
+  "use-implicit-booleaness-not-comparison",
+  "global-statement",
+  "invalid-name",
+  "consider-using-from-import",
+  "wrong-import-order",
+  "unused-variable",
+  "undefined-all-variable",
+  "duplicate-code",
+]
+
 [tool.mypy]
 python_version = "3.10"
 strict = false
@@ -68,7 +113,8 @@ warn_unused_ignores = true
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
-packages = ["voxium", "voxium.cli"]
+# Only list top-level packages; subpackages like voxium.cli are part of voxium.
+packages = ["voxium"]
 ignore_missing_imports = true
 exclude = [".venv", "build", "dist"]
 

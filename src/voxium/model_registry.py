@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 TRUSTED_MODEL_NAMESPACE = "Systran"
@@ -91,6 +89,7 @@ TRUSTED_MODELS: dict[str, dict[str, str]] = {
 TRUSTED_MODEL_NAMES = tuple(TRUSTED_MODELS)
 TRUSTED_MODEL_HELP = ", ".join(TRUSTED_MODEL_NAMES)
 
+
 def validate_model_name(model_name: str | None) -> str:
 
     model = (model_name or DEFAULT_MODEL_NAME).strip()
@@ -101,6 +100,7 @@ def validate_model_name(model_name: str | None) -> str:
             f"Only {TRUSTED_MODEL_NAMESPACE} faster-whisper models are permitted."
         )
     return model
+
 
 def resolve_model_repo(model_name: str | None) -> str:
 

@@ -2,6 +2,7 @@
 Rotating HAM/CB-tinged readback lines for successful VOX (brand: docs/brand.md).
 Pure + thread-safe: safe when transcribe runs on a worker thread.
 """
+
 from __future__ import annotations
 
 import threading

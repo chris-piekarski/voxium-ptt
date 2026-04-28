@@ -402,15 +402,21 @@ def build_metrics_table(metrics: dict | None) -> Table:
 
         table.add_row("", "")
         table.add_row("Capture", str(device.get("name") or "default input"))
-        table.add_row("Audio API", str(host_api.get("name") or backend.get("api") or "unknown"))
+        table.add_row(
+            "Audio API", str(host_api.get("name") or backend.get("api") or "unknown")
+        )
         table.add_row(
             "Format",
             f"{format_number(audio_format.get('sample_rate_hz'), ' Hz', 0)} / "
             f"{format_number(audio_format.get('channels'), ' ch', 0)} / "
             f"{audio_format.get('dtype') or 'unknown'}",
         )
-        table.add_row("Device Rate", format_number(device.get("default_samplerate_hz"), " Hz", 0))
-        table.add_row("Latency", format_optional_seconds(stream_info.get("latency_seconds")))
+        table.add_row(
+            "Device Rate", format_number(device.get("default_samplerate_hz"), " Hz", 0)
+        )
+        table.add_row(
+            "Latency", format_optional_seconds(stream_info.get("latency_seconds"))
+        )
         table.add_row(
             "Recorded",
             f"{format_seconds(recording.get('capture_seconds'))} / "
@@ -419,7 +425,9 @@ def build_metrics_table(metrics: dict | None) -> Table:
         )
         table.add_row("Capture Wall", format_seconds(recording.get("wall_seconds")))
         if statuses:
-            table.add_row("Capture Flags", "; ".join(str(status) for status in statuses[:3]))
+            table.add_row(
+                "Capture Flags", "; ".join(str(status) for status in statuses[:3])
+            )
 
     model = metrics.get("model") if isinstance(metrics, dict) else None
     if model:

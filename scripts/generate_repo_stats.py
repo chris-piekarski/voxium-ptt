@@ -9,6 +9,7 @@ update ``docs/repository-stats.md`` between:
 
 Run: ``python scripts/generate_repo_stats.py`` or ``make repo-stats``
 """
+
 from __future__ import annotations
 
 import os
@@ -156,7 +157,9 @@ def generate_markdown(stats: dict[str, Any]) -> str:
     overall = stats["overall"]
 
     pie_lines = ["```mermaid", "pie title Code LOC by area"]
-    for name, data in sorted(by_area.items(), key=lambda kv: kv[1]["code"], reverse=True):
+    for name, data in sorted(
+        by_area.items(), key=lambda kv: kv[1]["code"], reverse=True
+    ):
         if data["code"] == 0:
             continue
         pie_lines.append(f'  "{name}" : {data["code"]}')
@@ -168,7 +171,9 @@ def generate_markdown(stats: dict[str, Any]) -> str:
         ]
 
     top_n = 8
-    sorted_mods = sorted(by_module_py.items(), key=lambda kv: kv[1]["code"], reverse=True)
+    sorted_mods = sorted(
+        by_module_py.items(), key=lambda kv: kv[1]["code"], reverse=True
+    )
     module_pie = ["```mermaid", "pie title Code LOC by voxium package (Python)"]
     top = sorted_mods[:top_n]
     other_sum = sum(v["code"] for _, v in sorted_mods[top_n:])
@@ -184,7 +189,9 @@ def generate_markdown(stats: dict[str, Any]) -> str:
         "| Area | Code LOC | Total lines |",
         "|------|----------|-------------|",
     ]
-    for name, data in sorted(by_area.items(), key=lambda kv: kv[1]["code"], reverse=True):
+    for name, data in sorted(
+        by_area.items(), key=lambda kv: kv[1]["code"], reverse=True
+    ):
         area_rows.append(
             f"| {name} | {format_number(data['code'])} | {format_number(data['total'])} |"
         )
@@ -193,7 +200,9 @@ def generate_markdown(stats: dict[str, Any]) -> str:
         "| Package (`src/voxium/`, `.py`) | Code LOC | Total lines |",
         "|----------------------------------|----------|-------------|",
     ]
-    for name, data in sorted(by_module_py.items(), key=lambda kv: kv[1]["code"], reverse=True)[:12]:
+    for name, data in sorted(
+        by_module_py.items(), key=lambda kv: kv[1]["code"], reverse=True
+    )[:12]:
         mod_rows.append(
             f"| {name} | {format_number(data['code'])} | {format_number(data['total'])} |"
         )
