@@ -6,12 +6,27 @@ param(
     [string[]] $VoxiumArgs
 )
 $ErrorActionPreference = "Stop"
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force | Out-Null
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $RepoRoot
 
+$PyProject = Join-Path $RepoRoot "pyproject.toml"
+if (-not (Test-Path -LiteralPath $PyProject)) {
+    Write-Host ""
+    Write-Host "[ERROR] pyproject.toml not found at: $RepoRoot" -ForegroundColor Red
+    Write-Host "Voxium.ps1 must live in the clone at:  <repo>\scripts\windows\" -ForegroundColor Yellow
+    Write-Host "Do not move or copy this script out of the repository." -ForegroundColor Yellow
+    Write-Host ""
+    exit 1
+}
+
+if ($env:VOXIUM_WINDOWS_DEBUG -eq "1") {
+    Write-Host "[debug] Repo root: $RepoRoot" -ForegroundColor DarkGray
+}
+
 $Vox = Join-Path $RepoRoot ".venv\Scripts\voxium.exe"
 $Py = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (Test-Path $Vox) {
+if (Test-Path -LiteralPath $Vox) {
     if ($VoxiumArgs) {
         & $Vox @VoxiumArgs
     } else {
@@ -19,7 +34,7 @@ if (Test-Path $Vox) {
     }
     exit $LASTEXITCODE
 }
-if (Test-Path $Py) {
+if (Test-Path -LiteralPath $Py) {
     if ($VoxiumArgs) {
         & $Py -m voxium @VoxiumArgs
     } else {
@@ -28,8 +43,10 @@ if (Test-Path $Py) {
     exit $LASTEXITCODE
 }
 Write-Host ""
-Write-Host "Voxium not found: missing .venv\Scripts\voxium.exe and .venv\Scripts\python.exe" -ForegroundColor Red
-Write-Host "  Fix:  run scripts\windows\venv_bootstrap.cmd  in this folder (one-time venv + pip install -e .)" -ForegroundColor Yellow
-Write-Host "  Then:  scripts\windows\Voxium.cmd" -ForegroundColor Yellow
+Write-Host "Voxium is not set up: .venv\Scripts\python.exe is missing." -ForegroundColor Red
+Write-Host "  One-time fix (PowerShell, from this repo root):" -ForegroundColor Yellow
+Write-Host "    pwsh -ExecutionPolicy Bypass -File .\scripts\windows\Setup-Voxium.ps1" -ForegroundColor Cyan
+Write-Host "  Or double-click:  scripts\windows\Setup-Voxium.cmd" -ForegroundColor Cyan
+Write-Host "  (Legacy) cmd:  scripts\windows\venv_bootstrap.cmd" -ForegroundColor DarkGray
 Write-Host ""
 exit 1

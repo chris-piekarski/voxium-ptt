@@ -1,3 +1,15 @@
+  ····················································································
+  PTT & VOX  —  VOX in, text out on the loopback  —  you key, the stack is in the loop
+  ····················································································
+
+  █   █  ███  █   █  ███  █   █ █   █
+  █   █ █   █ █   █   █   █   █ ██ ██
+  █   █ █   █  ███    █   █   █ █ █ █
+   █ █  █   █ █   █   █   █   █ █   █
+    █    ███  █   █  ███   ███  █   █
+
+  ····················································································
+
 # Voxium 0.0.1
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.1-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.1-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
@@ -30,7 +42,7 @@ make start         # same as: .venv/bin/voxium run
 
 **Repo snapshot:** `make repo-stats` regenerates [docs/repository-stats.md](docs/repository-stats.md) (line counts and Mermaid pie charts; uses system `python3`, not the venv).
 
-**Cleanup:** `make clean` (tool caches, `__pycache__`, coverage, root `*.egg-info`; keeps `.venv` and `.dev-install-stamp`), `make uninstall` (removes `.venv`, `.dev-install-stamp`, root `*.egg-info`), `make disk-usage` (size of those three data directories).
+**Cleanup:** `make clean` (tool caches, `__pycache__`, coverage, root `*.egg-info`; keeps `.venv` and `.dev-install-stamp`), `make uninstall` (removes `.venv`, `.dev-install-stamp`, root `*.egg-info`), `make disk-usage` (size of `models/` and `logs/` under the repo).
 
 ## Windows (PowerShell; no Make)
 
@@ -46,7 +58,7 @@ On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`*
 | `make repo-stats` | `python3 scripts/generate_repo_stats.py` to refresh [docs/repository-stats.md](docs/repository-stats.md) |
 | `make disk-usage` | show sizes of `models/`, `logs/` under the repo (or use your shell’s `du`) |
 
-**Convenience (from a clone):** `scripts\windows\venv_bootstrap.cmd` creates `.venv` and editable-installs Voxium. After that, `scripts\windows\Voxium.cmd` (or `Voxium.ps1` with `ExecutionPolicy` bypass) runs `voxium`. The app sets a short window/tab title (default matches `VOXIUM_WINDOW_TITLE` in `voxium/app.py`; override with environment variable `VOXIUM_WINDOW_TITLE` before launch if needed).
+**Convenience (from a clone):** run **`scripts\windows\Setup-Voxium.cmd`** once, then start the app with **`Voxium.cmd` in the repository root** (next to `pyproject.toml`) — that file calls `scripts\windows\Voxium.cmd` with the correct folder. If you need a shortcut in the **parent** of the clone (e.g. `Desktop\WSL-Workspaces\` with the repo in `WSL-Workspaces\voxium\`), use **`scripts\windows\Voxium-From-Parent-Folder.cmd`** there — do **not** copy `scripts\windows\Voxium.cmd` alone; it will `cd` to the wrong directory. The app sets a short window/tab title (override with `VOXIUM_WINDOW_TITLE` if needed).
 
 ## Install (pip, no Make)
 
@@ -57,6 +69,8 @@ source .venv/bin/activate
 pip install -e .
 voxium run        # or: voxium  /  python -m voxium
 ```
+
+**Windows (simplest):** from the repo root, run **`scripts\windows\Setup-Voxium.cmd`**, then **`voxium run`** with the venv activated, or `scripts\windows\Voxium.cmd run`.
 
 Install **Linux** packages for paste + audio as above before running. On **Windows**, see the table above for dev commands.
 
@@ -76,7 +90,8 @@ server:
 hotkeys:
   record: f9
   recovery: f8
-  retry: f7
+  retry: f6
+  mode: f7
 history:
   limit: 100
   max_total_chars: 512000
@@ -92,7 +107,7 @@ voxium -v --log-level DEBUG
 voxium --server-device cpu
 ```
 
-- **F9 (default):** start/stop recording and transcribe; **F8:** cycle replay of PTT/VOX transcripts from this run (re-paste, newest first, wraps); **F7:** re-transmit (re-run transcription on the last in-RAM capture when available).
+- **F9 (default):** start/stop recording and transcribe; **F7:** toggle **PTT** (push-to-talk) vs **VOX** (open mic with utterance gating); **F8:** cycle replay of transcripts; **F6 (default):** re-transmit last pending in-RAM capture.
 - **Transcript log:** session-only, in process RAM (bounded: `--history-limit`, `--history-max-chars`); use **`/history`** in the downlink to list, **`/history <n>`** to expand, **`/history copy <n>`** to put one line on the system clipboard.
 - **Local data (same paths on all platforms):** `models/` (Hugging Face downloads for faster-whisper), `logs/` (server log, client lock). Override the project root with `VOXIUM_REPO_ROOT` if needed. The server log defaults to `logs/voxium_server.log` (or `--server-log-file`).
 - **Health:** `voxium health`, `voxium stats`; foreground server: `voxium server --help`.
@@ -114,12 +129,19 @@ systemctl --user enable --now voxium
 
 ## Troubleshooting
 
+- **Windows: `Voxium.cmd` / `Setup-Voxium.cmd` says `pyproject.toml not found` or paths look wrong:** the launchers **must stay** in `scripts\windows\` inside your clone. Do **not** copy only `Voxium.cmd` to the Desktop or another folder — the script finds the repo by going **up two levels** from its own file. Run **`scripts\windows\Setup-Voxium.cmd` once** from Explorer (double-click) only when that file lives under your Voxium repository. If the repo is under **OneDrive** and installs fail with file locks, clone to e.g. `C:\src\voxium` or pause OneDrive sync for that folder.
+- **Windows: still broken after setup:** run **`scripts\windows\Diagnose-Voxium.cmd`**. It writes **`%TEMP%\voxium-diagnose.log`**, shows Python / venv / `import voxium` / `import sounddevice`, and opens the log in Notepad. Share that file if you need help. Setup also leaves **`logs\voxium-windows-setup.log`** and **`logs\pip-editable-install.log`** in the repo.
+- **`No pyvenv.cfg file` (or Activate.ps1 not found):** the **`.venv` is invalid** — often a **WSL-created** venv used on **Windows**, or an incomplete copy. In **cmd** or PowerShell from the repo root, remove the folder: `rmdir /s /q .venv` (cmd) or `Remove-Item -Recurse -Force .venv` (PowerShell), then run **`scripts\windows\Recreate-Windows-Venv.cmd`** or full **`scripts\windows\Setup-Voxium.cmd`**. After a good venv, `.\.venv\Scripts\python.exe -m pip ...` works (no second `python` after `.exe`).
 - **`ModuleNotFoundError: No module named 'voxium'`** (including when running `voxium` or `python -m voxium`): the package is not installed into that Python environment. From the **repository root** (the folder that contains `pyproject.toml` and `src/voxium/`), install the project in editable mode (PowerShell or cmd):
   ```text
   .\.venv\Scripts\python -m pip install -U pip setuptools wheel
   .\.venv\Scripts\python -m pip install -e .
   ```
   Then confirm: `.\.venv\Scripts\python -c "import voxium; print(voxium.__file__)"` should print a path under `src\voxium`. If you still see the error, remove the broken install and reinstall: `.\.venv\Scripts\python -m pip uninstall voxium -y` then `.\.venv\Scripts\python -m pip install -e .` Do not run `pip` from a different working directory or a different venv than the one you use to launch `voxium`.
+- **`voxium` exits before the client starts** (often on Linux/WSL): a bare `voxium` is the same as **`voxium run`** and needs the **mic stack** plus **Linux paste helpers**. Install everything in one pass on Debian/Ubuntu/WSL:  
+  `sudo apt update && sudo apt install -y portaudio19-dev xdotool xclip`  
+  Then run Voxium from the venv you installed into (e.g. `.venv/Scripts/voxium` on Windows, `.venv/bin/voxium` on Linux). `voxium --help`, `voxium models`, and `voxium health` work without a mic. If you use `pip install -e .` from a clone, reinstall after pulling: `python -m pip install -e .` so the `voxium` script matches the tree.
+- **`OSError: PortAudio library not found`:** install the system PortAudio **dev** package (see the line above). macOS: `brew install portaudio`. The full client must load PortAudio for `voxium run`.
 - **500 / transcription error:** read `logs/voxium_server.log` in the repo (or `--server-log-file`); on Windows, missing `cublas64_12.dll` usually means CUDA 12 is not on `PATH` — use `--server-device cpu` or install the CUDA 12 Toolkit `bin` directory.
 - **Slow or CPU-only:** `--model tiny` or `--server-device cpu`.
 - **Linux pynput / hotkeys:** X11 required for typical setups; see Wayland note above.

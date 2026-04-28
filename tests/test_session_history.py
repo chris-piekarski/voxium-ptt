@@ -180,3 +180,33 @@ def test_purge_all_clears_entries_and_pending() -> None:
     assert h.text_by_display_index(1) is None
     n2, had2 = h.purge_all()
     assert n2 == 0 and had2 is False
+
+
+def test_format_list_text_filtered_empty_buffer_with_query() -> None:
+    h = SessionTranscriptHistory(max_entries=5, max_total_chars=1_000, max_pending_bytes=0)
+    out = h.format_list_text_filtered("anything")
+    assert "No transcriptions in this run yet" in out
+
+
+def test_format_list_text_filtered_vox_tag() -> None:
+    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h.add("open mic phrase", source="vox")
+    out = h.format_list_text_filtered("mic")
+    assert "[VOX]" in out
+
+
+def test_format_list_text_filtered_match_truncates_with_ellipsis() -> None:
+    """Search hit preview can shorten with an ellipsis (``…``) when over ``preview_chars``."""
+    h = SessionTranscriptHistory(max_entries=10, max_total_chars=10_000, max_pending_bytes=0)
+    h.add("TAILKEY" + " x" * 80)  # query at start; still long so preview must truncate
+    out = h.format_list_text_filtered("TAILKEY", preview_chars=25)
+    assert "…" in out
+    assert "Search" in out and "#1" in out
+
+
+def test_format_list_text_filtered_tail_when_many_matches() -> None:
+    h = SessionTranscriptHistory(max_entries=50, max_total_chars=100_000, max_pending_bytes=0)
+    for i in range(12):
+        h.add(f"commonword {i} extra")
+    out = h.format_list_text_filtered("commonword", max_lines=3)
+    assert "more matches (not shown)" in out

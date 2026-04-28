@@ -9,8 +9,10 @@ from voxium.console_status import (
     build_voxium_session_panel,
     downlink_subtitle_for_slash_line,
     print_agent_telemetry_panel,
+    print_input_mode_downlink,
     standing_by_ready_starts_new_panel,
     status_uses_recording_hud_line,
+    vox_open_listening_starts_fresh_panel,
     voxium_panel_width,
 )
 from voxium.standby_telemetry import build_standby_detail_line
@@ -20,6 +22,15 @@ def test_standing_by_ready_starts_new_panel() -> None:
     assert standing_by_ready_starts_new_panel("◉ PTT/VOX · ON STATION", None)
     assert not standing_by_ready_starts_new_panel("◉ PTT/VOX · ON STATION", "")
     assert not standing_by_ready_starts_new_panel("📻 PTT ACTIVE", None)
+
+
+def test_vox_open_fresh_panel_predicate() -> None:
+    vox_open = "🎙️ PTT/VOX · VOX (OPEN MIC)"
+    assert vox_open_listening_starts_fresh_panel(vox_open, " ")
+    assert vox_open_listening_starts_fresh_panel(vox_open, "")
+    assert not vox_open_listening_starts_fresh_panel(vox_open, None)
+    assert not vox_open_listening_starts_fresh_panel("📻 PTT ACTIVE", " ")
+    assert not vox_open_listening_starts_fresh_panel("◉ PTT/VOX · ON STATION", " ")
 
 
 def test_status_uses_recording_hud_line() -> None:
@@ -88,6 +99,16 @@ def test_downlink_subtitle_for_slash_line() -> None:
     assert downlink_subtitle_for_slash_line("/disk") == "disk / storage"
     assert downlink_subtitle_for_slash_line("/du") == "disk / storage"
     assert downlink_subtitle_for_slash_line("/unknown-cmd") == "session command"
+
+
+def test_input_mode_downlink_in_violet_panel() -> None:
+    c = Console(force_terminal=True, width=100, record=True, color_system="truecolor")
+    print_input_mode_downlink(
+        c, mode="vox", mode_hotkey_label="F7", ptt_hotkey_label="F9"
+    )
+    t = c.export_text(clear=True)
+    assert "Downlink" in t and "input mode" in t
+    assert "🎤" in t and "VOX" in t
 
 
 def test_voxium_panel_width_uses_terminal_columns() -> None:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 
 import argparse
 import atexit
@@ -6,16 +7,17 @@ import io
 import json
 import os
 import platform
+from collections import deque
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyperclip
 import requests
-import sounddevice as sd
 from pynput import keyboard
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
@@ -29,6 +31,7 @@ from voxium.console_status import (
     PttSessionStatusBox,
     build_status_box_panel,
     print_agent_telemetry_panel,
+    print_input_mode_downlink,
     print_slash_command_downlink,
     status_uses_recording_hud_line,
     voxium_panel_width,
@@ -93,6 +96,26 @@ from voxium.slash_commands import run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
+from voxium.vox_chunker import UtteranceChunker
+
+
+class _SoundDeviceProxy:
+    """Load PortAudio (``sounddevice``) on first use so CLI help / non-audio commands work without it."""
+
+    _mod: Any = None
+
+    def _ensure(self) -> Any:
+        if self._mod is None:
+            import sounddevice as _sd
+
+            self._mod = _sd
+        return self._mod
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ensure(), name)
+
+
+sd: Any = _SoundDeviceProxy()
 
 SYSTEM = platform.system()
 
@@ -180,9 +203,25 @@ _SLASH_LINE_MAX = 2048
 PASTE_DEBOUNCE_MS = 500
 RECORDING_HUD_INTERVAL_S = 0.5
 RECORDING_REMINDER_INTERVAL_S = 15.0
+VOX_HUD_RING_MAX = 96_000
+
+# PTT (default) vs VOX (open-mic) — toggled with --mode-hotkey (F7)
+input_mode: str = "ptt"  # "ptt" | "vox"
+input_mode_lock = threading.Lock()
+vox_stream: sd.InputStream | None = None
+vox_chunker: UtteranceChunker | None = None
+vox_hud_lock = threading.Lock()
+vox_ring: np.ndarray = np.empty(0, dtype=np.float32)
+# Each item: (mono audio, foreground window id at utterance time) — same idea as PTT's
+# target at record start, so focus+paste goes to the operator's editor/terminal.
+vox_pending_audio: deque[tuple[np.ndarray, Any]] = deque()
+vox_pending_lock = threading.Lock()
+vox_monitor_event = threading.Event()
+vox_monitor_thread: threading.Thread | None = None
 
 # Green status strip — PTT/VOX & local stack (brand: docs/brand.md)
 STATUS_VOX_ON_STATION = "◉ PTT/VOX · ON STATION"
+STATUS_VOX_OPEN = "🎙️ PTT/VOX · VOX (OPEN MIC)"
 STATUS_VOX_COPY = "🖥️ PTT/VOX · COPY"
 STATUS_VOX_COPY_REXMIT = "🖥️ PTT/VOX · COPY (RE-XMIT)"
 STATUS_PTT_ACTIVE = "📻 PTT ACTIVE"
@@ -246,12 +285,15 @@ def apply_runtime_hotkey_safety(args) -> bool:
         "record": args.hotkey,
         "recovery": args.recovery_hotkey,
         "retry": args.retry_hotkey,
+        "mode": getattr(args, "mode_hotkey", None) or "f7",
     }
     clean = sanitize_hotkey_config(requested)
     args.hotkey = clean["record"]
     args.recovery_hotkey = clean["recovery"]
     args.retry_hotkey = clean["retry"]
-    return {name: normalize_hotkey_name(value) for name, value in requested.items()} != clean
+    args.mode_hotkey = clean["mode"]
+    left = {name: normalize_hotkey_name(value) for name, value in requested.items()}
+    return any(left.get(k) != clean.get(k) for k in clean)
 
 def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
 
@@ -339,20 +381,26 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     )
 
     hotkey_group = parser.add_argument_group("Hotkeys and UI")
+    # Parser defaults: coerce YAML ints (e.g. 6) to f6 / f7 (strings) so we never compare 7 to f7.
     hotkey_group.add_argument(
         "--hotkey", "-k",
-        default=hotkeys.get("record", "f9"),
+        default=normalize_hotkey_name(hotkeys.get("record", "f9") or "f9"),
         help="Record/stop F1-F12 hotkey. Examples: f8, f10, f12"
     )
     hotkey_group.add_argument(
         "--recovery-hotkey",
-        default=hotkeys.get("recovery", "f8"),
+        default=normalize_hotkey_name(hotkeys.get("recovery", "f8") or "f8"),
         help="Hotkey (F1–F12) to cycle replay: re-paste PTT/VOX transcripts (newest first, wraps)",
     )
     hotkey_group.add_argument(
         "--retry-hotkey",
-        default=hotkeys.get("retry", "f7"),
+        default=normalize_hotkey_name(hotkeys.get("retry", "f6") or "f6"),
         help="Hotkey (F1–F12) to re-transmit: re-run transcription on the last pending capture",
+    )
+    hotkey_group.add_argument(
+        "--mode-hotkey",
+        default=normalize_hotkey_name(hotkeys.get("mode", "f7") or "f7"),
+        help="Hotkey (F1–F12) to toggle PTT (push-to-talk) vs VOX (open-mic, utterance gating)",
     )
     hotkey_group.add_argument(
         "--minimal", "-M",
@@ -379,7 +427,7 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         type=int,
         default=hist.get("pending_audio_max_mib", 32),
         metavar="N",
-        help="Max MiB for the last capture in RAM (re-transmit / F7). Use 0 to disable storage",
+        help="Max MiB for the last capture in RAM (re-transmit; default F6). Use 0 to disable",
     )
 
 def add_server_options(parser: argparse.ArgumentParser):
@@ -553,6 +601,8 @@ def parse_args(argv: list[str] | None = None):
 
                            
 def check_dependencies():
+    """Fail with a **single** report: Linux used to exit before the PortAudio check, hiding multiple fixes."""
+    problems: list[str] = []
 
     if SYSTEM == "Linux":
         missing = []
@@ -562,18 +612,50 @@ def check_dependencies():
             except (subprocess.CalledProcessError, FileNotFoundError):
                 missing.append(cmd)
         if missing:
-            print(f"Missing Linux dependencies: {', '.join(missing)}")
-            print(f"Install with: sudo apt install {' '.join(missing)}")
-            sys.exit(1)
+            problems.append(
+                "Linux paste / focus helpers are missing: "
+                + ", ".join(missing)
+                + "\n  Install (Debian/Ubuntu/WSL): sudo apt update && sudo apt install -y "
+                + " ".join(missing)
+            )
 
-                      
     try:
         devices = sd.query_devices()
-        if not any(d['max_input_channels'] > 0 for d in devices):
-            print("No mic / input device — PTT path blocked. Check default input in OS sound settings.")
-            sys.exit(1)
+        if not any(d["max_input_channels"] > 0 for d in devices):
+            problems.append(
+                "No mic / input device — PTT path blocked. Check the default input in OS sound settings."
+            )
+    except OSError as e:
+        err = str(e).lower()
+        if "portaudio" in err:
+            extra = (
+                "  Windows: run `scripts\\windows\\Setup-Voxium.ps1` from the repo (or `Setup-Voxium.cmd`), "
+                "or `python -m pip install --force-reinstall sounddevice` in your `.venv`. "
+                "Install the **Microsoft Visual C++ Redistributable (x64)** if the wheel still fails to load.\n"
+            )
+            if SYSTEM != "Windows":
+                extra = (
+                    "  Debian/Ubuntu/WSL: sudo apt update && sudo apt install -y portaudio19-dev\n"
+                    "  macOS (Homebrew): brew install portaudio\n"
+                )
+            problems.append(
+                "PortAudio is not available (required for the microphone).\n"
+                f"{extra}"
+                f"  Details: {e}"
+            )
+        else:
+            problems.append(f"Audio path error: {e}")
     except Exception as e:
-        print(f"Audio path error: {e}")
+        problems.append(f"Audio path error: {e}")
+
+    if problems:
+        print(
+            "Voxium run cannot start until the following are satisfied:\n\n"
+            + "\n\n".join(f"({i}) {p}" for i, p in enumerate(problems, start=1))
+            + "\n\n"
+            "Without `voxium run`, you can still use:  voxium --help   voxium models   voxium health\n",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 def get_server_health(timeout: float = 2.0) -> dict | None:
@@ -638,7 +720,8 @@ def flush_client_telemetry_block(*, include_ops_cheat: bool = False) -> None:
         to_print.append(
             (
                 f"PTT: {config.hotkey.upper()} to transmit; "
-                f"{config.recovery_hotkey.upper()} to replay last transmission; "
+                f"{config.mode_hotkey.upper()} PTT↔VOX; "
+                f"{config.recovery_hotkey.upper()} to replay; "
                 f"{config.retry_hotkey.upper()} to re-transmit.",
                 "info",
             )
@@ -856,6 +939,157 @@ def _recording_monitor_loop() -> None:
             break
 
 
+def _get_input_mode() -> str:
+    with input_mode_lock:
+        return "vox" if input_mode == "vox" else "ptt"
+
+
+def _set_input_mode(mode: str) -> None:
+    global input_mode
+    with input_mode_lock:
+        input_mode = "vox" if (mode or "").lower() == "vox" else "ptt"
+    m = "vox" if input_mode == "vox" else "ptt"
+    if ptt_status_box is not None and config is not None and not config.minimal:
+        ptt_status_box.set_input_mode_for_footer(m)
+
+
+def _vox_ring_append(mono: np.ndarray) -> None:
+    global vox_ring
+    with vox_hud_lock:
+        vox_ring = mono if not vox_ring.size else np.concatenate([vox_ring, mono])
+        if vox_ring.size > VOX_HUD_RING_MAX:
+            vox_ring = vox_ring[-VOX_HUD_RING_MAX:].copy()
+
+
+def vox_audio_callback(indata, _frames, _time_info, status) -> None:
+    global vox_chunker, state
+    if status and str(status):
+        pass
+    ch = indata.copy().ravel()
+    if ch.size:
+        _vox_ring_append(ch.astype(np.float32, copy=False))
+    chc = vox_chunker
+    if chc is None or ch.size == 0:
+        return
+    for utt in chc.feed(ch):
+        if not has_speech(utt, SAMPLE_RATE, threshold=0.012, segment_ms=50):
+            continue
+        with state_lock:
+            st = state
+        if st == State.IDLE:
+            with state_lock:
+                state = State.TRANSCRIBING
+            paste_target = get_active_window()
+            threading.Thread(
+                target=transcribe_and_paste,
+                args=(utt,),
+                kwargs={"source": "vox", "paste_target": paste_target},
+                daemon=True,
+            ).start()
+        else:
+            with vox_pending_lock:
+                vox_pending_audio.append((utt, get_active_window()))
+
+
+def _vox_monitor_loop() -> None:
+    while not vox_monitor_event.is_set() and vox_stream is not None:
+        with vox_hud_lock:
+            r = vox_ring
+            t = r[-min(48_000, r.size) :] if r.size else r
+        tail = t.copy() if t.size else np.empty(0, dtype=np.float32)
+        sc = int(tail.size) if tail.size else 0
+        ssq = float(np.sum(tail * tail)) if tail.size else 0.0
+        pk = float(np.max(np.abs(tail))) if tail.size else 0.0
+        st_lbl = (vox_chunker.state_label() if vox_chunker else "idle")
+        if config and config.minimal:
+            d: str | RenderableType = f"VOX  {st_lbl}  ·  pk{pk:5.2f}  {sc // max(1, SAMPLE_RATE):4.1f}s"
+        elif ptt_status_box is not None and config and not config.minimal and tail.size:
+            inner_w = max(16, voxium_panel_width(console) - 4)
+            d = build_recording_hud_rich(
+                sc,
+                ssq,
+                pk,
+                0,
+                SAMPLE_RATE,
+                None,
+                tail,
+                panel_inner_width=inner_w,
+            )
+        else:
+            d = f"VOX  {st_lbl}  ·  {sc} smpl  ·  pk {pk:.3f}"
+        _write_recording_hud(d)
+        if vox_monitor_event.wait(RECORDING_HUD_INTERVAL_S):
+            break
+
+
+def _end_vox_hud_line() -> None:
+    if ptt_status_box is not None:
+        ptt_status_box.update_recording_hud(" ")
+
+
+def _stop_vox_listening() -> None:
+    """Close VOX capture stream, chunker, HUD, clear queue (e.g. mode change or exit)."""
+    global vox_stream, vox_chunker, vox_monitor_thread, vox_ring
+    vox_monitor_event.set()
+    t = vox_monitor_thread
+    if t and t.is_alive():
+        t.join(timeout=RECORDING_HUD_THREAD_JOIN_S)
+    vox_monitor_thread = None
+    if vox_stream:
+        try:
+            vox_stream.stop()
+        except Exception:
+            pass
+        try:
+            vox_stream.close()
+        except Exception:
+            pass
+    vox_stream = None
+    vox_chunker = None
+    vox_ring = np.empty(0, dtype=np.float32)
+    with vox_pending_lock:
+        vox_pending_audio.clear()
+    _end_vox_hud_line()
+    beep_stop()
+
+
+def _start_vox_listening() -> bool:
+    global vox_stream, vox_chunker, vox_monitor_thread, vox_ring, stream, target_window
+    if stream is not None:
+        cli_log(
+            "PTT still holds the capture device. Release the key, then try VOX again.",
+            "warning",
+        )
+        beep_error()
+        return False
+    vox_ring = np.empty(0, dtype=np.float32)
+    vox_chunker = UtteranceChunker(SAMPLE_RATE)
+    vox_stream = sd.InputStream(
+        samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=vox_audio_callback
+    )
+    vox_stream.start()
+    vox_monitor_event.clear()
+    vox_monitor_thread = threading.Thread(
+        target=_vox_monitor_loop, daemon=True, name="VoxiumVoxHUD"
+    )
+    vox_monitor_thread.start()
+    mhk = (config.mode_hotkey if config else DEFAULT_HOTKEYS["mode"]).upper()  # type: ignore[union-attr]
+    rkh = (config.hotkey if config else DEFAULT_HOTKEYS["record"]).upper()  # type: ignore[union-attr]
+    beep(660.0, 0.09, 0.1)
+    de = f"Open mic  ·  {mhk} → PTT  ·  {rkh} idle in VOX  ·  gating, copy."
+    if ptt_status_box is not None and not (config and config.minimal):
+        ptt_status_box.set_status(
+            STATUS_VOX_OPEN,
+            de,
+            recording_hud=" ",
+        )
+    else:
+        show_status(STATUS_VOX_OPEN, de)
+    # Like PTT's target at start of a take — default paste target when VOX is armed.
+    target_window = get_active_window()
+    return True
+
+
 def _resolved_window_title() -> str:
     custom = (os.environ.get("VOXIUM_WINDOW_TITLE") or "").strip()
     return custom or VOXIUM_WINDOW_TITLE
@@ -1010,6 +1244,27 @@ def show_status(status: str, detail: str = ""):
     sys.stdout.write(f"{'─' * 40}\n")
     sys.stdout.flush()
 
+def _arm_status_after_log_scrollback() -> None:
+    """After the blue PTT&VOX log :class:`Panel` (post-freeze), show one fresh green status — not a re-render of the take chain.
+
+    :func:`freeze_before_external_output` commits the prior live session (on-station, on-air, copy, …) to
+    the scrollback. Rebuilding that same ``session_steps`` here would stack a second identical green
+    Voxium box and put the log out of order. Instead, reset to a single **ready** line: VOX open
+    (when VOX is armed) or on-station for PTT — same as the end of a normal take.
+    """
+    if is_client_shutting_down() or not config or config.minimal:
+        return
+    if _get_input_mode() == "vox" and vox_stream is not None:
+        mhk = (config.mode_hotkey if config else DEFAULT_HOTKEYS["mode"]).upper()  # type: ignore[union-attr]
+        vde = f"Open mic  ·  {mhk} → PTT  ·  utterance gating, copy."
+        if ptt_status_box is not None:
+            ptt_status_box.set_status(STATUS_VOX_OPEN, vde, recording_hud=" ")
+        else:
+            show_status(STATUS_VOX_OPEN, vde)
+    else:
+        show_status(STATUS_VOX_ON_STATION, "Standing by.")
+
+
 def log_transcription_summary(text: str, metrics: dict | None):
 
     if is_client_shutting_down():
@@ -1045,6 +1300,8 @@ def log_transcription_summary(text: str, metrics: dict | None):
         padding=(1, 1),
         width=w_box,
     ))
+    if config and not config.minimal:
+        _arm_status_after_log_scrollback()
 
                                          
 def get_active_window():
@@ -1344,6 +1601,8 @@ def is_client_shutting_down() -> bool:
 def cleanup_client_runtime():
 
     global stream, state, recording_monitor_thread, ptt_status_box
+    _stop_vox_listening()
+    _set_input_mode("ptt")
     client_shutdown_event.set()
     recording_monitor_event.set()
     tmon = recording_monitor_thread
@@ -1514,9 +1773,19 @@ def paste_text(text: str):
         threading.Thread(target=restore, daemon=True).start()
 
                     
-def transcribe_and_paste(audio: np.ndarray):
-
-    global state
+def transcribe_and_paste(
+    audio: np.ndarray, *, source: str = "ptt", paste_target: Any | None = None
+):
+    """
+    *paste_target* — foreground window to focus before paste (PTT sets this via
+    :func:`start_recording` on the main thread; VOX passes it per utterance from
+    :func:`get_active_window` in the audio callback or queue).
+    """
+    global state, target_window
+    if paste_target is not None:
+        target_window = paste_target
+    # Skip the post-take sleep when we already re-armed on the no-speech / error path (fast VOX/PTT).
+    skip_final_pacing = False
     try:
         text = transcribe(audio)
         metrics = last_transcription_metrics
@@ -1527,7 +1796,7 @@ def transcribe_and_paste(audio: np.ndarray):
             # Record before paste so /history and replay work even if clipboard or focus/paste fails.
             h = get_transcript_history()
             if h is not None:
-                h.add(text)
+                h.add(text, source=source)
             paste_text(" " + text)
             beep_success()
             set_terminal_title()
@@ -1536,29 +1805,57 @@ def transcribe_and_paste(audio: np.ndarray):
         else:
             beep_error()
             set_terminal_title()
-            show_status("❌ NO SPEECH", "Nothing detected")
-                                                             
             h_clear = get_transcript_history()
             if h_clear is not None:
                 h_clear.clear_pending_audio()
+            if config and config.minimal:
+                print("Voxium: no speech detected.", file=sys.stderr)
+            else:
+                cli_log(
+                    "No speech in that utterance — open mic ready for the next phrase.",
+                    "warning",
+                )
+                _arm_status_after_log_scrollback()
+            skip_final_pacing = True
     except Exception as e:
         if is_client_shutting_down():
             return
         beep_error()
         set_terminal_title()
-        show_status("❌ FAILED", str(e)[:200])
-                                                       
+        if config and config.minimal:
+            print(f"Voxium: transcription failed: {e!s}"[:500], file=sys.stderr)
+        else:
+            cli_log(f"Transcription failed: {str(e)[:200]}", "error")
+            _arm_status_after_log_scrollback()
+        skip_final_pacing = True
     finally:
         with state_lock:
             state = State.IDLE
         if is_client_shutting_down():
             return
-                                       
-        time.sleep(1.5)
+        nxt: np.ndarray | None = None
+        nxt_paste: Any = None
+        with vox_pending_lock:
+            if vox_pending_audio:
+                nxt, nxt_paste = vox_pending_audio.popleft()
+        if nxt is not None and _get_input_mode() == "vox" and vox_stream is not None:
+            with state_lock:
+                state = State.TRANSCRIBING
+            threading.Thread(
+                target=transcribe_and_paste,
+                args=(nxt,),
+                kwargs={"source": "vox", "paste_target": nxt_paste},
+                daemon=True,
+            ).start()
+            return
+        if not skip_final_pacing:
+            time.sleep(1.5)
         if is_client_shutting_down():
             return
         set_terminal_title()
-        show_status(STATUS_VOX_ON_STATION, "Standing by.")
+        # Successful takes: :func:`_arm_status_after_log_scrollback` in :func:`log_transcription_summary`
+        # re-armed after the blue log; we only add pacing sleep here. No-speech / error paths re-arm
+        # above and skip the sleep so the green strip and VOX HUD return immediately.
 
 def get_hotkey(key_name: str):
 
@@ -1573,6 +1870,10 @@ def create_hotkey_handler(hotkey):
     def on_press(key):
         global state, _last_hotkey_time
         if key != hotkey:
+            return
+        # PTT record key is only active in push-to-talk mode; ignore in VOX (open mic) so F9 does
+        # not grab the mic or start a PTT take while VOX holds the capture device.
+        if _get_input_mode() != "ptt":
             return
 
         now = time.time() * 1000
@@ -1708,6 +2009,80 @@ def create_retry_handler(retry_key):
                                                           
 
     return on_press
+
+
+def create_mode_toggle_handler(mode_key, mode_hotkey_label: str):
+
+    def on_press(key: object) -> None:
+        global _last_hotkey_time
+        if key != mode_key:
+            return
+        now = time.time() * 1000
+        if now - _last_hotkey_time < HOTKEY_DEBOUNCE_PTT_START_MS:
+            return
+        _last_hotkey_time = now
+        with state_lock:
+            st = state
+        if st in (State.RECORDING, State.TRANSCRIBING, State.COMMAND_INPUT):
+            return
+        ptt_l = (config.hotkey if config else "f9").upper()
+        if _get_input_mode() == "ptt":
+            _set_input_mode("vox")
+            if not _start_vox_listening():
+                _set_input_mode("ptt")
+                if config and not config.minimal:
+                    print_agent_telemetry_panel(
+                        console,
+                        [
+                            (
+                                "VOX capture could not start (e.g. PTT still on); staying on PTT.",
+                                "warning",
+                            )
+                        ],
+                        downlink_subtitle="input mode",
+                    )
+                else:
+                    print(
+                        "Voxium: VOX not started — staying on PTT.",
+                        file=sys.stderr,
+                    )
+                return
+            if config and not config.minimal:
+                print_input_mode_downlink(
+                    console,
+                    mode="vox",
+                    mode_hotkey_label=mode_hotkey_label,
+                    ptt_hotkey_label=ptt_l,
+                )
+                if ptt_status_box is not None:
+                    ptt_status_box.restore_live_after_scrollback_output()
+            else:
+                print("Voxium: input mode VOX (open mic, utterance gating).", file=sys.stderr)
+        else:
+            _stop_vox_listening()
+            _set_input_mode("ptt")
+            # Rebuild the green strip + slash footer *before* printing the violet downlink. If
+            # `console.print` runs first, the nested transient footer Live can be left off-screen
+            # until the next full status refresh (e.g. PTT on F9). VOX→PTT order matches VOX entry:
+            # `set_status` in `_start_vox_listening` runs before `print_input_mode_downlink`.
+            show_status(
+                STATUS_VOX_ON_STATION,
+                f"PTT: {(config.hotkey if config else 'f9').upper()} to transmit, copy.",
+            )
+            if config and not config.minimal:
+                print_input_mode_downlink(
+                    console,
+                    mode="ptt",
+                    mode_hotkey_label=mode_hotkey_label,
+                    ptt_hotkey_label=ptt_l,
+                )
+                if ptt_status_box is not None:
+                    ptt_status_box.restore_live_after_scrollback_output()
+            else:
+                print("Voxium: PTT (push-to-talk) — VOX on demand.", file=sys.stderr)
+
+    return on_press
+
 
 class _WindowsLock:
     def __init__(self, handle):
@@ -1887,7 +2262,8 @@ def run_client(args, _raw_argv: list[str]) -> int:
         cli_log(
             "Adjusted unsupported or duplicate hotkeys; active hotkeys are "
             f"record={config.hotkey.upper()} (PTT), "
-            f"recovery={config.recovery_hotkey.upper()} (cycle replay PTT/VOX transcripts), "
+            f"mode={config.mode_hotkey.upper()} (PTT ↔ VOX), "
+            f"recovery={config.recovery_hotkey.upper()} (cycle replay transcripts), "
             f"retry={config.retry_hotkey.upper()} (re-transmit).",
             "warning",
         )
@@ -1900,19 +2276,35 @@ def run_client(args, _raw_argv: list[str]) -> int:
     hotkey = get_hotkey(config.hotkey)
     recovery_key = get_hotkey(config.recovery_hotkey)
     retry_key = get_hotkey(config.retry_hotkey)
+    mode_key = get_hotkey(config.mode_hotkey)
     set_terminal_title()
 
     if ptt_status_box is not None and not config.minimal:
         ptt_status_box.set_ptt_hotkey_hint(config.hotkey.upper())
+        ptt_status_box.set_mode_hotkey_hint(config.mode_hotkey.upper())
+        ptt_status_box.set_input_mode_for_footer("ptt")
 
     if config.minimal:
-        show_status(STATUS_VOX_ON_STATION, f"PTT: {config.hotkey.upper()} to transmit (VOX in)")
+        show_status(
+            STATUS_VOX_ON_STATION,
+            (
+                f"PTT: {config.hotkey.upper()} · "
+                f"{config.mode_hotkey.upper()} PTT↔VOX · {config.recovery_hotkey.upper()} replay · "
+                f"{config.retry_hotkey.upper()} re-xmit (VOX in)"
+            ),
+        )
     elif not config.quiet:
         show_status(STATUS_VOX_ON_STATION, "Standing by.")
+    if not config.quiet:
+        cli_log(
+            f"📻 Input mode: PTT (default) — {config.mode_hotkey.upper()} → VOX (open mic, utterance gating).",
+            "info",
+        )
 
     record_handler = create_hotkey_handler(hotkey)
     recovery_handler = create_recovery_handler(recovery_key)
     retry_handler = create_retry_handler(retry_key)
+    mode_handler = create_mode_toggle_handler(mode_key, config.mode_hotkey.upper())
 
     def _slash_refresh_footer(command_active: bool) -> None:
         if ptt_status_box is None:
@@ -1995,6 +2387,8 @@ def run_client(args, _raw_argv: list[str]) -> int:
                         out.selected_model,
                         freeze_for_external_output=_freeze_for_ensure,
                     )
+                if ptt_status_box is not None and config and not config.minimal:
+                    ptt_status_box.restore_live_after_scrollback_output()
                 set_terminal_title()
                 return True
             if key == keyboard.Key.backspace:
@@ -2034,6 +2428,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
     def combined_handler(key: object) -> None:
         if try_handle_slash_input(key):
             return
+        mode_handler(key)
         record_handler(key)
         recovery_handler(key)
         retry_handler(key)
