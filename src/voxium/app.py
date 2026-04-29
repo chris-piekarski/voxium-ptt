@@ -21,6 +21,7 @@ import pyperclip
 import requests
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -98,12 +99,14 @@ from voxium.model_registry import (
     validate_model_name,
 )
 from voxium.llama_cpp_daemon import (
+    LLAMA_STACK_UX_CHATTER,
     ManagedLlamaCpp,
+    append_llama_stack_log_line,
     ensure_llama_cpp_daemon,
     llama_server_cli_path,
     stop_managed_llama_cpp,
 )
-from voxium.llama_cpp_client import llama_cpp_reachable
+from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
 from voxium.paths import (
     default_server_log_path,
     ensure_runtime_dirs,
@@ -112,6 +115,7 @@ from voxium.paths import (
     logs_dir,
     polish_models_dir,
     repo_root,
+    ux_models_dir,
 )
 from voxium.ptt_keying import (
     PTT_ACTION_START,
@@ -132,6 +136,7 @@ from voxium.polish_provision import (
     ensure_default_polish_assets,
     ensure_polish_model_downloaded,
     ensure_windows_llama_cpp_runtime,
+    wrap_hf_download_progress,
 )
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
 from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
@@ -140,6 +145,13 @@ from voxium.session_history import SessionTranscriptHistory
 from voxium.terminal_focus import is_our_terminal_focused
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
+from voxium.ux_chatter_model_registry import (
+    DEFAULT_UX_CHATTER,
+    DEFAULT_UX_CHATTER_API_MODEL,
+    FALLBACK_UX_CHATTER,
+    UxChatterModel,
+    resolve_ux_chatter_path_on_disk,
+)
 from voxium.vox_chunker import UtteranceChunker
 
 
@@ -260,11 +272,15 @@ recording_monitor_event = threading.Event()
 recording_monitor_thread: threading.Thread | None = None
 client_shutdown_event = threading.Event()
 console = Console()
+# Background UX chatter (Gemma) may print a violet Downlink; serialize with other console prints.
+_ux_chatter_downlink_lock = threading.Lock()
 ptt_status_box: PttSessionStatusBox | None = None
 _telemetry_log_buffer: list[tuple[str, str]] = []
 managed_server_process: subprocess.Popen | None = None
 managed_llama_cpp: ManagedLlamaCpp | None = None
+managed_llama_cpp_ux: ManagedLlamaCpp | None = None
 _llama_cpp_polish_ready_checked: bool = False
+_llama_cpp_ux_ready_checked: bool = False
 server_log_handle = None
 
 
@@ -300,8 +316,15 @@ vox_pending_lock = threading.Lock()
 vox_monitor_event = threading.Event()
 vox_monitor_thread: threading.Thread | None = None
 
+# Blue PTT log :class:`Panel` dim footer (static unless Gemma path fills it in
+# :func:`log_transcription_summary`).
+_PTT_LOG_PANEL_SUBTITLE_DEFAULT = "PTT & VOX log — local loopback only"
+
+# Ctrl+C / clean exit (static unless Gemma fills in :func:`_print_shutdown_farewell`).
+_VOXIUM_SHUTDOWN_DEFAULT = "Voxium: 73 / 10-7 — going clear, copy."
+
 # Green status strip — PTT/VOX & local stack (brand: docs/brand.md)
-STATUS_VOX_ON_STATION = "◉ PTT/VOX · ON STATION"
+STATUS_VOX_ON_STATION = "◉ PTT/VOX · Standing by"
 STATUS_VOX_OPEN = "🎙️ PTT/VOX · VOX (OPEN MIC)"
 STATUS_VOX_COPY = "🖥️ PTT/VOX · COPY"
 STATUS_VOX_COPY_REXMIT = "🖥️ PTT/VOX · COPY (RE-XMIT)"
@@ -318,20 +341,149 @@ DEBUG_PASTE = False
 CONFIG_PATH = Path.home() / ".config" / "voxium" / "config.yaml"
 
 
+def _apply_transcription_model_defaults(merged: dict[str, Any]) -> None:
+    """
+    Ensure ``transcription.model`` is set: file value when present, else product default, then
+    valid ``WHISPER_MODEL`` (same as the local server) if set. Matches ``scripts/windows/Voxium.ps1``,
+    which seeds ``WHISPER_MODEL=small.en`` so boot aligns with :data:`voxium.model_registry.DEFAULT_MODEL_NAME`.
+    """
+    t = dict(merged.get("transcription") or {})
+    raw = (t.get("model") or "").strip()
+    if raw:
+        try:
+            t["model"] = validate_model_name(raw)
+        except ValueError:
+            t["model"] = DEFAULT_MODEL_NAME
+    else:
+        t["model"] = DEFAULT_MODEL_NAME
+    w = (os.environ.get("WHISPER_MODEL") or "").strip()
+    if w:
+        try:
+            t["model"] = validate_model_name(w)
+        except ValueError:
+            pass
+    merged["transcription"] = t
+
+
 def load_config_file() -> dict:
-
     if not CONFIG_PATH.exists():
-        return {}
-    try:
-        with open(CONFIG_PATH) as f:
-            raw = yaml.safe_load(f) or {}
-        if not raw:
-            return {}
-        from voxium.config import VoxiumUserConfig
+        merged: dict[str, Any] = {}
+    else:
+        try:
+            with open(CONFIG_PATH) as f:
+                raw = yaml.safe_load(f) or {}
+            if not raw:
+                merged = {}
+            else:
+                from voxium.config import VoxiumUserConfig
 
-        return VoxiumUserConfig.model_validate(raw).model_dump()
-    except Exception:
-        return {}
+                merged = VoxiumUserConfig.model_validate(raw).model_dump()
+        except Exception:
+            merged = {}
+    _apply_transcription_model_defaults(merged)
+    return merged
+
+
+def _merge_run_file_config(args: Any) -> dict:
+    """Merge ``~/.config/voxium/config.yaml`` with ``voxium run`` CLI overrides (e.g. UX chatter)."""
+    _fc = load_config_file()
+    u = {
+        **dict(_fc.get("ux_chatter") or {}),
+        # ``args.ux_chatter`` is the argparse result (default is seeded from yaml in
+        # :func:`add_run_options` when the run parser is built).
+        "enabled": bool(getattr(args, "ux_chatter", False)),
+    }
+    u["base_url"] = str(
+        getattr(args, "ux_chatter_url", None)
+        or u.get("base_url")
+        or "http://127.0.0.1:11436"
+    )
+    u["model"] = str(
+        getattr(args, "ux_chatter_model", None)
+        or u.get("model")
+        or DEFAULT_UX_CHATTER_API_MODEL
+    )
+    u["auto_start"] = bool(getattr(args, "ux_chatter_auto_start", True))
+    u["auto_pull"] = bool(getattr(args, "ux_chatter_auto_pull", True))
+    if not is_loopback_url(u["base_url"]):
+        u["base_url"] = "http://127.0.0.1:11436"
+    return {**_fc, "ux_chatter": u}
+
+
+def _ux_chatter_on_complete(line_result, rt) -> None:
+    """Violet Downlink for the experience (Gemma) pass — no transcript text, metrics only."""
+    if not config or getattr(config, "minimal", False):
+        return
+    from voxium.ux_chatter import format_ux_chatter_downlink_line
+
+    out = format_ux_chatter_downlink_line(rt, line_result)
+    if out is None:
+        return
+    msg, level = out
+    with _ux_chatter_downlink_lock:
+        print_agent_telemetry_panel(
+            console,
+            [(msg, level)],
+            downlink_subtitle="experience",
+        )
+
+
+def _status_detail_for_edge_inference(*, rexmit: bool = False) -> str:
+    """Second line under EDGE INFERENCE: LLM when UX chatter is on, else static pool."""
+    if not (config and getattr(config, "ux_chatter", False)):
+        return (
+            take_edge_inference_rexmit_detail()
+            if rexmit
+            else take_edge_inference_detail()
+        )
+    from voxium.ux_chatter import (
+        is_ux_chatter_wanted,
+        request_ux_chatter_edge_line_full,
+        ux_chatter_runtime_from_config,
+    )
+
+    fc = getattr(config, "file_config", None) or {}
+    if not is_ux_chatter_wanted(
+        cli_enabled=bool(getattr(config, "ux_chatter", False)), file_config=fc
+    ):
+        return (
+            take_edge_inference_rexmit_detail()
+            if rexmit
+            else take_edge_inference_detail()
+        )
+    rt = ux_chatter_runtime_from_config(fc)
+    full = request_ux_chatter_edge_line_full(rt, rexmit=rexmit)
+    _ux_chatter_on_complete(full, rt)
+    w = (full.wit or "").strip()
+    if w:
+        return w
+    return (
+        take_edge_inference_rexmit_detail() if rexmit else take_edge_inference_detail()
+    )
+
+
+def _ux_resolve_copy_wit(text: str, uxf: Any) -> str:
+    """COPY subline: sync **copy** wit, or one extra copy request, else :func:`take_readback`."""
+    w = (uxf.wit or "").strip() if uxf is not None else ""
+    if w:
+        return w
+    t = (text or "").strip()
+    if not t or not (config and getattr(config, "ux_chatter", False)):
+        return take_readback()
+    from voxium.ux_chatter import (
+        is_ux_chatter_wanted,
+        request_ux_chatter_line_full,
+        ux_chatter_runtime_from_config,
+    )
+
+    fc = getattr(config, "file_config", None) or {}
+    if not is_ux_chatter_wanted(
+        cli_enabled=bool(getattr(config, "ux_chatter", False)), file_config=fc
+    ):
+        return take_readback()
+    rt = ux_chatter_runtime_from_config(fc)
+    one = request_ux_chatter_line_full(rt, t, purpose="copy")
+    return (one.wit or "").strip() or take_readback()
 
 
 def add_output_options(
@@ -519,9 +671,12 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         "--model",
         "-m",
         type=trusted_model_arg,
-        default=trans.get("model"),
+        default=trans.get("model") or DEFAULT_MODEL_NAME,
         metavar="MODEL",
-        help=f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP}",
+        help=(
+            f"Voxium model (Systran faster-whisper only): {TRUSTED_MODEL_HELP} "
+            f"(default: {DEFAULT_MODEL_NAME} if unset in config)"
+        ),
     )
     transcription_group.add_argument(
         "--language",
@@ -584,6 +739,52 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         action=argparse.BooleanOptionalAction,
         default=bool(ui.get("slash_global", False)),
         help="Treat / command input as global; default (false) = only when this terminal window is focused (Windows / Linux X11; see docs)",
+    )
+
+    uxc = file_config.get("ux_chatter")
+    uxc = uxc if isinstance(uxc, dict) else {}
+    uxc_default_url = str(uxc.get("base_url") or "http://127.0.0.1:11436").strip()
+    if not is_loopback_url(uxc_default_url):
+        uxc_default_url = "http://127.0.0.1:11436"
+    uxc_group = parser.add_argument_group(
+        "UX chatter (Gemma, default on)",
+        "Short HAM-style one-liner in the on-station standby line and other console flourishes. Uses a **second** local "
+        "llama-server (Gemma GGUF) on a **different** port from re-encode. See docs/ux-chatter-gemma.md.",
+    )
+    uxc_group.add_argument(
+        "--ux-chatter",
+        action=argparse.BooleanOptionalAction,
+        default=bool(uxc.get("enabled", True)),
+        help=(
+            "Client-only UX chatter (Gemma, separate llama.cpp port). "
+            "Default: on. Use --no-ux-chatter to disable, or set VOXIUM_UX_CHATTER=0 to force off."
+        ),
+    )
+    uxc_group.add_argument(
+        "--ux-chatter-url",
+        default=uxc_default_url,
+        help="Loopback base URL for the Gemma llama-server (separate from --llama-cpp-url).",
+    )
+    uxc_group.add_argument(
+        "--ux-chatter-model",
+        default=str(uxc.get("model") or DEFAULT_UX_CHATTER_API_MODEL).strip()
+        or DEFAULT_UX_CHATTER_API_MODEL,
+        help="Model id for POST /v1/chat/completions (alias of the loaded GGUF).",
+    )
+    uxc_group.add_argument(
+        "--ux-chatter-auto-start",
+        action=argparse.BooleanOptionalAction,
+        default=bool(uxc.get("auto_start", True)),
+        help="When UX chatter is enabled, start a second llama-server for Gemma if /health is down (requires GGUF in models/ux/).",
+    )
+    uxc_group.add_argument(
+        "--ux-chatter-auto-pull",
+        action=argparse.BooleanOptionalAction,
+        default=bool(uxc.get("auto_pull", True)),
+        help=(
+            "If UX is on and models/ux/ is missing the Gemma GGUF, download it from Hugging Face "
+            "(gated: accept the Gemma terms / huggingface-cli). Default: on. Use --no-ux-chatter-auto-pull to skip."
+        ),
     )
 
     history_group = parser.add_argument_group("History")
@@ -835,6 +1036,11 @@ Examples:
             "(Windows runtime plus default GGUF re-encoder)"
         ),
     )
+    models_parser.add_argument(
+        "--pull-ux-chatter",
+        action="store_true",
+        help="Download the optional Gemma GGUF for client UX chatter into models/ux/ (Hugging Face; may be gated).",
+    )
     return parser
 
 
@@ -864,6 +1070,10 @@ def parse_args(argv: list[str] | None = None):
     if hasattr(args, "llama_cpp_url") and not is_loopback_url(args.llama_cpp_url):
         parser.error(
             "llama-cpp-url must be http loopback (127.0.0.1, localhost, or ::1)"
+        )
+    if hasattr(args, "ux_chatter_url") and not is_loopback_url(args.ux_chatter_url):
+        parser.error(
+            "ux-chatter-url must be http loopback (127.0.0.1, localhost, or ::1)"
         )
     return args
 
@@ -1327,13 +1537,160 @@ def ensure_llama_cpp_for_polish(
     try:
         resolved = ensure_polish_model_downloaded(
             model_name=requested_model,
-            progress=lambda msg: cli_log(msg, "info"),
+            progress=wrap_hf_download_progress(lambda msg: cli_log(msg, "info")),
         )
     except RuntimeError as exc:
         cli_log(str(exc), "warning")
         _llama_cpp_polish_ready_checked = False
         return
     _run_after_model(resolved)
+
+
+def ensure_llama_cpp_for_ux_chatter() -> None:
+    """
+    When ``--ux-chatter`` is on, optionally start a **second** ``llama-server`` for the Gemma GGUF
+    (different loopback port from re-encode). Idempotent: skips if a server already answers /health.
+    """
+    global managed_llama_cpp_ux, _llama_cpp_ux_ready_checked
+    if not config or not getattr(config, "ux_chatter", False):
+        return
+    if _llama_cpp_ux_ready_checked:
+        return
+    _llama_cpp_ux_ready_checked = True
+    base_url = str(getattr(config, "ux_chatter_url", None) or "http://127.0.0.1:11436")
+    auto = bool(getattr(config, "ux_chatter_auto_start", True))
+    uxc = (getattr(config, "file_config", None) or {}).get("ux_chatter")
+    uxc = uxc if isinstance(uxc, dict) else {}
+    try:
+        sleep_idle = parse_sleep_idle_seconds(uxc.get("sleep_idle", "10m"), default=600)
+    except ValueError:
+        sleep_idle = 600
+    ctx_size = int(uxc.get("ctx_size", 0) or 0)
+    startup_t = min(
+        60.0,
+        max(5.0, float(uxc.get("startup_timeout", 35.0) or 35.0)),
+    )
+
+    auto_pull = bool(uxc.get("auto_pull", True))
+    on_disk = resolve_ux_chatter_path_on_disk()
+    uxc_spec: UxChatterModel
+    if on_disk is not None:
+        model_path, uxc_spec = on_disk
+    elif auto_pull:
+        from voxium.ux_chatter_provision import ensure_ux_chatter_gguf_available
+
+        cli_log(
+            "UX chatter: no Gemma or TinyLlama GGUF in models/ux/ — auto-pulling from "
+            "Hugging Face (Gemma first; public TinyLlama if the gate blocks), copy.",
+            "info",
+        )
+        try:
+            model_path, uxc_spec = ensure_ux_chatter_gguf_available(
+                progress=wrap_hf_download_progress(lambda m: cli_log(m, "info")),
+            )
+        except RuntimeError as exc:
+            cli_log(
+                f"UX chatter: auto-pull did not complete. {exc} "
+                "Manual: `huggingface-cli login` and accept Gemma, or `voxium models --pull-ux-chatter`, copy.",
+                "warning",
+            )
+            return
+        if uxc_spec is FALLBACK_UX_CHATTER:
+            cli_log(
+                "UX chatter: on station with TheBloke TinyLlama (Gemma on HF not available; "
+                "add Gemma to models/ux/ later to switch), copy.",
+                "info",
+            )
+    else:
+        cli_log(
+            "UX chatter is on, but no Gemma or TinyLlama GGUF is under models/ux/ (auto-pull off). "
+            "Run `voxium models --pull-ux-chatter`, copy.",
+            "warning",
+        )
+        return
+
+    if not model_path.is_file():
+        cli_log("UX chatter: model file still missing, copy.", "warning")
+        return
+    from voxium.ux_chatter import set_resolved_ux_chatter_model_id
+
+    set_resolved_ux_chatter_model_id(uxc_spec.model_id)
+
+    _ux_log = logs_dir() / "llama_cpp_ux.log"
+    if not auto:
+        ok, _r = llama_cpp_reachable(base_url, timeout=1.0)
+        loaded: str | None
+        if ok:
+            loaded = llama_cpp_loaded_model(base_url, timeout=1.0)
+            if loaded:
+                set_resolved_ux_chatter_model_id(loaded)
+        else:
+            loaded = None
+        if not ok:
+            cli_log(
+                "UX chatter is on; --no-ux-chatter-auto-start is set, so no managed llama-server. "
+                "Start llama-server for the UX GGUF on the UX port, or enable auto-start, copy.",
+                "warning",
+            )
+        append_llama_stack_log_line(
+            _ux_log,
+            f"Voxium: [stack={LLAMA_STACK_UX_CHATTER}] client: --no-ux-chatter-auto-start; "
+            f"base_url={base_url} reachable={ok} loaded_model={loaded!r} "
+            f"expected_alias={uxc_spec.model_id!r} gguf_path={model_path}",
+        )
+        return
+    ok, _ = llama_cpp_reachable(base_url, timeout=1.0)
+    if ok:
+        loaded = llama_cpp_loaded_model(base_url, timeout=1.0)
+        if loaded:
+            set_resolved_ux_chatter_model_id(loaded)
+        else:
+            set_resolved_ux_chatter_model_id(uxc_spec.model_id)
+        append_llama_stack_log_line(
+            _ux_log,
+            f"Voxium: [stack={LLAMA_STACK_UX_CHATTER}] client: managed start skipped; "
+            f"server already on station at {base_url} loaded_model={loaded!r} "
+            f"expected_alias={uxc_spec.model_id!r} gguf_path={model_path}",
+        )
+        cli_log(
+            "UX chatter: llama-server already on station for the UX URL, copy.", "info"
+        )
+        return
+
+    cli_cmd = str(getattr(config, "llama_cpp_cmd", "") or "").strip() or None
+    if os.name == "nt" and not llama_server_cli_path(cli_cmd, base_env=os.environ):
+        try:
+            ensure_windows_llama_cpp_runtime(
+                base_env=dict(os.environ),
+                progress=lambda m: cli_log(m, "info"),
+            )
+        except RuntimeError as exc:
+            cli_log(str(exc)[:2000], "warning")
+            return
+    gpu_layers_raw = (
+        str(getattr(config, "llama_cpp_gpu_layers", "auto") or "auto").strip().lower()
+    )
+    if gpu_layers_raw in {"", "auto"}:
+        gpu_layers: int | str | None = 99
+    else:
+        gpu_layers = str(getattr(config, "llama_cpp_gpu_layers", "") or "").strip()
+    managed, entries = ensure_llama_cpp_daemon(
+        base_url=base_url,
+        cmd_path=cli_cmd,
+        model_path=model_path,
+        model_alias=uxc_spec.model_id,
+        log_path=logs_dir() / "llama_cpp_ux.log",
+        log_stack=LLAMA_STACK_UX_CHATTER,
+        startup_timeout=startup_t,
+        parallel=1,
+        ctx_size=ctx_size,
+        gpu_layers=gpu_layers,
+        sleep_idle_seconds=sleep_idle,
+    )
+    if managed is not None:
+        managed_llama_cpp_ux = managed
+    for msg, level in entries:
+        cli_log(msg, level)
 
 
 def apply_slash_runtime_changes(
@@ -1407,8 +1764,27 @@ def beep_success():
 
 
 def beep_recording_reminder():
-    """Same tone as PTT start beep: still on the air (see RECORDING_REMINDER_INTERVAL_S)."""
-    beep_start()
+    """
+    Two rapid blips (not the 880 Hz PTT start tone) so the still-on-air cue is distinct
+    from push-to-talk. See :data:`RECORDING_REMINDER_INTERVAL_S`.
+    """
+    vol = 0.11
+    blip_s = 0.042
+    gap_s = 0.03
+    # Above PTT start (880 Hz) / stop (440 Hz) so the ear does not map this to the PTT edge.
+    f1, f2 = 1180.0, 1320.0
+    n1 = int(SAMPLE_RATE * blip_s)
+    n_gap = int(SAMPLE_RATE * gap_s)
+    t1 = np.linspace(0, blip_s, n1, False)
+    t2 = np.linspace(0, blip_s, n1, False)
+    w1 = (vol * np.sin(2 * np.pi * f1 * t1)).astype(np.float32)
+    gap = np.zeros(n_gap, dtype=np.float32)
+    w2 = (vol * np.sin(2 * np.pi * f2 * t2)).astype(np.float32)
+    wave = np.concatenate([w1, gap, w2])
+    try:
+        sd.play(wave, SAMPLE_RATE)
+    except Exception:
+        pass
 
 
 def _end_recording_hud_line() -> None:
@@ -1785,6 +2161,13 @@ def _standby_telemetry_context() -> dict:
         mod = m.get("model")
         if isinstance(mod, dict) and mod.get("name"):
             d["last_model_name"] = str(mod.get("name"))[:32]
+
+    if config is not None and getattr(config, "ux_chatter", False):
+        from voxium.ux_chatter import get_ux_chatter_wit
+
+        w = (get_ux_chatter_wit() or "").strip()
+        if w:
+            d["ux_chatter_wit"] = w
     return d
 
 
@@ -1842,6 +2225,52 @@ def _arm_status_after_log_scrollback() -> None:
         show_status(STATUS_VOX_ON_STATION, "Standing by.")
 
 
+def _print_shutdown_farewell() -> None:
+    """
+    One line on exit (Ctrl+C path). When ``--ux-chatter`` is on and the UX stack answers in time, the
+    line is model-written; else :data:`_VOXIUM_SHUTDOWN_DEFAULT`. The line is shown in a violet
+    Downlink box (e.g. ``Voxium: 73 / 10-7``) unless ``--minimal``. Call this **before**
+    :func:`cleanup_client_runtime` so the managed UX ``llama-server`` is still on loopback.
+    """
+    if config is not None and getattr(config, "quiet", False):
+        return
+    line = _VOXIUM_SHUTDOWN_DEFAULT
+    if config is not None and getattr(config, "ux_chatter", False):
+        from voxium.ux_chatter import fetch_ux_shutdown_line, is_ux_chatter_wanted
+
+        fc = getattr(config, "file_config", None) or {}
+        if is_ux_chatter_wanted(cli_enabled=True, file_config=fc):
+            out = fetch_ux_shutdown_line(fc, cli_enabled=True)
+            if out:
+                line = out
+    if config is not None and getattr(config, "minimal", False):
+        print(f"\n{line}")
+        return
+    with _ux_chatter_downlink_lock:
+        print_agent_telemetry_panel(
+            console,
+            [(line, "info")],
+            downlink_subtitle="sign-off",
+        )
+
+
+def _ptt_log_panel_subtitle_line(transcribed: str) -> str:
+    """Dim footer for the blue transcription panel; dynamic when ``--ux-chatter`` and Gemma respond."""
+    t = (transcribed or "").strip()
+    if not t:
+        return _PTT_LOG_PANEL_SUBTITLE_DEFAULT
+    if not config or not getattr(config, "ux_chatter", False):
+        return _PTT_LOG_PANEL_SUBTITLE_DEFAULT
+    from voxium.ux_chatter import fetch_ux_log_subtitle, is_ux_chatter_wanted
+
+    fc = getattr(config, "file_config", None) or {}
+    if not is_ux_chatter_wanted(cli_enabled=True, file_config=fc):
+        return _PTT_LOG_PANEL_SUBTITLE_DEFAULT
+    out = fetch_ux_log_subtitle(fc, t, cli_enabled=True)
+    s = (out or "").strip()
+    return s if s else _PTT_LOG_PANEL_SUBTITLE_DEFAULT
+
+
 def log_transcription_summary(text: str, metrics: dict | None):
 
     if is_client_shutting_down():
@@ -1855,7 +2284,8 @@ def log_transcription_summary(text: str, metrics: dict | None):
     w_box = voxium_panel_width(console)
     # Panel border 2 + horizontal padding 1+1 — extra width for metrics columns on small TTYs.
     inner_w = max(4, w_box - 4)
-    transcript = Text(text.strip() or "(empty)", style="#f8fafc")
+    raw = (text or "").strip()
+    transcript = Text(raw or "(empty)", style="#f8fafc")
     metrics_block = build_ptt_log_metrics_layout(
         metrics,
         available_width=inner_w,
@@ -1866,19 +2296,21 @@ def log_transcription_summary(text: str, metrics: dict | None):
         Text("Inference metrics", style="bold #a7f3d0"),
         metrics_block,
     )
-    console.print()
-    console.print(
-        Panel(
-            content,
-            title="[bold #38bdf8]Voxium[/bold #38bdf8]",
-            title_align="left",
-            subtitle="[dim]PTT & VOX log — local loopback only[/dim]",
-            subtitle_align="left",
-            border_style="#38bdf8",
-            padding=(1, 1),
-            width=w_box,
+    with _ux_chatter_downlink_lock:
+        sub_plain = _ptt_log_panel_subtitle_line(raw)
+        console.print()
+        console.print(
+            Panel(
+                content,
+                title="[bold #38bdf8]Voxium[/bold #38bdf8]",
+                title_align="left",
+                subtitle=f"[dim]{escape(sub_plain)}[/dim]",
+                subtitle_align="left",
+                border_style="#38bdf8",
+                padding=(1, 1),
+                width=w_box,
+            )
         )
-    )
     if config and not config.minimal:
         _arm_status_after_log_scrollback()
 
@@ -2139,7 +2571,7 @@ def start_recording():
         STATUS_PTT_ACTIVE,
         (
             f"{rec_hk} drops carrier · live meter · "
-            f"reminder ping every {RECORDING_REMINDER_INTERVAL_S:.0f}s"
+            f"still-air reminder: 2 blips every {RECORDING_REMINDER_INTERVAL_S:.0f}s (not PTT)"
         ),
     )
 
@@ -2169,7 +2601,7 @@ def stop_recording() -> np.ndarray:
     set_terminal_title()
     show_status(
         STATUS_EDGE_INFERENCE,
-        take_edge_inference_detail(),
+        _status_detail_for_edge_inference(rexmit=False),
     )
 
     with recording_audio_lock:
@@ -2209,7 +2641,10 @@ def is_client_shutting_down() -> bool:
 
 def cleanup_client_runtime():
 
-    global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, _llama_cpp_polish_ready_checked
+    global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, managed_llama_cpp_ux, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked
+    from voxium.ux_chatter import shutdown_ux_chatter_executor
+
+    shutdown_ux_chatter_executor()
     _stop_vox_listening()
     _set_input_mode("ptt")
     client_shutdown_event.set()
@@ -2245,7 +2680,13 @@ def cleanup_client_runtime():
             stop_managed_llama_cpp(managed_llama_cpp)
         finally:
             managed_llama_cpp = None
+    if managed_llama_cpp_ux is not None:
+        try:
+            stop_managed_llama_cpp(managed_llama_cpp_ux)
+        finally:
+            managed_llama_cpp_ux = None
     _llama_cpp_polish_ready_checked = False
+    _llama_cpp_ux_ready_checked = False
 
 
 def maybe_polish_transcript(raw_text: str) -> str:
@@ -2572,7 +3013,26 @@ def transcribe_and_paste(
             paste_text(" " + text)
             beep_success()
             set_terminal_title()
-            show_status(STATUS_VOX_COPY, take_readback())
+            copy_readback = take_readback()
+            if config and getattr(config, "ux_chatter", False):
+                from voxium.ux_chatter import (
+                    is_ux_chatter_wanted,
+                    sync_ux_chatter_for_transcript,
+                )
+
+                fc = getattr(config, "file_config", None) or {}
+                if is_ux_chatter_wanted(
+                    cli_enabled=bool(getattr(config, "ux_chatter", False)),
+                    file_config=fc,
+                ):
+                    uxf = sync_ux_chatter_for_transcript(
+                        text,
+                        fc,
+                        bool(getattr(config, "ux_chatter", False)),
+                        on_complete=_ux_chatter_on_complete,
+                    )
+                    copy_readback = _ux_resolve_copy_wit(text, uxf)
+            show_status(STATUS_VOX_COPY, copy_readback)
             log_transcription_summary(text, metrics)
         else:
             beep_error()
@@ -2758,7 +3218,7 @@ def create_retry_handler(retry_key):
         set_terminal_title()
         show_status(
             STATUS_EDGE_INFERENCE_REXMIT,
-            take_edge_inference_rexmit_detail(),
+            _status_detail_for_edge_inference(rexmit=True),
         )
 
         try:
@@ -2790,7 +3250,27 @@ def create_retry_handler(retry_key):
                     h3.clear_pending_audio()
                 beep_success()
                 set_terminal_title()
-                show_status(STATUS_VOX_COPY_REXMIT, take_readback_rexmit())
+                copy_rex = take_readback_rexmit()
+                if config and getattr(config, "ux_chatter", False):
+                    from voxium.ux_chatter import (
+                        is_ux_chatter_wanted,
+                        sync_ux_chatter_for_transcript,
+                    )
+
+                    _fc = getattr(config, "file_config", None) or {}
+                    if is_ux_chatter_wanted(
+                        cli_enabled=bool(getattr(config, "ux_chatter", False)),
+                        file_config=_fc,
+                    ):
+                        uxf = sync_ux_chatter_for_transcript(
+                            text,
+                            _fc,
+                            bool(getattr(config, "ux_chatter", False)),
+                            on_complete=_ux_chatter_on_complete,
+                        )
+                        w = _ux_resolve_copy_wit(text, uxf)
+                        copy_rex = f"{w} (re-transmit)"
+                show_status(STATUS_VOX_COPY_REXMIT, copy_rex)
                 log_transcription_summary(text, metrics)
             else:
                 beep_error()
@@ -3199,7 +3679,50 @@ def _print_polish_models_table(
     )
 
 
+def _pull_ux_chatter_model_to_repo_cache(
+    *, json_mode: bool = False
+) -> tuple[int, dict[str, Any] | None]:
+    from voxium.ux_chatter_provision import ensure_ux_chatter_gguf_available
+
+    ensure_runtime_dirs()
+    progress = (
+        None if json_mode else wrap_hf_download_progress(lambda m: print(m, flush=True))
+    )
+    try:
+        path, spec = ensure_ux_chatter_gguf_available(progress=progress)
+    except RuntimeError as exc:
+        payload: dict[str, Any] = {
+            "ok": False,
+            "error": str(exc),
+            "models_ux_dir": str(ux_models_dir().resolve()),
+        }
+        if not json_mode:
+            print(f"UX chatter model download did not complete: {exc}")
+        return 1, payload
+    out: dict[str, Any] = {
+        "ok": True,
+        "model_path": str(path.resolve()),
+        "model_id": spec.model_id,
+        "repo_id": spec.repo_id,
+        "filename": spec.filename,
+    }
+    if not json_mode:
+        label = "Gemma" if spec is DEFAULT_UX_CHATTER else "TinyLlama (fallback)"
+        print(f"UX chatter model ready ({label} under models/ux/).")
+        print(f"  {path}")
+    return 0, out
+
+
 def run_models_command(args) -> int:
+    if getattr(args, "pull_ux_chatter", False):
+        code, payload = _pull_ux_chatter_model_to_repo_cache(
+            json_mode=bool(getattr(args, "json", False))
+        )
+        if getattr(args, "json", False) and payload is not None:
+            import json as _json
+
+            print(_json.dumps(payload, indent=2))
+        return code
     provisioned_payload: dict[str, Any] | None = None
     lane = (getattr(args, "lane", None) or "").strip().lower()
     action = (getattr(args, "action", None) or "").strip().lower()
@@ -3341,12 +3864,18 @@ def _pull_polish_models_to_repo_cache(
 
 def run_client(args, _raw_argv: list[str]) -> int:
 
-    global config, history, ptt_status_box, _llama_cpp_polish_ready_checked
+    global config, history, ptt_status_box, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked, managed_llama_cpp_ux
     client_shutdown_event.clear()
 
     ensure_runtime_dirs()
+    from voxium.ux_chatter import clear_ux_chatter_wit
+
+    clear_ux_chatter_wit()
+    args.file_config = _merge_run_file_config(args)
     config = args
     _llama_cpp_polish_ready_checked = False
+    _llama_cpp_ux_ready_checked = False
+    managed_llama_cpp_ux = None
     _telemetry_log_buffer.clear()
     ptt_status_box = (
         PttSessionStatusBox(console, standby_context=_standby_telemetry_context)
@@ -3371,9 +3900,25 @@ def run_client(args, _raw_argv: list[str]) -> int:
     )
 
     if not config.quiet and not config.minimal:
-        from voxium.startup_banner import show_startup_banner
+        from voxium.startup_banner import get_startup_hostname, show_startup_banner
+        from voxium.ux_chatter import (
+            fetch_ux_rig_subtitle,
+            fetch_ux_startup_tagline,
+            is_ux_chatter_wanted,
+        )
 
-        show_startup_banner(console)
+        _ux_fc = getattr(config, "file_config", None) or {}
+        _ux_tag: str | None = None
+        _ux_rig: str | None = None
+        _host = get_startup_hostname()
+        if is_ux_chatter_wanted(
+            cli_enabled=bool(getattr(config, "ux_chatter", False)),
+            file_config=_ux_fc,
+        ):
+            ensure_llama_cpp_for_ux_chatter()
+            _ux_tag = fetch_ux_startup_tagline(_ux_fc, cli_enabled=True)
+            _ux_rig = fetch_ux_rig_subtitle(_ux_fc, _host, cli_enabled=True)
+        show_startup_banner(console, tagline=_ux_tag, rig_subtitle=_ux_rig)
     cli_log(f"System: {SYSTEM}")
     if hotkeys_adjusted:
         cli_log(
@@ -3389,6 +3934,28 @@ def run_client(args, _raw_argv: list[str]) -> int:
     cli_log(f"Audio input: {describe_audio_capture_source()}")
     ensure_llama_cpp_for_polish()
     ensure_local_server()
+    # Prewarm the session STT model on the local stack (default ``small.en`` unless
+    # ``--model`` / ``transcription.model`` says otherwise). Reusing a server that was
+    # started with a different argv (e.g. ``tiny``) does not reload the process; /ensure-model
+    # loads the session model so the first PTT is not a cold load and metrics match.
+    if is_loopback_url(config.server_url) and getattr(config, "model", None):
+        ensure_model_on_loopback_server(
+            config.server_url,
+            console,
+            validate_model_name(str(config.model)),
+            quiet_success=True,
+        )
+    ensure_llama_cpp_for_ux_chatter()
+    if getattr(config, "ux_chatter", False) and not config.minimal:
+        _uxu = str(getattr(config, "ux_chatter_url", None) or "http://127.0.0.1:11436")
+        cli_log(
+            "UX (Gemma) experience: on — dynamic lines and violet Downlink require a llama-server on "
+            f"the UX URL (default {_uxu}, must answer /health). "
+            "If you see no model text, confirm that port on the **same** machine/OS as this client "
+            "(Windows and WSL have different loopbacks). Missing Gemma under models/ux/ triggers an auto-pull "
+            "when allowed, or run `voxium models --pull-ux-chatter`, copy.",
+            "info",
+        )
     flush_client_telemetry_block(include_ops_cheat=True)
 
     hotkey = get_hotkey(config.hotkey)
@@ -3498,6 +4065,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
                     polish_enabled=bool(getattr(config, "polish", True)),
                     polish_model=getattr(config, "polish_model", None),
                     transcript_history=get_transcript_history(),
+                    file_config=getattr(config, "file_config", None) or {},
                     **sk,
                 )
                 combined_polish = bool(
@@ -3631,9 +4199,21 @@ def run_client(args, _raw_argv: list[str]) -> int:
             except (OSError, ValueError):
                 pass
 
-    cleanup_client_runtime()
+    # Freeze the green PTT strip before the violet sign-off. Otherwise :meth:`PttSessionStatusBox.close`
+    # would call :meth:`rich.live.Live.stop` after the downlink, which re-prints a final green “Standing
+    # by” panel in the scrollback after the user already saw the shutdown line (Ctrl+C / SIGINT path).
+    if (
+        shutdown_requested.is_set()
+        and ptt_status_box is not None
+        and config
+        and not config.minimal
+    ):
+        ptt_status_box.freeze_before_external_output()
+    # Farewell: :func:`cleanup_client_runtime` tears down the managed UX llama-server, and
+    # :func:`fetch_ux_shutdown_line` needs that stack on loopback for a model-written sign-off.
     if shutdown_requested.is_set() and not config.quiet:
-        print("\nVoxium: going clear. Stopped.")
+        _print_shutdown_farewell()
+    cleanup_client_runtime()
     return 0
 
 
@@ -3652,8 +4232,10 @@ def main(argv: list[str] | None = None):
             return run_models_command(args)
         return run_client(args, raw_argv)
     except KeyboardInterrupt:
+        if ptt_status_box is not None and config is not None and not config.minimal:
+            ptt_status_box.freeze_before_external_output()
+        _print_shutdown_farewell()
         cleanup_client_runtime()
-        print("\nVoxium: going clear. Stopped.")
         return 130
 
 

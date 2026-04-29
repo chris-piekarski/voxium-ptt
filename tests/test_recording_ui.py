@@ -35,7 +35,7 @@ def test_format_recording_hud_contains_dur() -> None:
     s = format_recording_hud(48000, 0.1, 0.5, 3, 48000, 12.0)
     assert "1.0" in s or "48000" in s
     assert "dBFS" in s
-    assert "12" in s or "reminder" in s
+    assert "12" in s and "2 blips" in s
 
 
 def test_format_minimal_capped() -> None:
@@ -64,9 +64,18 @@ def test_colored_mono_waveform_short_buffer() -> None:
 def test_colored_mono_waveform_uses_level_bars() -> None:
     t = 0.2 * np.sin(np.linspace(0, 4 * np.pi, 8_000)).astype(np.float32)
     w = colored_mono_waveform_text(t, 32, peak_ref=0.2)
-    s = str(w)
+    s = w.plain
     assert any(c in s for c in WAVEFORM_BARS)
-    assert len(s) >= 32
+    assert "\n" in s
+    assert len(s.replace("\n", "")) >= 32
+    assert w.spans
+
+
+def test_colored_mono_waveform_uses_many_palette_spans() -> None:
+    t = np.linspace(-1.0, 1.0, 16_000, dtype=np.float32)
+    w = colored_mono_waveform_text(t, 48, peak_ref=1.0)
+    styles = {span.style for span in w.spans if span.style}
+    assert len(styles) >= 8
 
 
 def test_build_recording_hud_rich_group() -> None:

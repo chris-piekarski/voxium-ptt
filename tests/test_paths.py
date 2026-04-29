@@ -31,6 +31,7 @@ def test_ensure_runtime_dirs_creates_subdirs(monkeypatch, tmp_path) -> None:
         p = tmp_path / name
         assert p.is_dir(), name
     assert (tmp_path / "models" / "polish").is_dir()
+    assert (tmp_path / "models" / "ux").is_dir()
     assert (tmp_path / "tools" / "llama.cpp").is_dir()
 
 

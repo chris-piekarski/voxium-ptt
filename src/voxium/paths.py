@@ -30,6 +30,11 @@ def polish_models_dir() -> Path:
     return models_dir() / "polish"
 
 
+def ux_models_dir() -> Path:
+    """Repository-local GGUF for optional console UX chatter (Gemma, llama.cpp)."""
+    return models_dir() / "ux"
+
+
 def ollama_models_dir() -> Path:
     """Backward-compatible alias; the polish path now uses local GGUF files."""
     return polish_models_dir()
@@ -57,5 +62,11 @@ def instance_lock_path() -> Path:
 
 
 def ensure_runtime_dirs() -> None:
-    for d in (models_dir(), polish_models_dir(), llama_cpp_dir(), logs_dir()):
+    for d in (
+        models_dir(),
+        polish_models_dir(),
+        ux_models_dir(),
+        llama_cpp_dir(),
+        logs_dir(),
+    ):
         d.mkdir(parents=True, exist_ok=True)

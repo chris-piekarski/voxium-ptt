@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import platform
+import sys
 import re
 import shutil
 import tempfile
@@ -70,6 +71,34 @@ class VoxiumPolishHubTqdm(tqdm):
             except Exception:
                 pass
         return r
+
+
+def wrap_hf_download_progress(emit: Callable[[str], None]) -> Callable[[str], None]:
+    """
+    For :class:`VoxiumPolishHubTqdm` sink output: **GiB / %** status lines update a **single** stderr
+    line (CR + clear). Other lines (e.g. “Fetching…”, “ready”) go through *emit*, with a newline
+    after a prior bar so the next log is not joined to the progress line.
+
+    Use with ``cli_log``-based *emit* so the telemetry buffer does not grow one line per tick.
+    """
+    in_bar = False
+
+    def push(m: str) -> None:
+        nonlocal in_bar
+        s = (m or "").strip()
+        if not s:
+            return
+        is_bar = bool(re.search(r"\d{1,3}%\s+\(\s*[\d.]+", s) and "GiB" in s)
+        if is_bar:
+            print(f"\r\033[2K{s}", end="", file=sys.stderr, flush=True)
+            in_bar = True
+            return
+        if in_bar:
+            print(file=sys.stderr)
+            in_bar = False
+        emit(s)
+
+    return push
 
 
 _GITHUB_HEADERS = {

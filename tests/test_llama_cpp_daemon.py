@@ -22,17 +22,53 @@ class _FakeProcess:
 def test_ensure_llama_cpp_daemon_reuses_existing(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(lcd, "llama_cpp_reachable", lambda *a, **k: (True, None))
     monkeypatch.setattr(lcd, "llama_cpp_loaded_model", lambda *a, **k: "plain.gguf")
+    log_path = tmp_path / "llama_cpp.log"
 
     managed, entries = lcd.ensure_llama_cpp_daemon(
         base_url="http://127.0.0.1:11435",
         cmd_path=None,
         model_path=tmp_path / "plain.gguf",
         model_alias="plain.gguf",
-        log_path=tmp_path / "llama_cpp.log",
+        log_path=log_path,
     )
 
     assert managed is None
     assert any("already on station" in msg for msg, _level in entries)
+    text = log_path.read_text(encoding="utf-8")
+    assert "[stack=re-encode]" in text
+    assert "already on station" in text
+
+
+def test_ensure_llama_cpp_daemon_ux_chatter_stack_in_log(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = iter([(False, "offline"), (True, None)])
+    model_path = tmp_path / "ux.gguf"
+    model_path.write_bytes(b"gguf")
+    log_path = tmp_path / "llama_cpp_ux.log"
+
+    monkeypatch.setattr(lcd, "llama_cpp_reachable", lambda *a, **k: next(calls))
+    monkeypatch.setattr(lcd, "llama_cpp_loaded_model", lambda *a, **k: "ux-id")
+    monkeypatch.setattr(
+        lcd, "llama_server_cli_path", lambda *_a, **_k: "/usr/bin/llama-server"
+    )
+    proc = _FakeProcess()
+
+    managed, entries = lcd.ensure_llama_cpp_daemon(
+        base_url="http://127.0.0.1:11436",
+        cmd_path=None,
+        model_path=model_path,
+        model_alias="ux-id",
+        log_path=log_path,
+        log_stack=lcd.LLAMA_STACK_UX_CHATTER,
+        popen=lambda *a, **k: proc,
+        sleep=lambda _s: None,
+    )
+    assert managed is not None
+    assert any("ready for UX chatter" in msg for msg, _ in entries)
+    data = log_path.read_text(encoding="utf-8")
+    assert "[stack=ux-chatter]" in data
+    assert "starting managed llama-server" in data
 
 
 def test_ensure_llama_cpp_daemon_starts_configured_runtime(
@@ -95,7 +131,7 @@ def test_ensure_llama_cpp_daemon_starts_configured_runtime(
         "--sleep-idle-seconds",
         "600",
     ]
-    assert any("ready for local polish" in msg for msg, _level in entries)
+    assert any("ready for local re-encode" in msg for msg, _level in entries)
 
 
 def test_ensure_llama_cpp_daemon_warns_when_cli_missing(

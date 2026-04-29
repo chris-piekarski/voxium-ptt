@@ -1,4 +1,4 @@
-"""Managed `llama-server` startup for the local polish path."""
+"""Managed `llama-server` startup for the local re-encode (polish) and optional UX chatter paths."""
 
 from __future__ import annotations
 
@@ -11,13 +11,34 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Final, TextIO
 from urllib.parse import urlparse
 
 from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
 from voxium.paths import llama_cpp_dir
 
 IS_WINDOWS = os.name == "nt"
+
+# Passed to :func:`ensure_llama_cpp_daemon` as *log_stack*; appears in every ``llama*.log`` line
+# as ``[stack=…]`` so operators can ``grep`` for ``stack=ux-chatter`` or ``stack=re-encode``.
+LLAMA_STACK_REENCODE: Final = "re-encode"
+LLAMA_STACK_UX_CHATTER: Final = "ux-chatter"
+
+
+def append_llama_stack_log_line(log_path: Path, line: str) -> None:
+    """Append one line to a managed ``llama*.log`` (used by the client when no daemon start runs)."""
+    if not line.endswith("\n"):
+        line = line + "\n"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        pass
+
+
+def _is_ux_chatter_stack(log_stack: str) -> bool:
+    return (log_stack or LLAMA_STACK_REENCODE) == LLAMA_STACK_UX_CHATTER
 
 
 @dataclass
@@ -56,6 +77,7 @@ def ensure_llama_cpp_daemon(
     model_path: Path,
     model_alias: str,
     log_path: Path,
+    log_stack: str = LLAMA_STACK_REENCODE,
     startup_timeout: float = 20.0,
     parallel: int = 2,
     ctx_size: int = 0,
@@ -67,19 +89,37 @@ def ensure_llama_cpp_daemon(
     """
     Ensure `llama-server` is reachable. Start it only when the probe fails.
 
+    *log_stack* is written to *log_path* on every run as ``[stack=…]`` (e.g. ``ux-chatter``) so
+    tail/grep of ``logs/llama_cpp_ux.log`` can confirm which service owns the process.
+
     Returns `(managed_process_or_none, telemetry_entries)`. Existing daemons are
     never owned by Voxium, so shutdown should only stop a non-None returned process.
     """
     entries: list[tuple[str, str]] = []
+    is_ux = _is_ux_chatter_stack(log_stack)
     ok, reason = llama_cpp_reachable(base_url, timeout=1.0)
     if ok:
         loaded = llama_cpp_loaded_model(base_url, timeout=1.0)
-        entries.append(("llama.cpp already on station for polish.", "info"))
+        append_llama_stack_log_line(
+            log_path,
+            f"Voxium: [stack={log_stack}] llama-server already on station at {base_url} "
+            f"loaded_model={loaded!r} expected_alias={model_alias!r} gguf_path={model_path}",
+        )
+        on_station = (
+            "llama.cpp already on station (UX chatter), copy."
+            if is_ux
+            else "llama.cpp already on station (re-encode), copy."
+        )
+        entries.append((on_station, "info"))
         if loaded and loaded != model_alias:
+            hint = (
+                "Voxium will reuse the running server; switch the GGUF or port if UX chatter one-liners do not match, copy."
+                if is_ux
+                else "Voxium will reuse the running server; switch the local runtime if re-encode replies do not match the selected model."
+            )
             entries.append(
                 (
-                    f"llama.cpp is already serving model {loaded!r}, not {model_alias!r}. "
-                    "Voxium will reuse the running server; switch the local runtime if polish replies do not match the selected model.",
+                    f"llama.cpp is already serving model {loaded!r}, not {model_alias!r}. {hint}",
                     "warning",
                 )
             )
@@ -87,23 +127,31 @@ def ensure_llama_cpp_daemon(
 
     cli = llama_server_cli_path(cmd_path)
     if not cli:
-        entries.append(
-            (
+        if is_ux:
+            msg = (
+                "UX chatter is enabled, but Voxium could not find `llama-server`. "
+                "Run `voxium models` (polish stack) to provision the repo-local binary, or add `llama-server` to PATH; copy."
+            )
+        else:
+            msg = (
                 "Re-encode is enabled, but Voxium could not find `llama-server`. "
                 "Run `voxium models --polish --pull-polish` (or `scripts\\windows\\Setup-Voxium.cmd` on Windows) "
-                "to provision the repo-local runtime, or add `llama-server` to PATH; Voxium will paste raw STT until then.",
-                "warning",
+                "to provision the repo-local runtime, or add `llama-server` to PATH; Voxium will paste raw STT until then."
             )
-        )
+        entries.append((msg, "warning"))
         return None, entries
     if not model_path.is_file():
-        entries.append(
-            (
-                f"Re-encoder model file is missing: {model_path}. "
-                "Run `voxium models --polish --pull-polish` to provision the default GGUF model, then retry.",
-                "warning",
+        if is_ux:
+            msg = (
+                f"UX chatter model file is missing: {model_path}. "
+                "Run `voxium models --pull-ux-chatter` or add the GGUF under models/ux/, then retry, copy."
             )
-        )
+        else:
+            msg = (
+                f"Re-encoder model file is missing: {model_path}. "
+                "Run `voxium models --polish --pull-polish` to provision the default GGUF model, then retry."
+            )
+        entries.append((msg, "warning"))
         return None, entries
 
     parsed = urlparse(base_url)
@@ -141,6 +189,10 @@ def ensure_llama_cpp_daemon(
     except (TypeError, ValueError):
         argv_line = " ".join(str(x) for x in cmd)
     log_handle.write(
+        f"Voxium: [stack={log_stack}] starting managed llama-server — "
+        f"model_alias={model_alias!r} gguf_name={model_path.name!r} base_url={base_url}\n"
+    )
+    log_handle.write(
         f"Voxium: llama-server argv (check --sleep-idle-seconds): {argv_line}\n"
     )
     log_handle.flush()
@@ -162,24 +214,27 @@ def ensure_llama_cpp_daemon(
             log_handle.close()
         except Exception:
             pass
-        entries.append((f"Could not start llama.cpp for polish: {exc}", "warning"))
+        start_ct = "UX chatter" if is_ux else "re-encode"
+        entries.append((f"Could not start llama.cpp for {start_ct}: {exc}", "warning"))
         return None, entries
 
     managed = ManagedLlamaCpp(proc, log_handle, started_by_voxium=True)
+    start_label = "UX chatter" if is_ux else "re-encode"
     entries.append(
-        (f"Starting llama.cpp for polish: {base_url} (log: {log_path})", "info")
+        (f"Starting llama.cpp for {start_label}: {base_url} (log: {log_path})", "info")
     )
     deadline = time.time() + max(1.0, startup_timeout)
     last_reason = reason
     while time.time() < deadline:
         if proc.poll() is not None:
-            entries.append(
-                (
+            if is_ux:
+                exit_h = f"llama.cpp exited during startup (code {proc.returncode}); see {log_path}. UX chatter will be off until the server is healthy, copy."
+            else:
+                exit_h = (
                     f"llama.cpp exited during startup (code {proc.returncode}); see {log_path}. "
-                    "Voxium will paste raw STT if polish cannot run.",
-                    "warning",
+                    "Voxium will paste raw STT if re-encode cannot run."
                 )
-            )
+            entries.append((exit_h, "warning"))
             return managed, entries
         ok, last_reason = llama_cpp_reachable(base_url, timeout=1.0)
         if ok:
@@ -192,7 +247,12 @@ def ensure_llama_cpp_daemon(
                     )
                 )
             else:
-                entries.append(("llama.cpp ready for local polish, copy.", "info"))
+                ready = (
+                    "llama.cpp ready for UX chatter, copy."
+                    if is_ux
+                    else "llama.cpp ready for local re-encode, copy."
+                )
+                entries.append((ready, "info"))
             return managed, entries
         sleep(0.3)
 

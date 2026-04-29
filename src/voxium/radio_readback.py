@@ -1,5 +1,13 @@
 """
-Rotating HAM/CB-tinged readback lines for successful VOX (brand: docs/brand.md).
+Rotating HAM/CB-tinged **fallback** copy for the green status row (brand: docs/brand.md).
+
+When **UX chatter** is on, the **PTT/VOX · COPY** line uses the **copy** prompt from
+:func:`voxium.ux_chatter.sync_ux_chatter_for_transcript`, and the standby first line uses the
+**standby** prompt (two LLM calls per take), instead of :func:`take_readback`.
+
+**Edge inference** (the second line under **EDGE INFERENCE** after PTT release) uses
+:func:`voxium.ux_chatter.request_ux_chatter_edge_line_full` when UX chatter is on; otherwise
+:func:`take_edge_inference_detail` (or :func:`take_edge_inference_rexmit_detail` for re-xmit) — no transcript yet.
 Pure + thread-safe: safe when transcribe runs on a worker thread.
 """
 

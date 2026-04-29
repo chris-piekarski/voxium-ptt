@@ -1124,10 +1124,14 @@ def _run_ensure_model_job(
 def health():
 
     device_info = get_actual_device()
+    loaded_transcribe_models = sorted({name for (name, _dev, _comp) in _models.keys()})
     body: dict[str, Any] = {
         "status": "ok",
         "model": config.model,
+        "startup_model": config.model,
         "model_repo": resolve_model_repo(config.model),
+        "startup_model_repo": resolve_model_repo(config.model),
+        "loaded_transcribe_models": loaded_transcribe_models,
         "device": device_info["device"],
         "compute": config.compute,
         "cuda_available": device_info["cuda_available"],

@@ -22,3 +22,5 @@ class VoxiumUserConfig(BaseModel):
     ui: dict[str, Any] = Field(default_factory=dict)
     # ``limit`` / ``max_total_chars`` / ``pending_audio_max_mib`` — see ``voxium run --help`` (History group).
     history: dict[str, Any] = Field(default_factory=dict)
+    # Client-only “UX chatter” (Gemma; see ``docs/ux-chatter-gemma.md``). ``enabled: false`` opts out.
+    ux_chatter: dict[str, Any] = Field(default_factory=dict)

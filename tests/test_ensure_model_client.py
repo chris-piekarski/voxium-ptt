@@ -24,6 +24,24 @@ def test_ensure_model_http_200_ready(monkeypatch) -> None:
     )
 
 
+def test_ensure_model_http_200_quiet_success_no_panel(monkeypatch) -> None:
+    class Resp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {"message": "Model is on the stack, copy."}
+
+    monkeypatch.setattr(emc.requests, "post", lambda *a, **k: Resp())
+    c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
+    assert (
+        emc.ensure_model_on_loopback_server(
+            "http://127.0.0.1:8002", c, "small.en", quiet_success=True
+        )
+        is True
+    )
+    assert c.export_text().strip() == ""
+
+
 def test_ensure_model_http_202_then_ready(monkeypatch) -> None:
     class PostResp:
         status_code = 202
@@ -72,6 +90,56 @@ def test_ensure_model_http_202_then_ready(monkeypatch) -> None:
         emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "tiny") is True
     )
     assert calls and "abc123" in calls[0]
+
+
+def test_ensure_model_http_202_quiet_success_no_final_panel(monkeypatch) -> None:
+    class PostResp:
+        status_code = 202
+
+        def json(self) -> dict:
+            return {"status": "pending", "job_id": "abc123", "model": "small.en"}
+
+    class GetResp:
+        status_code = 200
+
+        def json(self) -> dict:
+            return {
+                "status": "ready",
+                "model": "small.en",
+                "lines": [],
+                "progress_line": "done",
+                "error": None,
+                "done": True,
+            }
+
+    class _DummyLive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return None
+
+        def update(self, *_a, **_k) -> None:
+            return None
+
+    panel_calls: list[tuple] = []
+
+    def capture_panel(_console, lines, **_k):
+        panel_calls.append(lines)
+
+    monkeypatch.setattr(emc, "Live", lambda *a, **k: _DummyLive())
+    monkeypatch.setattr(emc, "_ENSURE_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(emc, "print_agent_telemetry_panel", capture_panel)
+    monkeypatch.setattr(emc.requests, "post", lambda *a, **k: PostResp())
+    monkeypatch.setattr(emc.requests, "get", lambda *a, **k: GetResp())
+    c = Console(width=100)
+    assert (
+        emc.ensure_model_on_loopback_server(
+            "http://127.0.0.1:8002", c, "small.en", quiet_success=True
+        )
+        is True
+    )
+    assert not panel_calls
 
 
 def test_ensure_model_skips_non_loopback(monkeypatch) -> None:

@@ -25,7 +25,8 @@ _PTT_BRAND = "Voxium"
 PTT_SESSION_MAX_STEPS = 20
 
 # Matches :data:`voxium.app.STATUS_VOX_ON_STATION` (avoid import cycle).
-ON_STATION_HEAD = "◉ PTT/VOX · ON STATION"
+# Green row when idle: title line is “Standing by” (replaces the earlier “on station” wording).
+ON_STATION_HEAD = "◉ PTT/VOX · Standing by"
 
 # On-station standby: FFT strip animation (see :mod:`voxium.standby_fft`); faster refresh = clearer motion.
 _STANDBY_INTERVAL_S = 0.14
@@ -55,8 +56,8 @@ def _head_style_for_status_title(head: str) -> str:
     u = head.upper()
     if "VOX" in u and "OPEN" in u:
         return "bold #c4b5fd"  # violet-300, distinct from the green on-air path
-    if "ON STATION" in u:
-        return "bold #86efac"  # green-200
+    if "STANDING BY" in u and "PTT/VOX" in u:
+        return "bold #86efac"  # green-200, idle / standby
     if "PTT" in u and "ACTIVE" in u:
         return "bold #fbbf24"
     if "INFERENCE" in u or "DECOD" in u:
@@ -150,9 +151,11 @@ def status_uses_recording_hud_line(status: str) -> bool:
 def standing_by_ready_starts_new_panel(
     title: str, recording_hud: str | RenderableType | None
 ) -> bool:
-    """True when returning to on-station PTT/VOX — ends prior panel, opens a fresh one."""
+    """True when returning to idle PTT/VOX (standing by) — ends prior panel, opens a fresh one."""
     return (
-        recording_hud is None and "PTT/VOX" in title and "ON STATION" in title.upper()
+        recording_hud is None
+        and "PTT/VOX" in title
+        and "STANDING BY" in (title or "").upper()
     )
 
 
@@ -172,17 +175,6 @@ def vox_open_listening_starts_fresh_panel(
         return False
     u = (title or "").upper()
     return "VOX" in u and "OPEN" in u
-
-
-def _detail_is_standby_base(detail: str | RenderableType) -> bool:
-    """True when the client’s on-station line should use the rotating standby detail (not e.g. PTT hint)."""
-    if isinstance(detail, str):
-        s = (detail or "").strip().lower()
-    elif isinstance(detail, Text):
-        s = (detail.plain or "").strip().lower()
-    else:
-        return False
-    return s.startswith("standing by")
 
 
 _TELEMETRY_LINE_STYLES: dict[str, str] = {
@@ -596,7 +588,7 @@ class PttSessionStatusBox:
         last = self._session_steps[-1]
         if last.head != ON_STATION_HEAD or last.live_hud is not None:
             return False
-        return _detail_is_standby_base(last.detail)
+        return True
 
     def _build_main_panel(self) -> Panel:
         w = self._box_width()
