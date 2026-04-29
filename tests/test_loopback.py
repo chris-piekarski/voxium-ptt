@@ -30,7 +30,17 @@ def test_is_loopback_url():
     assert is_loopback_url("https://127.0.0.1/") is False
     assert is_loopback_url("not a url") is False
     # urlparse can raise; outer except returns False
-    assert is_loopback_url(1) is False  # type: ignore[arg-type]
+    assert is_loopback_url(1) is False
+
+
+def test_is_loopback_url_when_urlparse_raises(monkeypatch) -> None:
+    from voxium import loopback
+
+    def boom(_s):
+        raise ValueError("urlparse error")
+
+    monkeypatch.setattr(loopback, "urlparse", boom)
+    assert is_loopback_url("http://127.0.0.1/") is False
 
 
 def test_get_server_endpoint_url():

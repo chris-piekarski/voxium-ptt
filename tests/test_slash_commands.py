@@ -1,17 +1,45 @@
 from io import StringIO
 from unittest.mock import patch
 
-import pytest
 from rich.console import Console
 
 from voxium.console_status import print_slash_command_downlink, wrap_telemetry_block
 from voxium.metrics_table import format_gpu_metrics_plaintext
-from voxium.model_registry import TRUSTED_MODELS
+from voxium.polish_model_registry import (
+    DEFAULT_TRUSTED_POLISH_MODEL_ID,
+    trusted_polish_model,
+)
 from voxium.session_history import SessionTranscriptHistory
 from voxium.slash_commands import (
+    _line_style,
+    _render_catalog,
+    build_transcribe_models_catalog_rich,
     run_slash_line,
     slash_data_needs,
 )
+
+
+def test_build_transcribe_models_catalog_rich_branches() -> None:
+    plain, _rt = build_transcribe_models_catalog_rich("base", installed_only=False)
+    assert "Transcriber" in plain or "transcrib" in plain.lower()
+    plain2, _ = build_transcribe_models_catalog_rich("base", installed_only=True)
+    assert len(plain2) > 20
+
+
+def test_line_style_markers() -> None:
+    assert "bold" in _line_style(active=True)
+    assert "bold" in _line_style(installed=True)
+    assert "dim" in _line_style()
+
+
+def test_render_catalog_includes_footer() -> None:
+    plain, _body = _render_catalog(
+        "Title",
+        [("line1", "detail1", "bold #fff")],
+        footer_lines=["foot1", "foot2"],
+    )
+    assert "Title" in plain
+    assert "foot1" in plain
 
 
 def test_run_slash_help_variants() -> None:
@@ -19,6 +47,7 @@ def test_run_slash_help_variants() -> None:
         out = run_slash_line(line)
         assert "Slashed commands" in out.text
         assert "/help" in out.text or "help" in out.text.lower()
+        assert "/health" in out.text
         assert "/history" in out.text
         assert "/history clear" in out.text
         assert "/history search" in out.text
@@ -38,48 +67,60 @@ def test_run_slash_without_leading_slash() -> None:
 def test_slash_data_needs() -> None:
     assert (
         slash_data_needs("/help").server_gpu is False
+        and slash_data_needs("/help").server_health is False
         and slash_data_needs("/help").mic_capture is False
     )
     assert (
+        slash_data_needs("/health").server_health is True
+        and slash_data_needs("/health").server_gpu is False
+        and slash_data_needs("/health").mic_capture is False
+    )
+    assert (
         slash_data_needs("/gpu").server_gpu is True
+        and slash_data_needs("/gpu").server_health is False
         and slash_data_needs("/gpu").mic_capture is False
     )
     assert (
         slash_data_needs("/mic").mic_capture is True
+        and slash_data_needs("/mic").server_health is False
         and slash_data_needs("/mic").server_gpu is False
     )
     assert (
         slash_data_needs("/models").server_gpu is False
+        and slash_data_needs("/models").server_health is False
         and slash_data_needs("/models").mic_capture is False
     )
     assert (
         slash_data_needs("/history").server_gpu is False
+        and slash_data_needs("/history").server_health is False
         and slash_data_needs("/history").mic_capture is False
     )
     assert (
         slash_data_needs("/disk").server_gpu is False
+        and slash_data_needs("/disk").server_health is False
         and slash_data_needs("/disk").mic_capture is False
     )
 
 
-def test_run_slash_models_lists_all_trusted() -> None:
+def test_run_slash_models_status_includes_lanes() -> None:
     out = run_slash_line("/models")
-    for name in TRUSTED_MODELS:
-        assert name in out.text
-    assert out.result_rich is not None
+    assert "Transcribe:" in out.text
+    assert "Re-encode:" in out.text
+    assert "Backend: transcribe=faster-whisper" in out.text
+    assert "Select: /models transcribe use <id>" in out.text
+    assert out.result_rich is None
 
 
-def test_run_slash_models_marks_active_and_on_disk(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("voxium.model_disk.models_dir", lambda: tmp_path)
-    snap = tmp_path / "models--Systran--faster-whisper-base" / "snapshots" / "z"
-    snap.mkdir(parents=True)
-    (snap / "model.bin").write_bytes(b"x")
-    out = run_slash_line("/models", session_model="base")
-    assert "[ACTIVE]" in out.text
-    assert "[ON DISK]" in out.text
-    assert "  • base —" in out.text
+def test_run_slash_models_shows_transcribe_and_polish_in_status() -> None:
+    out = run_slash_line(
+        "/models",
+        session_model="base",
+        polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID,
+        polish_enabled=True,
+    )
+    assert "active base" in out.text
+    assert "Re-encode: on" in out.text
+    assert DEFAULT_TRUSTED_POLISH_MODEL_ID in out.text
 
 
 def test_run_slash_models_select_sets_result() -> None:
@@ -100,7 +141,68 @@ def test_run_slash_models_invalid() -> None:
 def test_run_slash_models_too_many_tokens() -> None:
     out = run_slash_line("/models base extra")
     assert out.selected_model is None
-    assert "one model id" in out.text.lower()
+    assert "use /models" in out.text.lower()
+
+
+def test_run_slash_models_transcribe_list_returns_catalog() -> None:
+    out = run_slash_line("/models transcribe list", session_model="base")
+    assert "Transcribers" in out.text
+    assert "[ACTIVE]" in out.text
+    assert out.result_rich is not None
+
+
+def test_run_slash_models_transcribe_use_sets_result() -> None:
+    out = run_slash_line("/models transcribe use large-v3")
+    assert out.selected_model == "large-v3"
+
+
+def test_run_slash_models_polish_list_shows_trusted_and_local_models(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
+    trusted = trusted_polish_model(DEFAULT_TRUSTED_POLISH_MODEL_ID)
+    trusted_path = tmp_path / "models" / "polish" / trusted.filename
+    trusted_path.parent.mkdir(parents=True, exist_ok=True)
+    trusted_path.write_bytes(b"gguf")
+    custom_path = tmp_path / "models" / "polish" / "custom" / "shell.gguf"
+    custom_path.parent.mkdir(parents=True, exist_ok=True)
+    custom_path.write_bytes(b"gguf")
+
+    out = run_slash_line(
+        "/models polish list",
+        polish_enabled=True,
+        polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID,
+    )
+    assert "Re-encoder models" in out.text
+    assert DEFAULT_TRUSTED_POLISH_MODEL_ID in out.text
+    assert "local:custom/shell.gguf" in out.text
+    assert out.result_rich is not None
+
+
+def test_run_slash_models_polish_use_sets_model() -> None:
+    out = run_slash_line("/models polish use qwen2.5-3b-q4km")
+    assert out.polish_model == "qwen2.5-3b-q4km"
+    assert "download automatically" in out.text.lower()
+
+
+def test_run_slash_models_polish_toggle_sets_flag() -> None:
+    out = run_slash_line("/models polish on")
+    assert out.polish_enabled is True
+
+
+def test_run_slash_polish_alias_supports_list_and_use(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
+    trusted = trusted_polish_model(DEFAULT_TRUSTED_POLISH_MODEL_ID)
+    trusted_path = tmp_path / "models" / "polish" / trusted.filename
+    trusted_path.parent.mkdir(parents=True, exist_ok=True)
+    trusted_path.write_bytes(b"gguf")
+
+    out = run_slash_line("/polish list", polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID)
+    assert "Re-encoder models" in out.text
+    assert out.result_rich is not None
+
+    out2 = run_slash_line("/polish use qwen2.5-3b-q4km")
+    assert out2.polish_model == "qwen2.5-3b-q4km"
 
 
 def test_run_slash_disk_matches_make_disk_usage_shape() -> None:
@@ -108,8 +210,46 @@ def test_run_slash_disk_matches_make_disk_usage_shape() -> None:
     assert "=== Voxium local data (repository) ===" in out.text
     assert "--- models/ ---" in out.text
     assert "--- logs/ ---" in out.text
+    assert "--- tools/llama.cpp/ ---" in out.text
     out_du = run_slash_line("/du")
     assert "=== Voxium local data (repository) ===" in out_du.text
+    assert "--- tools/llama.cpp/ ---" in out_du.text
+
+
+def test_run_slash_health_formats_server_readiness() -> None:
+    health = {
+        "status": "ok",
+        "model": "base",
+        "model_repo": "Systran/faster-whisper-base",
+        "device": "cuda",
+        "compute": "float16",
+        "vad_enabled": True,
+        "timeout_seconds": 120,
+        "gpu_metrics_enabled": True,
+        "gpu_metrics_provider": "pynvml",
+        "polish_backend_default": "llama.cpp",
+        "polish_enabled_default": False,
+        "polish_default_model": "auto",
+        "polish_timeout_seconds": 25,
+        "polish_keep_alive_default": "10m",
+        "polish_llama_cpp_reachable": True,
+        "polish_loaded_model": DEFAULT_TRUSTED_POLISH_MODEL_ID,
+        "polish_model_loaded": True,
+        "faster_whisper": {"version": "1.1.1"},
+    }
+    out = run_slash_line("/health", server_health=health)
+    assert "Loopback server health:" in out.text
+    assert "transcriber base" in out.text
+    assert "GPU metrics: on (pynvml)" in out.text
+    assert "re-encode default: off" in out.text
+    assert "llama.cpp: reachable yes" in out.text
+    assert f"loaded {DEFAULT_TRUSTED_POLISH_MODEL_ID}" in out.text
+    assert "faster-whisper: 1.1.1" in out.text
+
+
+def test_run_slash_health_unavailable() -> None:
+    out = run_slash_line("/health", server_health=None)
+    assert "unavailable" in out.text.lower()
 
 
 def test_run_slash_history_with_gpu_sk_does_not_replace_buffer() -> None:
@@ -237,6 +377,96 @@ def test_format_mic_report_error() -> None:
     t = format_mic_report({"error": "bogus"})
     assert "bogus" in t
     assert "error" in t.lower()
+
+
+def test_run_slash_reencode_list_matches_polish_list() -> None:
+    o_p = run_slash_line("/polish list", polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID)
+    o_r = run_slash_line(
+        "/re-encode list", polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID
+    )
+    assert o_p.text == o_r.text
+
+
+def test_run_slash_reencode_on_off() -> None:
+    o = run_slash_line("/re-encode on")
+    assert o.polish_enabled is True
+    o2 = run_slash_line("/reencode off")
+    assert o2.polish_enabled is False
+
+
+def test_first_cmd_empty_when_no_slash() -> None:
+    from voxium.slash_commands import _first_cmd
+
+    assert _first_cmd("not a slash line") == ""
+
+
+def test_format_mic_report_includes_active_stream_json() -> None:
+    from voxium.slash_commands import format_mic_report
+
+    t = format_mic_report(
+        {
+            "device": {"name": "D"},
+            "stream": {"latency": [0.01, 0.02]},
+        }
+    )
+    assert "active stream" in t
+
+
+def test_format_mic_report_includes_latency_and_portaudio() -> None:
+    from voxium.slash_commands import format_mic_report
+
+    mic = {
+        "backend": {
+            "api": "X",
+            "library": "L",
+            "sounddevice_version": "0.1",
+            "portaudio_version_text": "v1-PortAudio",
+        },
+        "device": {
+            "index": 0,
+            "name": "D",
+            "max_input_channels": 1,
+            "default_samplerate_hz": 48000,
+            "default_low_input_latency_seconds": 0.01,
+            "default_high_input_latency_seconds": 0.2,
+        },
+        "host_api": {"name": "H"},
+        "format": {"channels": 1, "dtype": "f32", "sample_rate_hz": 16000},
+    }
+    t = format_mic_report(mic)
+    assert "low input latency" in t
+    assert "PortAudio" in t
+
+
+def test_format_health_report_polish_and_faster_whisper() -> None:
+    from voxium.slash_commands import format_health_report
+
+    h = {
+        "status": "ok",
+        "model": "m",
+        "device": "d",
+        "compute": "c",
+        "timeout_seconds": 5,
+        "vad_enabled": True,
+        "model_repo": "r/w",
+        "gpu_metrics_enabled": False,
+        "gpu_metrics_unavailable_reason": "no cuda",
+        "polish_backend_default": "llama.cpp",
+        "polish_default_model": "gguf",
+        "polish_enabled_default": True,
+        "polish_llama_cpp_reachable": False,
+        "polish_llama_cpp_reachable_reason": "sleeping",
+        "polish_loaded_model": "L",
+        "polish_timeout_seconds": 9.0,
+        "polish_keep_alive_default": "10m",
+        "faster_whisper": {"version": "1.2.3"},
+    }
+    t = format_health_report(h)
+    assert "re-encode" in t
+    assert "sleeping" in t
+    assert "1.2.3" in t
+    assert "no cuda" in t
+    assert "r/w" in t
 
 
 def test_wrap_telemetry_block_breaks_long_lines() -> None:

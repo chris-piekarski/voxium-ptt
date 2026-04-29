@@ -13,13 +13,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 import pyperclip
 import requests
-from pynput import keyboard
 from rich.console import Console, Group, RenderableType
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -29,6 +30,8 @@ import yaml
 from voxium.capture_enrich import enrich_capture_with_recording
 from voxium.console_status import (
     PttSessionStatusBox,
+    build_polish_ensure_stack_downlink_panel,
+    build_polish_slash_ensure_downlink_panel,
     build_status_box_panel,
     print_agent_telemetry_panel,
     print_input_mode_downlink,
@@ -45,6 +48,7 @@ from voxium.constants import (
     DEFAULT_SERVER_MODEL,
     DEFAULT_SERVER_START_TIMEOUT,
     DEFAULT_SERVER_TIMEOUT,
+    env_polish_enabled_default,
     DEFAULT_SERVER_URL,
     DEFAULT_HOTKEYS,
     HOTKEY_ORDER,
@@ -80,25 +84,60 @@ from voxium.loopback import (
     is_loopback_url,
     normalize_loopback_host,
 )
-from voxium.metrics_table import build_ptt_log_metrics_layout
+from voxium.metrics_table import (
+    build_ptt_log_metrics_layout,
+    format_polish_usage_suffix,
+)
 from voxium.metrics_text import describe_server
 from voxium.model_arg import trusted_model_arg
+from voxium.model_disk import is_trusted_model_on_disk
 from voxium.model_registry import (
     DEFAULT_MODEL_NAME,
     TRUSTED_MODEL_HELP,
     TRUSTED_MODELS,
     validate_model_name,
 )
+from voxium.llama_cpp_daemon import (
+    ManagedLlamaCpp,
+    ensure_llama_cpp_daemon,
+    llama_server_cli_path,
+    stop_managed_llama_cpp,
+)
+from voxium.llama_cpp_client import llama_cpp_reachable
 from voxium.paths import (
     default_server_log_path,
     ensure_runtime_dirs,
     instance_lock_path,
+    llama_cpp_dir,
+    logs_dir,
+    polish_models_dir,
     repo_root,
+)
+from voxium.ptt_keying import (
+    PTT_ACTION_START,
+    PTT_ACTION_STOP,
+    PttKeyTracker,
+    handle_ptt_press,
+    handle_ptt_release,
+)
+from voxium.polish_model_registry import (
+    DEFAULT_TRUSTED_POLISH_MODEL_ID,
+    POLISH_DEFAULT_MODEL,
+    list_available_polish_models,
+    list_local_polish_models,
+)
+from voxium.polish_models import validate_polish_model_tag
+from voxium.polish_policy import parse_sleep_idle_seconds
+from voxium.polish_provision import (
+    ensure_default_polish_assets,
+    ensure_polish_model_downloaded,
+    ensure_windows_llama_cpp_runtime,
 )
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
 from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
-from voxium.slash_commands import run_slash_line, slash_data_needs
+from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
+from voxium.terminal_focus import is_our_terminal_focused
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
 from voxium.vox_chunker import UtteranceChunker
@@ -120,7 +159,24 @@ class _SoundDeviceProxy:
         return getattr(self._ensure(), name)
 
 
+class _PynputKeyboardProxy:
+    """Import ``pynput.keyboard`` only when the interactive client actually needs it."""
+
+    _mod: Any = None
+
+    def _ensure(self) -> Any:
+        if self._mod is None:
+            from pynput import keyboard as _keyboard
+
+            self._mod = _keyboard
+        return self._mod
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ensure(), name)
+
+
 sd: Any = _SoundDeviceProxy()
+keyboard: Any = _PynputKeyboardProxy()
 
 SYSTEM = platform.system()
 
@@ -207,6 +263,8 @@ console = Console()
 ptt_status_box: PttSessionStatusBox | None = None
 _telemetry_log_buffer: list[tuple[str, str]] = []
 managed_server_process: subprocess.Popen | None = None
+managed_llama_cpp: ManagedLlamaCpp | None = None
+_llama_cpp_polish_ready_checked: bool = False
 server_log_handle = None
 
 
@@ -226,6 +284,7 @@ PASTE_DEBOUNCE_MS = 500
 RECORDING_HUD_INTERVAL_S = 0.5
 RECORDING_REMINDER_INTERVAL_S = 15.0
 VOX_HUD_RING_MAX = 96_000
+_ptt_key_tracker = PttKeyTracker()
 
 # PTT (default) vs VOX (open-mic) — toggled with --mode-hotkey (F7)
 input_mode: str = "ptt"  # "ptt" | "vox"
@@ -250,6 +309,7 @@ STATUS_PTT_ACTIVE = "📻 PTT ACTIVE"
 STATUS_EDGE_INFERENCE = "🤖 EDGE INFERENCE"
 STATUS_EDGE_INFERENCE_REXMIT = "🤖 EDGE INFERENCE (RE-XMIT)"
 STATUS_VOX_LAST_COPY = "↩️ PTT/VOX · LAST COPY"
+STATUS_NO_AUDIO = "❌ NO AUDIO"
 # One short window title: radio = PTT, robot = local inference (tab bar read; override: env VOXIUM_WINDOW_TITLE).
 VOXIUM_WINDOW_TITLE = "Voxium 📻🤖"
 
@@ -393,6 +453,66 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         default=server.get("metrics_sample_interval", DEFAULT_METRICS_SAMPLE_INTERVAL),
         help="GPU metrics sampling interval in seconds",
     )
+    llama_cpp_url_default = (
+        server.get("llama_cpp_url")
+        or server.get("ollama_url")
+        or "http://127.0.0.1:11435"
+    )
+    if not is_loopback_url(llama_cpp_url_default):
+        llama_cpp_url_default = "http://127.0.0.1:11435"
+    server_group.add_argument(
+        "--llama-cpp-url",
+        default=llama_cpp_url_default,
+        help="llama.cpp loopback URL (managed re-encode runtime health) — must stay on the ground net",
+    )
+    server_group.add_argument(
+        "--llama-cpp-auto-start",
+        action=argparse.BooleanOptionalAction,
+        default=bool(
+            server.get("llama_cpp_auto_start", server.get("ollama_auto_start", True))
+        ),
+        help="When re-encode (polish) is enabled, start/stop a local llama-server if none is reachable",
+    )
+    server_group.add_argument(
+        "--llama-cpp-cmd",
+        default=str(server.get("llama_cpp_cmd") or ""),
+        help="Optional explicit path to llama-server(.exe); default = tools/llama.cpp then PATH",
+    )
+    server_group.add_argument(
+        "--llama-cpp-gpu-layers",
+        default=str(server.get("llama_cpp_gpu_layers", "auto") or "auto"),
+        help="llama-server --n-gpu-layers for re-encode runtime (default: auto)",
+    )
+    server_group.add_argument(
+        "--llama-cpp-ctx-size",
+        type=int,
+        default=int(server.get("llama_cpp_ctx_size", 0) or 0),
+        help="llama-server --ctx-size for re-encode (0 = model default)",
+    )
+    polish_timeout_d = float(server.get("polish_timeout", 25.0) or 25.0)
+    server_group.add_argument(
+        "--polish-timeout",
+        type=float,
+        default=polish_timeout_d,
+        help="Per-/polish timeout (seconds) for managed server and for client POST /polish",
+    )
+    server_group.add_argument(
+        "--polish-keep-alive",
+        default=str(server.get("polish_keep_alive", "10m") or "10m"),
+        help="Idle unload window for llama.cpp re-encode runtime (e.g. 10m, 0, -1)",
+    )
+    server_group.add_argument(
+        "--polish-warmup-on-start",
+        action=argparse.BooleanOptionalAction,
+        default=bool(server.get("polish_warmup_on_start", False)),
+        help="After STT model load, probe/warm the local llama.cpp re-encode runtime",
+    )
+    server_group.add_argument(
+        "--polish-max-concurrent",
+        type=int,
+        default=int(server.get("polish_max_concurrent", 2) or 2),
+        help="Max concurrent /polish (re-encode) requests the managed server accepts (semaphore cap)",
+    )
 
     transcription_group = parser.add_argument_group("Transcription")
     transcription_group.add_argument(
@@ -408,6 +528,25 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         "-l",
         default=trans.get("language"),
         help="Language code for transcription",
+    )
+    polish_m_default = trans.get("polish_model")
+    if not polish_m_default:
+        polish_m_default = POLISH_DEFAULT_MODEL
+    transcription_group.add_argument(
+        "--polish",
+        action=argparse.BooleanOptionalAction,
+        default=bool(trans.get("polish_enabled", True)),
+        help="After STT, run a local re-encode pass (POST /polish, llama.cpp) before paste (default: on)",
+    )
+    transcription_group.add_argument(
+        "--polish-model",
+        type=str,
+        default=polish_m_default,
+        metavar="MODEL",
+        help=(
+            "Re-encoder id (or auto; config: --polish-model). See `voxium models polish list` "
+            "for trusted options and installed status."
+        ),
     )
 
     hotkey_group = parser.add_argument_group("Hotkeys and UI")
@@ -439,6 +578,12 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         action="store_true",
         default=ui.get("minimal", False),
         help="Minimal UI - only show status",
+    )
+    hotkey_group.add_argument(
+        "--slash-global",
+        action=argparse.BooleanOptionalAction,
+        default=bool(ui.get("slash_global", False)),
+        help="Treat / command input as global; default (false) = only when this terminal window is focused (Windows / Linux X11; see docs)",
     )
 
     history_group = parser.add_argument_group("History")
@@ -516,6 +661,53 @@ def add_server_options(parser: argparse.ArgumentParser):
         default=DEFAULT_METRICS_SAMPLE_INTERVAL,
         help="GPU metrics sampling interval in seconds",
     )
+    parser.add_argument(
+        "--llama-cpp-url",
+        default=os.environ.get("VOXIUM_LLAMA_CPP_URL", "http://127.0.0.1:11435"),
+        help="llama.cpp loopback base URL for re-encode /polish (default: http://127.0.0.1:11435)",
+    )
+    parser.add_argument(
+        "--polish-default-model",
+        default=os.environ.get("VOXIUM_POLISH_MODEL", POLISH_DEFAULT_MODEL),
+        metavar="MODEL",
+        help=(
+            f"Default re-encoder id for /polish (default: {POLISH_DEFAULT_MODEL}; "
+            f"registry default resolves to {DEFAULT_TRUSTED_POLISH_MODEL_ID})"
+        ),
+    )
+    parser.add_argument(
+        "--polish-timeout",
+        type=float,
+        default=float(os.environ.get("VOXIUM_POLISH_TIMEOUT", "25")),
+        help="Per-/polish request timeout in seconds (default: 25)",
+    )
+    parser.add_argument(
+        "--polish-enabled-by-default",
+        action=argparse.BooleanOptionalAction,
+        default=env_polish_enabled_default(),
+        help=(
+            "Server /health hint: client re-encode default (default: on; "
+            "set VOXIUM_POLISH_ENABLED=0 to opt out)"
+        ),
+    )
+    parser.add_argument(
+        "--polish-keep-alive",
+        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "10m"),
+        help="llama.cpp idle unload window for /polish re-encode (default: 10m)",
+    )
+    parser.add_argument(
+        "--polish-warmup-on-start",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("VOXIUM_POLISH_WARMUP", "").lower()
+        in ("1", "true", "yes"),
+        help="Probe/warm the local llama.cpp re-encode runtime at startup (default: false)",
+    )
+    parser.add_argument(
+        "--polish-max-concurrent",
+        type=int,
+        default=int(os.environ.get("VOXIUM_POLISH_MAX_CONCURRENT", "2")),
+        help="Max concurrent /polish re-encode requests (semaphore, default: 2)",
+    )
 
 
 def add_server_query_options(parser: argparse.ArgumentParser, file_config: dict):
@@ -555,7 +747,9 @@ Examples:
   voxium --model large-v3 -v              Same as: voxium run --model large-v3 -v
   voxium run --server-device cpu         CPU stack (default server device is cuda)
   voxium stats                            Ground readout: server totals
-  voxium models                           List trusted models (Systran)
+  voxium models                           Model manager summary for transcribe + re-encode
+  voxium models transcribe installed      Show downloaded STT models under models/
+  voxium models polish list               Re-encoder ids (GGUF) and install state (lane name: polish)
   voxium health --json                    Downlink: server health as JSON
   voxium server --help                    Foreground server (diagnostics; normal use: voxium run)
         """,
@@ -605,13 +799,41 @@ Examples:
     models_parser = subparsers.add_parser(
         "models",
         prog="voxium models",
-        help="List Systran allow-listed models (trusted stack)",
+        help="Inspect transcribe + re-encoder inventory and install state",
         formatter_class=SmartDefaultsFormatter,
+    )
+    models_parser.add_argument(
+        "lane",
+        nargs="?",
+        help="Optional lane: transcribe or polish (re-encode)",
+    )
+    models_parser.add_argument(
+        "action",
+        nargs="?",
+        help="Optional action: list, installed, or pull (re-encode / polish only)",
+    )
+    models_parser.add_argument(
+        "model_id",
+        nargs="?",
+        help="Optional re-encoder id for pull",
     )
     models_parser.add_argument(
         "--json",
         action="store_true",
         help="Print raw JSON instead of a formatted table",
+    )
+    models_parser.add_argument(
+        "--polish",
+        action="store_true",
+        help="Alias for `voxium models polish list` (re-encoder lane)",
+    )
+    models_parser.add_argument(
+        "--pull-polish",
+        action="store_true",
+        help=(
+            "Provision the repo-local llama.cpp re-encode stack "
+            "(Windows runtime plus default GGUF re-encoder)"
+        ),
     )
     return parser
 
@@ -627,6 +849,22 @@ def parse_args(argv: list[str] | None = None):
             args.model = validate_model_name(args.model)
         except ValueError as exc:
             parser.error(str(exc))
+    if hasattr(args, "polish_model") and args.polish_model is not None:
+        try:
+            args.polish_model = validate_polish_model_tag(args.polish_model)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if hasattr(args, "polish_default_model") and args.polish_default_model is not None:
+        try:
+            args.polish_default_model = validate_polish_model_tag(
+                args.polish_default_model
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+    if hasattr(args, "llama_cpp_url") and not is_loopback_url(args.llama_cpp_url):
+        parser.error(
+            "llama-cpp-url must be http loopback (127.0.0.1, localhost, or ::1)"
+        )
     return args
 
 
@@ -783,6 +1021,14 @@ def start_local_server():
         server_compute=config.server_compute,
         server_vad=bool(config.server_vad),
         server_gpu_metrics=bool(config.server_gpu_metrics),
+        llama_cpp_url=str(getattr(config, "llama_cpp_url", "http://127.0.0.1:11435")),
+        polish_default_model=str(getattr(config, "polish_model", "") or "")
+        or POLISH_DEFAULT_MODEL,
+        polish_timeout=float(getattr(config, "polish_timeout", 25.0) or 25.0),
+        polish_enabled_by_default=bool(getattr(config, "polish", True)),
+        polish_keep_alive=str(getattr(config, "polish_keep_alive", "10m") or "10m"),
+        polish_warmup_on_start=bool(getattr(config, "polish_warmup_on_start", False)),
+        polish_max_concurrent=int(getattr(config, "polish_max_concurrent", 2) or 2),
     )
     cmd = [
         sys.executable,
@@ -848,6 +1094,290 @@ def ensure_local_server():
     print("Timed out waiting for the local server to come on station.")
     print(f"Check {config.server_log_file} for details.")
     sys.exit(1)
+
+
+def ensure_llama_cpp_for_polish(
+    *,
+    force: bool = False,
+    polish_slash: tuple[str, SlashLineResult] | None = None,
+    freeze_for_external_output: Any = None,
+) -> None:
+    """For operator runs, re-encode (polish) owns its local llama.cpp runtime when enabled."""
+    global managed_llama_cpp, _llama_cpp_polish_ready_checked
+    if not config or not getattr(config, "polish", True):
+        return
+    if _llama_cpp_polish_ready_checked and not force:
+        return
+    base_url = str(getattr(config, "llama_cpp_url", "http://127.0.0.1:11435"))
+    if force and managed_llama_cpp is not None:
+        try:
+            stop_managed_llama_cpp(managed_llama_cpp)
+        finally:
+            managed_llama_cpp = None
+    if not getattr(config, "llama_cpp_auto_start", True):
+        ok, _reason = llama_cpp_reachable(base_url, timeout=1.0)
+        _llama_cpp_polish_ready_checked = ok
+        if not ok:
+            cli_log(
+                "Re-encode is enabled; llama.cpp auto-start is disabled, so an existing local llama-server must answer /health.",
+                "warning",
+            )
+        return
+    requested_model = str(getattr(config, "polish_model", "") or POLISH_DEFAULT_MODEL)
+    use_rich = bool(config and not getattr(config, "minimal", False))
+
+    def _run_after_model(
+        resolved: Any,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> list[tuple[str, str]]:
+        global managed_llama_cpp, _llama_cpp_polish_ready_checked
+        cli_cmd = str(getattr(config, "llama_cpp_cmd", "") or "").strip() or None
+
+        def _emit(msg: str, level: str) -> None:
+            if progress is not None:
+                progress(msg)
+            else:
+                cli_log(msg, level)
+
+        gpu_layers_raw = (
+            str(getattr(config, "llama_cpp_gpu_layers", "auto") or "auto")
+            .strip()
+            .lower()
+        )
+        gpu_layers: int | str | None
+        if gpu_layers_raw in {"", "auto"}:
+            gpu_layers = 999
+        else:
+            gpu_layers = str(getattr(config, "llama_cpp_gpu_layers", "") or "").strip()
+        try:
+            sleep_idle_seconds = parse_sleep_idle_seconds(
+                getattr(config, "polish_keep_alive", "-1"),
+                default=-1,
+            )
+        except ValueError as exc:
+            _emit(str(exc), "warning")
+            sleep_idle_seconds = -1
+
+        if os.name == "nt" and not llama_server_cli_path(cli_cmd, base_env=os.environ):
+            try:
+                ensure_windows_llama_cpp_runtime(
+                    base_env=dict(os.environ),
+                    progress=progress or (lambda m: cli_log(m, "info")),
+                )
+            except RuntimeError as exc:
+                if progress is not None:
+                    raise
+                _emit(str(exc), "error")
+                _llama_cpp_polish_ready_checked = False
+                return []
+
+        managed, entries = ensure_llama_cpp_daemon(
+            base_url=base_url,
+            cmd_path=cli_cmd,
+            model_path=resolved.path,
+            model_alias=resolved.name,
+            log_path=logs_dir() / "llama_cpp.log",
+            startup_timeout=min(
+                30.0, max(3.0, float(getattr(config, "polish_timeout", 25.0) or 25.0))
+            ),
+            parallel=max(1, int(getattr(config, "polish_max_concurrent", 2) or 2)),
+            ctx_size=int(getattr(config, "llama_cpp_ctx_size", 0) or 0),
+            gpu_layers=gpu_layers,
+            sleep_idle_seconds=sleep_idle_seconds,
+        )
+        if managed is not None:
+            managed_llama_cpp = managed
+        ok, _reason = llama_cpp_reachable(base_url, timeout=1.0)
+        _llama_cpp_polish_ready_checked = ok
+        for msg, level in entries:
+            _emit(msg, level)
+        return list(entries)
+
+    if use_rich:
+        if freeze_for_external_output is not None:
+            try:
+                freeze_for_external_output()
+            except Exception:
+                pass
+
+        def _update_live_with_hf(
+            msg: str,
+            live: Live,
+            line: str | None,
+            out: SlashLineResult | None,
+        ) -> None:
+            m = (msg or "…").strip().replace("\n", " ")
+            if line is not None and out is not None:
+                live.update(
+                    build_polish_slash_ensure_downlink_panel(
+                        console,
+                        command_line=line,
+                        result_text=out.text,
+                        result_rich=out.result_rich,
+                        hf_status_line=m,
+                    )
+                )
+            else:
+                live.update(
+                    build_polish_ensure_stack_downlink_panel(
+                        console,
+                        headline="Local re-encode stack (llama.cpp + trusted GGUF).",
+                        hf_status_line=m,
+                    )
+                )
+
+        sl_line = polish_slash[0] if polish_slash else None
+        sl_out = polish_slash[1] if polish_slash else None
+        if polish_slash is not None and sl_out is not None:
+            start = build_polish_slash_ensure_downlink_panel(
+                console,
+                command_line=sl_line or "",
+                result_text=sl_out.text,
+                result_rich=sl_out.result_rich,
+                hf_status_line="Resolving local re-encoder (Hugging Face)…",
+            )
+        else:
+            start = build_polish_ensure_stack_downlink_panel(
+                console,
+                headline="Local re-encode stack (llama.cpp + trusted GGUF).",
+                hf_status_line="Resolving local re-encoder (Hugging Face)…",
+            )
+        entries_after: list[tuple[str, str]] = []
+        try:
+            with Live(
+                start,
+                console=console,
+                refresh_per_second=10,
+                transient=True,
+            ) as live:
+
+                def progress_sink(msg: str) -> None:
+                    _update_live_with_hf(msg, live, sl_line, sl_out)
+
+                resolved = ensure_polish_model_downloaded(
+                    model_name=requested_model,
+                    progress=progress_sink,
+                )
+                progress_sink(
+                    "GGUF on disk. Spooling local llama-server (loopback) — one moment, copy."
+                )
+                entries_after = _run_after_model(resolved, progress=progress_sink)
+                has_warn = (not _llama_cpp_polish_ready_checked) or any(
+                    lev in ("warning", "error") for _, lev in entries_after
+                )
+                if has_warn:
+                    progress_sink(
+                        "Re-encode stack: re-encoder ready; llama.cpp still needs attention (downlink below)."
+                    )
+                else:
+                    progress_sink("Re-encode stack: on station, copy.")
+        except RuntimeError as exc:
+            _llama_cpp_polish_ready_checked = False
+            print_agent_telemetry_panel(
+                console,
+                [
+                    (
+                        "Re-encode local stack setup did not complete (re-encoder, Windows runtime, or llama.cpp), copy.",
+                        "error",
+                    ),
+                    (str(exc)[:2000], "error"),
+                ],
+                downlink_subtitle="re-encode",
+            )
+            return
+
+        has_polish_warn = (not _llama_cpp_polish_ready_checked) or any(
+            lev in ("warning", "error") for _, lev in entries_after
+        )
+        warn_lines: list[tuple[str, str]] = (
+            list(entries_after)
+            if entries_after
+            else [
+                (
+                    "llama.cpp did not report ready for re-encode after the local stack step.",
+                    "warning",
+                )
+            ]
+        )
+        if polish_slash is not None and sl_out is not None and sl_line is not None:
+            print_slash_command_downlink(
+                console, sl_line, sl_out.text, result_rich=sl_out.result_rich
+            )
+            if has_polish_warn:
+                print_agent_telemetry_panel(
+                    console,
+                    warn_lines,
+                    downlink_subtitle="re-encode",
+                )
+        elif has_polish_warn:
+            print_agent_telemetry_panel(
+                console,
+                warn_lines,
+                downlink_subtitle="re-encode",
+            )
+        else:
+            print_agent_telemetry_panel(
+                console,
+                [("Re-encoder and llama-server: on station, copy.", "info")],
+                downlink_subtitle="re-encode",
+            )
+        return
+
+    try:
+        resolved = ensure_polish_model_downloaded(
+            model_name=requested_model,
+            progress=lambda msg: cli_log(msg, "info"),
+        )
+    except RuntimeError as exc:
+        cli_log(str(exc), "warning")
+        _llama_cpp_polish_ready_checked = False
+        return
+    _run_after_model(resolved)
+
+
+def apply_slash_runtime_changes(
+    out: SlashLineResult,
+    *,
+    freeze_for_external_output: Any = None,
+    polish_slash: tuple[str, SlashLineResult] | None = None,
+) -> None:
+    global _llama_cpp_polish_ready_checked
+    if config is None:
+        return
+    if out.selected_model is not None:
+        config.model = out.selected_model
+        ensure_model_on_loopback_server(
+            config.server_url,
+            console,
+            out.selected_model,
+            freeze_for_external_output=freeze_for_external_output,
+        )
+
+    should_refresh_polish = False
+    refresh_force = False
+    if out.polish_model is not None:
+        config.polish_model = out.polish_model
+        _llama_cpp_polish_ready_checked = False
+        if bool(getattr(config, "polish", True)):
+            should_refresh_polish = True
+            refresh_force = True
+    if out.polish_enabled is not None:
+        config.polish = out.polish_enabled
+        if out.polish_enabled:
+            _llama_cpp_polish_ready_checked = False
+            should_refresh_polish = True
+    if should_refresh_polish:
+        ensure_llama_cpp_for_polish(
+            force=refresh_force,
+            polish_slash=polish_slash,
+            freeze_for_external_output=freeze_for_external_output,
+        )
+    elif polish_slash is not None:
+        pl, po = polish_slash
+        print_slash_command_downlink(console, pl, po.text, result_rich=po.result_rich)
+    if should_refresh_polish:
+        flush_client_telemetry_block()
 
 
 def beep(freq: float, duration: float, volume: float = 0.12):
@@ -1679,10 +2209,11 @@ def is_client_shutting_down() -> bool:
 
 def cleanup_client_runtime():
 
-    global stream, state, recording_monitor_thread, ptt_status_box
+    global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, _llama_cpp_polish_ready_checked
     _stop_vox_listening()
     _set_input_mode("ptt")
     client_shutdown_event.set()
+    _ptt_key_tracker.reset()
     recording_monitor_event.set()
     tmon = recording_monitor_thread
     if tmon and tmon.is_alive():
@@ -1709,6 +2240,161 @@ def cleanup_client_runtime():
             ptt_status_box.close()
         finally:
             ptt_status_box = None
+    if managed_llama_cpp is not None:
+        try:
+            stop_managed_llama_cpp(managed_llama_cpp)
+        finally:
+            managed_llama_cpp = None
+    _llama_cpp_polish_ready_checked = False
+
+
+def maybe_polish_transcript(raw_text: str) -> str:
+    """If polish is enabled, POST the same host's ``/polish``; merge metrics into STT. On any failure, return *raw_text* (paste still proceeds)."""
+    global last_transcription_metrics
+    if not config or not getattr(config, "polish", True):
+        return raw_text
+    t = (raw_text or "").strip()
+    if not t:
+        return raw_text
+    ensure_llama_cpp_for_polish()
+    url = get_server_endpoint_url(config.server_url, "polish")
+    body: dict[str, Any] = {"text": t, "backend": "llama.cpp"}
+    pm = getattr(config, "polish_model", None)
+    attempted_model = str(pm or POLISH_DEFAULT_MODEL)
+    try:
+        attempted_model = validate_polish_model_tag(attempted_model)
+    except ValueError:
+        pass
+
+    def _merge_polish_metrics(
+        *,
+        polish: dict[str, Any] | None = None,
+        extra_metrics: dict[str, Any] | None = None,
+    ) -> None:
+        global last_transcription_metrics
+        base: dict[str, Any]
+        if isinstance(last_transcription_metrics, dict):
+            base = dict(last_transcription_metrics)
+        else:
+            base = {}
+        if isinstance(extra_metrics, dict):
+            base.update(extra_metrics)
+        if isinstance(polish, dict):
+            base["polish"] = polish
+        last_transcription_metrics = base
+
+    def _record_polish_fallback(error: str) -> None:
+        pol = {
+            "enabled": True,
+            "attempted": True,
+            "applied": False,
+            "model": attempted_model,
+            "backend": "llama.cpp",
+            "seconds": None,
+            "tokens_in": None,
+            "tokens_out": None,
+            "error": error[:300],
+        }
+        _merge_polish_metrics(
+            polish=pol,
+            extra_metrics={
+                "polish": {
+                    "model": attempted_model,
+                    "backend": "llama.cpp",
+                    "seconds": None,
+                    "error": pol["error"],
+                    "applied": False,
+                }
+            },
+        )
+
+    body["model"] = attempted_model
+    try:
+        pto = float(getattr(config, "polish_timeout", 25.0) or 25.0)
+    except (TypeError, ValueError):
+        pto = 25.0
+    try:
+        resp = requests.post(url, json=body, timeout=pto)
+    except Exception as exc:
+        _record_polish_fallback(f"{type(exc).__name__}: {exc}")
+        if not config.minimal:
+            msg = str(exc)[:300]
+            print_agent_telemetry_panel(
+                console,
+                [
+                    (
+                        f"Re-encode: not applied ({type(exc).__name__}: {msg}). Pasting STT as-is, copy.",
+                        "warning",
+                    )
+                ],
+                downlink_subtitle="re-encode",
+            )
+        return raw_text
+    if resp.status_code != 200:
+        detail = ""
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            detail = str(payload.get("detail") or payload.get("error") or "").strip()
+        if not detail:
+            detail = f"HTTP {resp.status_code}"
+        else:
+            detail = f"HTTP {resp.status_code}: {detail}"
+        _record_polish_fallback(detail)
+        if not config.minimal:
+            print_agent_telemetry_panel(
+                console,
+                [
+                    (
+                        f"Re-encode: {detail} — pasting STT as-is, copy.",
+                        "warning",
+                    )
+                ],
+                downlink_subtitle="re-encode",
+            )
+        return raw_text
+    try:
+        data = resp.json()
+    except Exception:
+        _record_polish_fallback("Invalid JSON from /polish")
+        return raw_text
+    if not isinstance(data, dict):
+        _record_polish_fallback("Invalid JSON payload from /polish")
+        return raw_text
+    out = (data.get("text") or "").strip() or raw_text
+    extra = data.get("metrics")
+    pl = data.get("polish")
+    _merge_polish_metrics(
+        polish=pl if isinstance(pl, dict) else None,
+        extra_metrics=extra if isinstance(extra, dict) else None,
+    )
+    if not config.minimal:
+        pol = pl if isinstance(pl, dict) else {}
+        try:
+            sec = float(pol.get("seconds")) if pol.get("seconds") is not None else None
+        except (TypeError, ValueError):
+            sec = None
+        app = pol.get("applied", True)
+        try:
+            app = bool(app)
+        except Exception:
+            app = True
+        model = str(pol.get("model") or attempted_model)
+        tail = f"{sec:.2f}s" if isinstance(sec, float) else "n/a"
+        tok = format_polish_usage_suffix(pol)
+        print_agent_telemetry_panel(
+            console,
+            [
+                (
+                    f"Re-encode: {model} · {tail} · applied={app}{tok} (local second pass, copy).",
+                    "info",
+                )
+            ],
+            downlink_subtitle="re-encode",
+        )
+    return out
 
 
 def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) -> str:
@@ -1773,6 +2459,8 @@ def transcribe(audio: np.ndarray) -> str:
     wav_buffer.seek(0)
 
     text = transcribe_server(wav_buffer, last_audio_capture_info)
+    if text and config and getattr(config, "polish", True):
+        text = maybe_polish_transcript(text)
 
     h2 = get_transcript_history()
     if h2 is not None and text:
@@ -1867,8 +2555,9 @@ def transcribe_and_paste(
     global state, target_window
     if paste_target is not None:
         target_window = paste_target
-    # Skip the post-take sleep when we already re-armed on the no-speech / error path (fast VOX/PTT).
+    # Skip the post-take sleep when we already re-armed on an error path (fast VOX/PTT).
     skip_final_pacing = False
+    rearm_after_final_pacing = False
     try:
         text = transcribe(audio)
         metrics = last_transcription_metrics
@@ -1894,12 +2583,12 @@ def transcribe_and_paste(
             if config and config.minimal:
                 print("Voxium: no speech detected.", file=sys.stderr)
             else:
-                cli_log(
-                    "No speech in that utterance — open mic ready for the next phrase.",
-                    "warning",
+                show_status(
+                    STATUS_NO_AUDIO,
+                    "No speech detected in that take — standing by, copy.",
                 )
-                _arm_status_after_log_scrollback()
-            skip_final_pacing = True
+                rearm_after_final_pacing = True
+            skip_final_pacing = False
     except Exception as e:
         if is_client_shutting_down():
             return
@@ -1937,8 +2626,9 @@ def transcribe_and_paste(
             return
         set_terminal_title()
         # Successful takes: :func:`_arm_status_after_log_scrollback` in :func:`log_transcription_summary`
-        # re-armed after the blue log; we only add pacing sleep here. No-speech / error paths re-arm
-        # above and skip the sleep so the green strip and VOX HUD return immediately.
+        # re-armed after the blue log; no-audio takes use the same short pause so the indicator is visible.
+        if rearm_after_final_pacing:
+            _arm_status_after_log_scrollback()
 
 
 def get_hotkey(key_name: str):
@@ -1947,7 +2637,17 @@ def get_hotkey(key_name: str):
     return key_map[normalize_hotkey_name(key_name)]
 
 
-def create_hotkey_handler(hotkey):
+def _finish_ptt_recording() -> None:
+    global state
+    with state_lock:
+        if state != State.RECORDING:
+            return
+        state = State.TRANSCRIBING
+    audio = stop_recording()
+    threading.Thread(target=transcribe_and_paste, args=(audio,), daemon=True).start()
+
+
+def create_record_hotkey_handlers(hotkey):
 
     def on_press(key):
         global state, _last_hotkey_time
@@ -1961,29 +2661,43 @@ def create_hotkey_handler(hotkey):
         now = time.time() * 1000
         with state_lock:
             st = state
-        if st not in (State.IDLE, State.RECORDING):
-            return
-        debounce = (
-            HOTKEY_DEBOUNCE_PTT_STOP_MS
-            if st == State.RECORDING
-            else HOTKEY_DEBOUNCE_PTT_START_MS
+        action, _last_hotkey_time = handle_ptt_press(
+            _ptt_key_tracker,
+            now_ms=now,
+            can_start=(st == State.IDLE),
+            can_stop=(st == State.RECORDING),
+            last_hotkey_time_ms=_last_hotkey_time,
+            start_debounce_ms=HOTKEY_DEBOUNCE_PTT_START_MS,
+            stop_debounce_ms=HOTKEY_DEBOUNCE_PTT_STOP_MS,
         )
-        if now - _last_hotkey_time < debounce:
+        if action == PTT_ACTION_START:
+            with state_lock:
+                if state == State.IDLE:
+                    state = State.RECORDING
+                    start_recording()
+        elif action == PTT_ACTION_STOP:
+            _finish_ptt_recording()
+
+    def on_release(key):
+        if key != hotkey:
             return
-        _last_hotkey_time = now
+        # Ignore release in VOX or while not actively recording.
+        if _get_input_mode() != "ptt":
+            _ptt_key_tracker.reset()
+            return
 
+        now = time.time() * 1000
         with state_lock:
-            if state == State.IDLE:
-                state = State.RECORDING
-                start_recording()
-            elif state == State.RECORDING:
-                state = State.TRANSCRIBING
-                audio = stop_recording()
-                threading.Thread(
-                    target=transcribe_and_paste, args=(audio,), daemon=True
-                ).start()
+            st = state
+        action = handle_ptt_release(
+            _ptt_key_tracker,
+            now_ms=now,
+            is_recording=(st == State.RECORDING),
+        )
+        if action == PTT_ACTION_STOP:
+            _finish_ptt_recording()
 
-    return on_press
+    return on_press, on_release
 
 
 def create_recovery_handler(recovery_key):
@@ -2050,6 +2764,8 @@ def create_retry_handler(retry_key):
         try:
             wav_buffer = io.BytesIO(pending)
             text = transcribe_server(wav_buffer, last_audio_capture_info)
+            if text and config and getattr(config, "polish", True):
+                text = maybe_polish_transcript(text)
             metrics = last_transcription_metrics
 
             if text and not is_hallucination(text):
@@ -2256,6 +2972,31 @@ def run_server_command(args) -> int:
         server_argv.append("--no-vad")
     if not args.gpu_metrics:
         server_argv.append("--no-gpu-metrics")
+    server_argv.extend(
+        [
+            "--llama-cpp-url",
+            str(args.llama_cpp_url),
+            "--polish-default-model",
+            str(args.polish_default_model),
+            "--polish-timeout",
+            str(args.polish_timeout),
+        ]
+    )
+    if args.polish_enabled_by_default:
+        server_argv.append("--polish-enabled-by-default")
+    else:
+        server_argv.append("--no-polish-enabled-by-default")
+    server_argv.extend(
+        [
+            "--polish-keep-alive",
+            str(args.polish_keep_alive),
+        ]
+    )
+    if args.polish_warmup_on_start:
+        server_argv.append("--polish-warmup-on-start")
+    else:
+        server_argv.append("--no-polish-warmup-on-start")
+    server_argv.extend(["--polish-max-concurrent", str(args.polish_max_concurrent)])
 
     whisper_server.main(server_argv)
     return 0
@@ -2301,40 +3042,311 @@ def run_server_query(args, endpoint: str) -> int:
     return 0
 
 
-def run_models_command(args) -> int:
-
-    payload = {
+def _transcribe_models_payload(*, installed_only: bool = False) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for name in sorted(TRUSTED_MODELS):
+        metadata = TRUSTED_MODELS[name]
+        installed = is_trusted_model_on_disk(name)
+        if installed_only and not installed:
+            continue
+        rows.append(
+            {
+                "id": name,
+                "repo": metadata["repo"],
+                "vram": metadata["vram"],
+                "description": metadata["description"],
+                "installed": installed,
+                "default": name == DEFAULT_MODEL_NAME,
+            }
+        )
+    return {
+        "lane": "transcribe",
         "default": DEFAULT_MODEL_NAME,
         "trusted_namespace": "Systran",
-        "models": [
-            {"name": name, **metadata} for name, metadata in TRUSTED_MODELS.items()
-        ],
+        "installed_count": sum(1 for row in rows if row["installed"]),
+        "models": rows,
     }
+
+
+def _polish_models_payload(
+    *,
+    installed_only: bool = False,
+    provisioned: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    installed_by_name = {model.name: model for model in list_local_polish_models()}
+    trusted_rows: list[dict[str, Any]] = []
+    for model in list_available_polish_models():
+        local = installed_by_name.get(model.model_id)
+        if installed_only and local is None:
+            continue
+        trusted_rows.append(
+            {
+                "id": model.model_id,
+                "repo_id": model.repo_id,
+                "filename": model.filename,
+                "description": model.description,
+                "size": model.size_text,
+                "backend": model.backend,
+                "installed": local is not None,
+                "default": model.model_id == DEFAULT_TRUSTED_POLISH_MODEL_ID,
+                "path": str(local.path) if local is not None else None,
+                "size_bytes": local.size_bytes if local is not None else None,
+            }
+        )
+    custom_rows = [
+        {
+            "id": model.name,
+            "path": str(model.path),
+            "size": model.size_gib_text,
+            "size_bytes": model.size_bytes,
+            "description": model.description or "Local custom GGUF",
+        }
+        for model in list_local_polish_models()
+        if not model.is_trusted
+    ]
+    payload = {
+        "lane": "polish",
+        "backend": "llama.cpp",
+        "default": POLISH_DEFAULT_MODEL,
+        "registry_default": DEFAULT_TRUSTED_POLISH_MODEL_ID,
+        "models_dir": str(polish_models_dir().resolve()),
+        "runtime_dir": str(llama_cpp_dir().resolve()),
+        "runtime_cmd": llama_server_cli_path(),
+        "trusted_models": trusted_rows,
+        "custom_local_models": custom_rows,
+    }
+    if provisioned is not None:
+        payload["provisioned"] = provisioned
+    return payload
+
+
+def _print_transcribe_models_table(
+    payload: dict[str, Any], *, installed_only: bool
+) -> None:
+    title = (
+        "Transcribe models installed under models/ (Systran faster-whisper)"
+        if installed_only
+        else "Transcribe models (Systran faster-whisper allow-list)"
+    )
+    table = Table(title=title)
+    table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("Installed", justify="center")
+    table.add_column("VRAM", justify="right")
+    table.add_column("Repository", style="green")
+    table.add_column("Notes")
+    rows = payload["models"]
+    if not rows:
+        table.add_row("—", "—", "—", "—", "No transcribe models matched this view")
+    for row in rows:
+        label = f"{row['id']} (default)" if row["default"] else row["id"]
+        table.add_row(
+            label,
+            "yes" if row["installed"] else "no",
+            row["vram"],
+            row["repo"],
+            row["description"],
+        )
+    console.print(table)
+
+
+def _print_polish_models_table(
+    payload: dict[str, Any], *, installed_only: bool
+) -> None:
+    title = (
+        "Re-encoder models installed under models/polish (trusted IDs + local GGUF)"
+        if installed_only
+        else "Re-encoder models (trusted IDs for llama.cpp plus installed local GGUF)"
+    )
+    table = Table(title=title)
+    table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("Installed", justify="center")
+    table.add_column("Approx size", justify="right")
+    table.add_column("Source", style="green")
+    table.add_column("Notes")
+    rows = payload["trusted_models"]
+    if not rows:
+        table.add_row(
+            "—", "—", "—", "—", "No trusted re-encoder models matched this view"
+        )
+    for row in rows:
+        label = f"{row['id']} (registry default)" if row["default"] else row["id"]
+        table.add_row(
+            label,
+            "yes" if row["installed"] else "no",
+            row["size"],
+            row["repo_id"],
+            row["description"],
+        )
+    console.print(table)
+
+    custom_rows = payload.get("custom_local_models") or []
+    if custom_rows:
+        local_table = Table(title="Installed custom local GGUF re-encoder models")
+        local_table.add_column("Selector", style="cyan", no_wrap=True)
+        local_table.add_column("Approx size", justify="right")
+        local_table.add_column("Path")
+        for row in custom_rows:
+            local_table.add_row(row["id"], row["size"], row["path"])
+        console.print(local_table)
+
+    runtime_note = payload.get("runtime_cmd") or "(not found)"
+    console.print(
+        f"llama-server runtime: {runtime_note}\n"
+        f"registry default: {payload['registry_default']}\n"
+        f"models dir: {payload['models_dir']}\n"
+        f"runtime dir: {payload['runtime_dir']}\n"
+        "Select in-session with `/models polish use <id>` or at launch with `voxium run --polish-model <id>`."
+    )
+
+
+def run_models_command(args) -> int:
+    provisioned_payload: dict[str, Any] | None = None
+    lane = (getattr(args, "lane", None) or "").strip().lower()
+    action = (getattr(args, "action", None) or "").strip().lower()
+    model_id = (getattr(args, "model_id", None) or "").strip()
+
+    if args.pull_polish:
+        lane = "polish"
+        action = "pull"
+        if not model_id:
+            model_id = POLISH_DEFAULT_MODEL
+    elif args.polish and not lane:
+        lane = "polish"
+        action = action or "list"
+
+    if lane and lane not in {"transcribe", "polish"}:
+        print(
+            "Use `voxium models`, `voxium models transcribe ...`, or `voxium models polish ...`."
+        )
+        return 2
+
+    if lane == "polish" and action == "pull":
+        pull_code, provisioned_payload = _pull_polish_models_to_repo_cache(
+            json_mode=bool(args.json),
+            model_id=model_id or POLISH_DEFAULT_MODEL,
+        )
+        if args.json and pull_code != 0 and provisioned_payload is not None:
+            print(json.dumps(provisioned_payload, indent=2))
+        if pull_code != 0:
+            return pull_code
+        action = "list"
+
+    if not lane:
+        payload = {
+            "transcribe": _transcribe_models_payload(installed_only=False),
+            "polish": _polish_models_payload(
+                installed_only=False,
+                provisioned=provisioned_payload,
+            ),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0
+        _print_transcribe_models_table(payload["transcribe"], installed_only=False)
+        _print_polish_models_table(payload["polish"], installed_only=False)
+        console.print(
+            "Use `voxium models transcribe installed` or `voxium models polish installed` "
+            "for downloaded-only views."
+        )
+        return 0
+
+    if lane == "transcribe":
+        if action not in {"", "list", "installed"}:
+            print(
+                "Use `voxium models transcribe list` or `voxium models transcribe installed`.\n"
+                "Select for a run with `voxium run --model <id>` or in-session with `/models transcribe use <id>`."
+            )
+            return 2
+        installed_only = action == "installed"
+        payload = _transcribe_models_payload(installed_only=installed_only)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0
+        _print_transcribe_models_table(payload, installed_only=installed_only)
+        console.print(
+            "Select for a run with `voxium run --model <id>` or in-session with `/models transcribe use <id>`."
+        )
+        return 0
+
+    if action not in {"", "list", "installed"}:
+        print(
+            "Use `voxium models polish list`, `voxium models polish installed`, or `voxium models polish pull <id>`.\n"
+            "Select in-session with `/models polish use <id>` or at launch with `voxium run --polish-model <id>`."
+        )
+        return 2
+    installed_only = action == "installed"
+    payload = _polish_models_payload(
+        installed_only=installed_only,
+        provisioned=provisioned_payload,
+    )
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
-
-    table = Table(title="Trusted models (Systran stack — VOX path allow-list)")
-    table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Repository", style="green")
-    table.add_column("VRAM", justify="right")
-    table.add_column("Notes")
-    for name, metadata in TRUSTED_MODELS.items():
-        label = f"{name} (default)" if name == DEFAULT_MODEL_NAME else name
-        table.add_row(
-            label, metadata["repo"], metadata["vram"], metadata["description"]
-        )
-    console.print(table)
+    _print_polish_models_table(payload, installed_only=installed_only)
     return 0
+
+
+def _pull_polish_models_to_repo_cache(
+    *, json_mode: bool = False, model_id: str = POLISH_DEFAULT_MODEL
+) -> tuple[int, dict[str, Any] | None]:
+    ensure_runtime_dirs()
+    progress = None if json_mode else print
+    try:
+        assets = ensure_default_polish_assets(
+            model_name=model_id,
+            progress=progress,
+        )
+    except RuntimeError as exc:
+        payload = {
+            "ok": False,
+            "backend": "llama.cpp",
+            "runtime_dir": str(llama_cpp_dir().resolve()),
+            "models_dir": str(polish_models_dir().resolve()),
+            "requested_model": model_id,
+            "error": str(exc),
+        }
+        if not json_mode:
+            print(f"Voxium could not provision the local re-encode stack: {exc}")
+        return 1, payload
+
+    payload = {
+        "ok": True,
+        "backend": "llama.cpp",
+        "runtime_dir": (
+            str(assets.runtime_dir.resolve())
+            if assets.runtime_dir is not None
+            else str(llama_cpp_dir().resolve())
+        ),
+        "runtime_exe": (
+            str(assets.runtime_exe.resolve())
+            if assets.runtime_exe is not None
+            else None
+        ),
+        "requested_model": model_id,
+        "runtime_variant": assets.runtime_variant,
+        "runtime_tag": assets.runtime_tag,
+        "model_path": str(assets.model_path.resolve()),
+        "model_repo_id": assets.model_repo_id,
+        "model_filename": assets.model_filename,
+    }
+    if not json_mode:
+        print("Re-encode provisioning ready.")
+        if assets.runtime_exe is not None:
+            print(f"  runtime: {assets.runtime_exe}")
+        else:
+            print(f"  runtime dir: {llama_cpp_dir().resolve()}")
+        print(f"  model:   {assets.model_path}")
+    return 0, payload
 
 
 def run_client(args, _raw_argv: list[str]) -> int:
 
-    global config, history, ptt_status_box
+    global config, history, ptt_status_box, _llama_cpp_polish_ready_checked
     client_shutdown_event.clear()
 
     ensure_runtime_dirs()
     config = args
+    _llama_cpp_polish_ready_checked = False
     _telemetry_log_buffer.clear()
     ptt_status_box = (
         PttSessionStatusBox(console, standby_context=_standby_telemetry_context)
@@ -2375,6 +3387,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
 
     check_dependencies()
     cli_log(f"Audio input: {describe_audio_capture_source()}")
+    ensure_llama_cpp_for_polish()
     ensure_local_server()
     flush_client_telemetry_block(include_ops_cheat=True)
 
@@ -2406,7 +3419,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
             "info",
         )
 
-    record_handler = create_hotkey_handler(hotkey)
+    record_press_handler, record_release_handler = create_record_hotkey_handlers(hotkey)
     recovery_handler = create_recovery_handler(recovery_key)
     retry_handler = create_retry_handler(retry_key)
     mode_handler = create_mode_toggle_handler(mode_key, config.mode_hotkey.upper())
@@ -2434,6 +3447,11 @@ def run_client(args, _raw_argv: list[str]) -> int:
         global state, _slash_buffer, _last_hotkey_time, _slash_tab_cycle
         if config.minimal or ptt_status_box is None or config.quiet:
             return False
+
+        slash_global = bool(
+            getattr(config, "slash_global", False)
+            or os.environ.get("VOXIUM_SLASH_GLOBAL", "").lower() in ("1", "true", "yes")
+        )
 
         with state_lock:
             st = state
@@ -2468,30 +3486,45 @@ def run_client(args, _raw_argv: list[str]) -> int:
                 sk: dict = {}
                 if needs.server_gpu:
                     sk["gpu"] = get_server_gpu_metrics()
+                if needs.server_health:
+                    if bool(getattr(config, "polish", True)):
+                        ensure_llama_cpp_for_polish(force=True)
+                    sk["server_health"] = get_server_health()
                 if needs.mic_capture:
                     sk["mic_info"] = build_audio_capture_info()
                 out = run_slash_line(
                     line,
                     session_model=getattr(config, "model", None),
+                    polish_enabled=bool(getattr(config, "polish", True)),
+                    polish_model=getattr(config, "polish_model", None),
                     transcript_history=get_transcript_history(),
                     **sk,
                 )
-                print_slash_command_downlink(
-                    console, line, out.text, result_rich=out.result_rich
-                )
-                if out.selected_model is not None:
-                    config.model = out.selected_model
-
-                    def _freeze_for_ensure() -> None:
-                        if ptt_status_box is not None and config and not config.minimal:
-                            ptt_status_box.freeze_before_external_output()
-
-                    ensure_model_on_loopback_server(
-                        config.server_url,
-                        console,
-                        out.selected_model,
-                        freeze_for_external_output=_freeze_for_ensure,
+                combined_polish = bool(
+                    not config.minimal
+                    and (out.polish_enabled is not None or out.polish_model is not None)
+                    and (
+                        out.polish_enabled is True
+                        or (
+                            out.polish_model is not None
+                            and bool(getattr(config, "polish", True))
+                        )
                     )
+                )
+                if not combined_polish:
+                    print_slash_command_downlink(
+                        console, line, out.text, result_rich=out.result_rich
+                    )
+
+                def _freeze_for_ensure() -> None:
+                    if ptt_status_box is not None and config and not config.minimal:
+                        ptt_status_box.freeze_before_external_output()
+
+                apply_slash_runtime_changes(
+                    out,
+                    freeze_for_external_output=_freeze_for_ensure,
+                    polish_slash=(line, out) if combined_polish else None,
+                )
                 if ptt_status_box is not None and config and not config.minimal:
                     ptt_status_box.restore_live_after_scrollback_output()
                 set_terminal_title()
@@ -2519,6 +3552,8 @@ def run_client(args, _raw_argv: list[str]) -> int:
         if st == State.IDLE:
             ch0 = pynput_typed_char(key)
             if ch0 == "/":
+                if not slash_global and not is_our_terminal_focused():
+                    return False
                 with state_lock:
                     if state != State.IDLE:
                         return False
@@ -2534,9 +3569,12 @@ def run_client(args, _raw_argv: list[str]) -> int:
         if try_handle_slash_input(key):
             return
         mode_handler(key)
-        record_handler(key)
+        record_press_handler(key)
         recovery_handler(key)
         retry_handler(key)
+
+    def combined_release_handler(key: object) -> None:
+        record_release_handler(key)
 
     # Ctrl+C: never stop pynput or run cleanup *inside* the signal handler. On Windows that can
     # deadlock (handler runs in the main thread while the listener thread holds locks). Only set a
@@ -2569,7 +3607,10 @@ def run_client(args, _raw_argv: list[str]) -> int:
             pass
 
     try:
-        with keyboard.Listener(on_press=combined_handler) as listener:
+        with keyboard.Listener(
+            on_press=combined_handler,
+            on_release=combined_release_handler,
+        ) as listener:
             while listener.is_alive() and not shutdown_requested.is_set():
                 listener.join(0.2)
     except KeyboardInterrupt:

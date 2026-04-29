@@ -38,7 +38,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 
 On **Windows**, the README may point to PowerShell / the `voxium` CLI instead of `make`.
 
-**Repository data on disk** (what `make disk-usage` and `/disk` summarize): **`models/`** and **`logs/`** under the project root (or `VOXIUM_REPO_ROOT`). **Transcript text** for `/history` and replay is **in-process RAM only** — the product does not use a `history/` directory under the repo for that data.
+**Repository data on disk** (what `make disk-usage` and `/disk` summarize): **`models/`**, **`logs/`**, and **`tools/llama.cpp/`** (local polish / `llama-server` prebuilds) under the project root (or `VOXIUM_REPO_ROOT`). `make clean` removes **`tools/llama.cpp/`** in addition to caches. **Transcript text** for `/history` and replay is **in-process RAM only** — the product does not use a `history/` directory under the repo for that data.
 
 ---
 
@@ -101,8 +101,8 @@ Optional / extra (not a substitute for the above unless team policy changes):
 
 ### Coverage notes (current policy in `pyproject.toml`)
 
-- Coverage is configured for **`src/voxium`** (and `scripts`), with **branch** coverage.
-- **Omitted** from measurement: `voxium/__main__.py`, `voxium/app.py`, `voxium/whisper_server.py` (heavy, optional-runtime dependencies for full import in minimal environments).
+- Coverage is configured for **`src/voxium`** (the `make test-cov` gate does not include `scripts/`), with **branch** coverage.
+- **Omitted** from measurement: `voxium/__main__.py`, `voxium/app.py`, `voxium/whisper_server.py`, `voxium/console_status.py` (heavy or interactive; optional-runtime dependencies for full import in some environments).
 - **`fail_under`** is set in **`[tool.coverage.report]`** (treat as the baseline for the **included** measured set).
 
 ### Tests that may skip

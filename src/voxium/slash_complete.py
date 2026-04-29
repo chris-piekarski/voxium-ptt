@@ -1,9 +1,9 @@
 """
-Slash command completion (``/help``, ``/mic``, …) — testable, no pynput.
+Slash command completion (``/help``, ``/mic``, ``/models polish ...``) — testable, no pynput.
 
-When the first token (after ``/``) is still being edited, we match primary commands
-(``help``, ``mic``, ``gpu``, ``models``) and all aliases. After the operator types a
-space, command completion and hints stop (first word committed).
+The first token still completes the primary commands and aliases. After the operator
+commits the command word, completion continues for the modeled subcommands and
+allow-listed model tags that matter for the session UX.
 """
 
 from __future__ import annotations
@@ -11,14 +11,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from voxium.model_registry import TRUSTED_MODELS
+from voxium.polish_model_registry import (
+    POLISH_DEFAULT_MODEL,
+    list_available_polish_models,
+    list_local_polish_models,
+)
+
 # One canonical name per public command; order = Tab cycle when ambiguous.
 SLASH_COMMAND_ORDER: tuple[str, ...] = (
     "help",
+    "health",
     "history",
     "disk",
     "mic",
     "gpu",
     "models",
+    "re-encode",
+    "polish",
 )
 
 # (typed token, primary) — all forms accepted by :func:`voxium.slash_commands.run_slash_line`.
@@ -26,6 +36,7 @@ SLASH_ALIASES: tuple[tuple[str, str], ...] = (
     ("help", "help"),
     ("?", "help"),
     ("h", "help"),
+    ("health", "health"),
     ("history", "history"),
     ("hist", "history"),
     ("transcripts", "history"),
@@ -42,7 +53,28 @@ SLASH_ALIASES: tuple[tuple[str, str], ...] = (
     ("cuda", "gpu"),
     ("models", "models"),
     ("model", "models"),
+    ("re-encode", "re-encode"),
+    ("reencode", "re-encode"),
+    ("polish", "polish"),
+    ("p", "polish"),
 )
+_PRIMARY_BY_ALIAS: dict[str, str] = dict(SLASH_ALIASES)
+_MODELS_SUBCOMMANDS: tuple[str, ...] = ("transcribe", "polish")
+_TRANSCRIBE_ACTIONS: tuple[str, ...] = ("list", "installed", "use")
+_MODELS_POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "on", "off")
+_POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "model", "on", "off")
+
+
+def _polish_model_names() -> list[str]:
+    names = [POLISH_DEFAULT_MODEL]
+    names.extend(model.model_id for model in list_available_polish_models())
+    names.extend(
+        model.name for model in list_local_polish_models() if not model.is_trusted
+    )
+    seen: dict[str, None] = {}
+    for name in names:
+        seen[name] = None
+    return list(seen)
 
 
 def is_slash_command_typing_not_args(buffer: str) -> bool:
@@ -58,14 +90,8 @@ def is_slash_command_typing_not_args(buffer: str) -> bool:
     return re.match(r"^/[^\s]*$", s) is not None
 
 
-def _command_prefix_lowercase(buffer: str) -> str:
-    s = (buffer or "").lstrip()
-    if not s.startswith("/"):
-        return ""
-    t = s[1:]
-    if " " in t:
-        return ""
-    return t.lower()
+def _normalize_primary(command: str) -> str:
+    return _PRIMARY_BY_ALIAS.get((command or "").lower(), (command or "").lower())
 
 
 def list_slash_command_matches(prefix: str) -> list[str]:
@@ -85,6 +111,120 @@ def list_slash_command_matches(prefix: str) -> list[str]:
             if token.startswith(p):
                 seen[primary] = None
     return [x for x in SLASH_COMMAND_ORDER if x in seen]
+
+
+def _match_options(prefix: str, options: tuple[str, ...] | list[str]) -> list[str]:
+    p = (prefix or "").lower()
+    if not p:
+        return list(options)
+    return [opt for opt in options if opt.lower().startswith(p)]
+
+
+def _completion_matches_for_buffer(buffer: str) -> list[str]:
+    s = (buffer or "").lstrip()
+    if not s.startswith("/"):
+        return []
+    if is_slash_command_typing_not_args(buffer):
+        prefix = s[1:].lower()
+        return [f"/{opt}" for opt in list_slash_command_matches(prefix)]
+
+    trailing_space = s.endswith(" ")
+    parts = s[1:].split()
+    if not parts:
+        return []
+    primary = _normalize_primary(parts[0])
+    args = parts[1:]
+
+    if primary == "models":
+        return _models_completion_matches(args, trailing_space)
+    if primary == "polish":
+        return _polish_completion_matches(args, trailing_space)
+    return []
+
+
+def _models_completion_matches(args: list[str], trailing_space: bool) -> list[str]:
+    if not args:
+        return (
+            [f"/models {opt}" for opt in _MODELS_SUBCOMMANDS] if trailing_space else []
+        )
+
+    sub = args[0].lower()
+    transcribe_names = tuple(sorted(TRUSTED_MODELS))
+    polish_names = _polish_model_names()
+    if len(args) == 1 and not trailing_space:
+        options = list(_MODELS_SUBCOMMANDS) + list(transcribe_names)
+        return [f"/models {opt}" for opt in _match_options(sub, options)]
+
+    if sub == "transcribe":
+        if len(args) == 1 and trailing_space:
+            return [f"/models transcribe {opt}" for opt in _TRANSCRIBE_ACTIONS]
+        if len(args) == 2 and not trailing_space:
+            opts = [
+                f"/models transcribe {opt}"
+                for opt in _match_options(args[1], _TRANSCRIBE_ACTIONS)
+            ]
+            opts.extend(
+                f"/models transcribe {name}"
+                for name in _match_options(args[1], transcribe_names)
+            )
+            return opts
+        if len(args) == 2 and trailing_space and args[1].lower() == "use":
+            return [f"/models transcribe use {name}" for name in transcribe_names]
+        if len(args) == 3 and args[1].lower() == "use" and not trailing_space:
+            return [
+                f"/models transcribe use {name}"
+                for name in _match_options(args[2], transcribe_names)
+            ]
+        return []
+
+    if sub == "polish":
+        if len(args) == 1 and trailing_space:
+            return [f"/models polish {opt}" for opt in _MODELS_POLISH_ACTIONS]
+        if len(args) == 2 and not trailing_space:
+            opts = [
+                f"/models polish {opt}"
+                for opt in _match_options(
+                    args[1], list(_MODELS_POLISH_ACTIONS) + polish_names
+                )
+            ]
+            return opts
+        if len(args) == 2 and trailing_space and args[1].lower() in {"use", "model"}:
+            action = args[1].lower()
+            return [f"/models polish {action} {name}" for name in polish_names]
+        if (
+            len(args) == 3
+            and args[1].lower() in {"use", "model"}
+            and not trailing_space
+        ):
+            return [
+                f"/models polish {args[1].lower()} {name}"
+                for name in _match_options(args[2], polish_names)
+            ]
+        return []
+
+    return []
+
+
+def _polish_completion_matches(args: list[str], trailing_space: bool) -> list[str]:
+    if not args:
+        return [f"/polish {opt}" for opt in _POLISH_ACTIONS] if trailing_space else []
+
+    head = args[0].lower()
+    if len(args) == 1 and not trailing_space:
+        options = list(_POLISH_ACTIONS) + _polish_model_names()
+        return [f"/polish {opt}" for opt in _match_options(head, options)]
+
+    if head in {"use", "model"}:
+        if len(args) == 1 and trailing_space:
+            return [f"/polish {head} {name}" for name in _polish_model_names()]
+        if len(args) == 2 and not trailing_space:
+            return [
+                f"/polish {head} {name}"
+                for name in _match_options(args[1], _polish_model_names())
+            ]
+        return []
+
+    return []
 
 
 def _longest_common_prefix(strings: list[str]) -> str:
@@ -118,22 +258,19 @@ def apply_slash_tab(
     s = (buffer or "").lstrip()
     if not s.startswith("/"):
         return TabOutcome(buffer, 0, False)
-    if not is_slash_command_typing_not_args(buffer):
-        return TabOutcome(buffer, 0, False)
-    t = s[1:]
-    prefix = t.lower()
-    options = list_slash_command_matches(prefix)
+    options = _completion_matches_for_buffer(buffer)
     if not options:
         return TabOutcome(buffer, 0, False)
     if len(options) == 1:
-        return TabOutcome(f"/{options[0]}", 0, True)
+        return TabOutcome(options[0], 0, True)
+    prefix = s
     lcp = _longest_common_prefix(options)
     if lcp and len(lcp) > len(prefix) and lcp.lower().startswith(prefix):
-        return TabOutcome(f"/{lcp}", 0, True)
+        return TabOutcome(lcp, 0, True)
     n = len(options)
     pick = options[tab_cycle % n]
     next_c = (tab_cycle + 1) % n
-    return TabOutcome(f"/{pick}", next_c, True)
+    return TabOutcome(pick, next_c, True)
 
 
 def format_slash_command_hints(
@@ -142,15 +279,12 @@ def format_slash_command_hints(
     max_len: int = 200,
 ) -> str:
     """
-    One line: `` /help  ·  /mic  · …`` of matches, or empty if not in command-typing state.
+    One line: `` /help  ·  /mic  · …`` of matches, or empty if there is nothing actionable.
     """
-    if not is_slash_command_typing_not_args(buffer):
-        return ""
-    pre = _command_prefix_lowercase(buffer)
-    m = list_slash_command_matches(pre)
+    m = _completion_matches_for_buffer(buffer)
     if not m:
         return ""
-    line = "  " + "  ·  ".join(f"/{x}" for x in m) + "  (Tab)"
+    line = "  " + "  ·  ".join(m) + "  (Tab)"
     if len(line) > max_len:
         return line[: max(0, max_len - 1)] + "…"
     return line

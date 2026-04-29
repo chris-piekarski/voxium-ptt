@@ -143,7 +143,7 @@ addopts = ["-ra"]
 [tool.coverage.run]
 branch = true
 relative_files = true
-source = ["src/voxium", "scripts"]
+source = ["src/voxium"]
 omit = [
     "tests/**",
     "*/site-packages/*",

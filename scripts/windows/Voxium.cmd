@@ -12,7 +12,7 @@ if not exist "pyproject.toml" (
   echo   %CD%
   echo.
   echo This file must live at:  YOUR_CLONE\scripts\windows\Voxium.cmd
-  echo If you put Voxium.cmd in WSL-Workspaces (above the clone), that was wrong — use one of:
+  echo   If you put Voxium.cmd in WSL-Workspaces only ^(above the clone^), that was wrong - use one of:
   echo   1^) YOUR_CLONE\Voxium.cmd  ^(in the repo root, next to pyproject.toml^)
   echo   2^) scripts\windows\Voxium-From-Parent-Folder.cmd  ^(in the parent of the clone; renames to Voxium.cmd ok^)
   echo.
@@ -33,7 +33,7 @@ if not "%VEXIT%"=="0" if not "%VEXIT%"=="130" if not defined VOXIUM_NO_PAUSE (
     echo [Hint] No .venv. One-time setup:  scripts\windows\Setup-Voxium.cmd
     echo.
   ) else (
-    echo [Voxium] Exited with code %VEXIT% — read the message above. For a full log, open
+    echo [Voxium] Exited with code %VEXIT% - read the message above. For a full log, open
     echo        cmd.exe in this folder and run:  scripts\windows\Voxium.cmd run
     echo.
   )

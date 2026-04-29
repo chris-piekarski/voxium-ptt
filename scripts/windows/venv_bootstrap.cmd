@@ -37,6 +37,12 @@ if not exist ".venv\Scripts\python.exe" (
   echo missing python.exe in venv>> "%LOG%"
   goto :epicfail
 )
+if not exist ".venv\pyvenv.cfg" (
+  echo [ERROR] Missing .venv\pyvenv.cfg — venv is invalid. Do not build .venv in WSL for use on Windows.
+  echo .venv\pyvenv.cfg missing>> "%LOG%"
+  goto :epicfail
+)
+echo === pyvenv.cfg: ok>> "%LOG%"
 
 echo.
 echo Upgrading pip…

@@ -47,7 +47,7 @@ def test_sanitize_hotkey_config_fills_all_actions():
 
 
 def test_sanitize_ignores_invalid_dict():
-    clean = sanitize_hotkey_config(None)  # type: ignore[arg-type]
+    clean = sanitize_hotkey_config(None)
     assert clean["record"] == DEFAULT_HOTKEYS["record"]
 
 

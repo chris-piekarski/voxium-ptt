@@ -168,7 +168,8 @@ def _is_venv_like_dirname(name: str) -> bool:
     return name.startswith(".venv")
 
 
-# Project-local temp / tool output (see `make disk-usage` for Voxium data dirs).
+# Project-local temp / tool output. ``tools/llama.cpp`` is the Windows polish runtime
+# (llama-server.exe, DLLs); same path as ``make disk-usage`` / ``/disk`` and voxium.paths.
 _CLEAN_ROOT_DIRS: tuple[str, ...] = (
     ".pytest_cache",
     ".ruff_cache",
@@ -187,8 +188,9 @@ _CLEAN_ROOT_FILES: tuple[str, ...] = (".coverage", "coverage.xml")
 def cmd_clean_artifacts(root: Path, venvd: Path) -> int:
     """
     Remove well-known tool caches at repo root, coverage files, every
-    __pycache__ outside the venv, and top-level ``*.egg-info`` (when not under
-    the venv). The venv tree is not traversed and is not removed here.
+    __pycache__ outside the venv, top-level ``*.egg-info`` (when not under
+    the venv), and ``tools/llama.cpp/`` (Windows polish prebuild). The venv
+    tree is not traversed and is not removed here.
     """
     for name in _CLEAN_ROOT_DIRS:
         _rmtree(root / name)
@@ -196,6 +198,8 @@ def cmd_clean_artifacts(root: Path, venvd: Path) -> int:
         p = root / name
         if p.is_file():
             _rmtree(p)
+    # Before scanning for __pycache__, drop the Windows polish prebuild (can be large)
+    _rmtree((Path(root) / "tools" / "llama.cpp").resolve())
     root = root.absolute()
     venvd = venvd.absolute()
 
@@ -469,7 +473,7 @@ def main() -> int:
 
     pclean = sp.add_parser(
         "clean",
-        help="Project caches, __pycache__, then uninstall (.venv, egg-info, dev stamp)",
+        help="Tool caches, __pycache__, coverage, egg-info, and tools/llama.cpp; keeps .venv",
     )
     pclean.add_argument("--root", type=Path, required=True)
     pclean.add_argument("--venvd", type=Path, required=True)
@@ -477,7 +481,7 @@ def main() -> int:
 
     pd = sp.add_parser(
         "disk-usage",
-        help="Show disk usage for models/ and logs/ under the repo",
+        help="Show disk usage for models/, logs/, and tools/llama.cpp under the repo",
     )
     pd.add_argument("--root", type=Path, required=True)
     pd.add_argument("--venvd", type=Path, required=True)

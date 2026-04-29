@@ -8,6 +8,9 @@ from voxium.metrics_table import (
     _metrics_column_count,
     build_metrics_table,
     build_ptt_log_metrics_layout,
+    format_gpu_metrics_plaintext,
+    format_polish_usage_suffix,
+    gpu_metrics_label_value_pairs,
 )
 
 
@@ -135,7 +138,7 @@ def test_ptt_log_metrics_layout_has_fewer_render_lines_than_vertical_table() -> 
         "Audio" in w
         and "infer" in w
         and "end-to-end" in w
-        and "Model" in w
+        and "Transcriber" in w
         and "Tokens" in w
     )
     # Vertical stack is one line per field; compact multi-column layout uses fewer lines.
@@ -148,6 +151,43 @@ def test_metrics_column_count_responsive() -> None:
     assert _metrics_column_count(99) == 2
     assert _metrics_column_count(80) == 2
     assert _metrics_column_count(63) == 1
+
+
+def test_format_polish_usage_suffix_shows_in_out_and_total() -> None:
+    s = format_polish_usage_suffix(
+        {"tokens_in": 10, "tokens_out": 7, "total_tokens": 17}
+    )
+    assert "tok 10→7" in s and "tot 17" in s
+
+
+def test_transcript_log_layout_includes_polish_tokens_when_present() -> None:
+    """Cyan PTT log line for re-encode includes token readout when server sent usage."""
+    metrics = {
+        "audio_seconds": 0.5,
+        "transcription_seconds": 0.2,
+        "total_request_seconds": 0.3,
+        "realtime_factor": 1.0,
+        "input_bytes": 1000,
+        "output_chars": 2,
+        "segments": 1,
+        "model": {"name": "small.en", "language": "en", "language_probability": 0.9},
+        "polish": {
+            "model": "q1",
+            "backend": "llama.cpp",
+            "applied": True,
+            "seconds": 0.15,
+            "tokens_in": 5,
+            "tokens_out": 3,
+            "total_tokens": 8,
+        },
+    }
+    wide = build_ptt_log_metrics_layout(metrics, available_width=100)
+    out = StringIO()
+    Console(file=out, width=100, force_terminal=True, legacy_windows=False).print(
+        wide, end=""
+    )
+    s = out.getvalue()
+    assert "Re-encode" in s and "tok" in s and "→" in s and "tot" in s
 
 
 def test_transcript_log_layout_omits_capture_and_gpu() -> None:
@@ -219,5 +259,103 @@ def test_transcript_log_layout_omits_capture_and_gpu() -> None:
     assert "16000" not in s
     assert "Audio" in s and "RTF" in s
     assert "infer" in s and "end-to-end" in s
-    assert "Model" in s and "Tokens" in s
+    assert "Transcriber" in s and "Tokens" in s
     assert "VRAM · util" not in s
+
+
+def test_format_gpu_metrics_plaintext_error_path() -> None:
+    t = format_gpu_metrics_plaintext({"_error": "e", "_reason": "r"})
+    assert "unavailable" in t.lower() and "e" in t
+
+
+def test_format_gpu_metrics_plaintext_empty() -> None:
+    t = format_gpu_metrics_plaintext(None)
+    assert "n/a" in t.lower() or "no" in t.lower()
+
+
+def test_gpu_metrics_label_uses_provider_when_name_missing() -> None:
+    pairs = gpu_metrics_label_value_pairs(
+        {
+            "provider": "X",
+            "vram_used_peak_mb": 1,
+            "vram_total_mb": 2,
+            "utilization_avg_percent": 0,
+            "utilization_peak_percent": 0,
+            "power_avg_watts": 0,
+            "power_peak_watts": 0,
+            "power_limit_watts": 0,
+            "temperature_peak_c": 0,
+            "energy_wh_estimate": 0,
+        }
+    )
+    assert pairs[0][0] == "GPU" and "X" in pairs[0][1]
+
+
+def test_build_ptt_log_empty_metrics() -> None:
+    out = build_ptt_log_metrics_layout(None, available_width=100)
+    sio = StringIO()
+    Console(file=sio, width=100, force_terminal=True, legacy_windows=False).print(
+        out, end=""
+    )
+    assert "No server metrics" in sio.getvalue()
+
+
+def test_format_polish_usage_mixed_branches() -> None:
+    assert "tok in 3" in format_polish_usage_suffix(
+        {"tokens_in": 3, "tokens_out": None, "total_tokens": None}
+    )
+    assert "tot 9" in format_polish_usage_suffix({"total_tokens": 9})
+    assert "tok out 2" in format_polish_usage_suffix(
+        {"tokens_in": None, "tokens_out": 2, "total_tokens": None}
+    )
+
+
+def test_transcript_log_polish_with_prepare_and_handler_timings() -> None:
+    metrics = {
+        "audio_seconds": 0.1,
+        "transcription_seconds": 0.2,
+        "total_request_seconds": 0.3,
+        "realtime_factor": 1.0,
+        "input_bytes": 1,
+        "output_chars": 1,
+        "segments": 1,
+        "model": {"name": "m", "language": "en", "language_probability": 0.9},
+        "polish": {
+            "model": "m1",
+            "prepare_seconds": 0.01,
+            "handler_seconds": 0.02,
+            "seconds": 0.05,
+            "applied": True,
+        },
+    }
+    out = StringIO()
+    w = build_ptt_log_metrics_layout(metrics, available_width=100)
+    Console(file=out, width=100, force_terminal=True, legacy_windows=False).print(
+        w, end=""
+    )
+    s = out.getvalue()
+    assert "prepare" in s and "handler" in s
+
+
+def test_build_ptt_log_tiny_width_no_constrain() -> None:
+    metrics = {
+        "audio_seconds": 0.1,
+        "transcription_seconds": 0.2,
+        "total_request_seconds": 0.3,
+        "realtime_factor": 1.0,
+        "input_bytes": 1,
+        "output_chars": 1,
+        "segments": 1,
+        "model": {
+            "name": "m",
+            "language": "en",
+            "language_probability": 0.9,
+            "duration_after_vad_seconds": 0.0,
+        },
+    }
+    w = build_ptt_log_metrics_layout(metrics, available_width=8)
+    out = StringIO()
+    Console(file=out, width=80, force_terminal=True, legacy_windows=False).print(
+        w, end=""
+    )
+    assert "Audio" in out.getvalue() or "m" in out.getvalue()

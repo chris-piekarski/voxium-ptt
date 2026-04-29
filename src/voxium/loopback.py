@@ -21,8 +21,10 @@ def is_loopback_host(host: str | None) -> bool:
         return False
 
 
-def is_loopback_url(url: str) -> bool:
+def is_loopback_url(url: object) -> bool:
     try:
+        if not isinstance(url, str):
+            return False
         parsed = urlparse(url)
         host = parsed.hostname
         if parsed.scheme != "http" or not host:

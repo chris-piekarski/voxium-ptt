@@ -1,10 +1,11 @@
 #Requires -Version 5.1
 <#
-  Windows: .venv, pip install -e ., sounddevice check.
+  Windows: .venv, pip install -e ., sounddevice check, repo-local llama.cpp polish assets.
   Logs: <repo>\logs\voxium-windows-setup.log  and  %TEMP%\voxium-windows-setup.log
 #>
 param(
-    [switch] $Dev
+    [switch] $Dev,
+    [switch] $SkipPolish
 )
 $ErrorActionPreference = "Continue"
 # Not required: Setup-Voxium.cmd passes -ExecutionPolicy Bypass. Skipping Set-ExecutionPolicy avoids
@@ -38,6 +39,23 @@ function Invoke-Pip {
     $out = & $Python -m pip @PipArgs 2>&1
     $ec = $LASTEXITCODE
     # Do not emit $out to the pipeline — that would become (part of) the function return value and break $ec.
+    foreach ($line in @($out)) {
+        Write-SetupLog "$line"
+        Write-Host $line
+    }
+    return [int]$ec
+}
+
+function Invoke-LoggedCommand {
+    param(
+        [string]$Exe,
+        [string[]]$Args,
+        [string]$Label
+    )
+    Write-SetupLog "=== $Label"
+    Write-SetupLog ("  {0} {1}" -f $Exe, ($Args -join ' '))
+    $out = & $Exe @Args 2>&1
+    $ec = $LASTEXITCODE
     foreach ($line in @($out)) {
         Write-SetupLog "$line"
         Write-Host $line
@@ -151,9 +169,23 @@ if ($ec -ne 0) {
     }
 }
 
+if ($SkipPolish) {
+    Write-Host "Skipping local polish runtime/model provisioning (-SkipPolish)." -ForegroundColor Yellow
+    Write-SetupLog "Skipping local polish runtime/model provisioning (-SkipPolish)."
+} else {
+    Write-Host "Provisioning local llama.cpp runtime and default GGUF polish model…" -ForegroundColor Cyan
+    $ec = Invoke-LoggedCommand -Exe $VenvPython -Args @("-m", "voxium", "models", "--polish", "--pull-polish") -Label "voxium models --polish --pull-polish"
+    if ($ec -ne 0) {
+        Exit-SetupFail "Could not provision the local polish runtime/model (exit $ec). See logs."
+    }
+}
+
 Write-Host ""
 Write-Host "Setup finished." -ForegroundColor Green
+if (-not $SkipPolish) {
+    Write-Host "  repo-local llama.cpp runtime + default GGUF polish model are on station" -ForegroundColor DarkGreen
+}
 Write-Host "  .\.venv\Scripts\Activate.ps1  then  voxium run" -ForegroundColor Cyan
-Write-Host "  or  .\scripts\windows\Voxium.cmd run" -ForegroundColor Cyan
+Write-Host "  or  .\scripts\windows\Voxium.cmd run  (default STT: small.en unless WHISPER_MODEL is set; re-encode on unless VOXIUM_POLISH_ENABLED=0)" -ForegroundColor Cyan
 Write-SetupLog "=== success ==="
 Write-Host ""

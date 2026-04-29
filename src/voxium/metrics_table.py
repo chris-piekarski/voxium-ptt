@@ -125,7 +125,7 @@ def _rows_model_compact(model: dict) -> list[tuple[str, str]]:
     language_probability = format_number(model.get("language_probability"), "", 4)
     return [
         (
-            "Model",
+            "Transcriber",
             f"name {model.get('name') or 'unknown'} · "
             f"lang {language} · "
             f"p={language_probability} | "
@@ -170,7 +170,7 @@ def _rows_model_block(model: dict) -> list[tuple[str, str]]:
     language = model.get("language") or "auto"
     language_probability = format_number(model.get("language_probability"), "", 4)
     return [
-        ("Model", str(model.get("name") or "unknown")),
+        ("Transcriber", str(model.get("name") or "unknown")),
         ("Language", f"{language} / p={language_probability}"),
         (
             "VAD",
@@ -202,78 +202,68 @@ def _rows_model_block(model: dict) -> list[tuple[str, str]]:
     ]
 
 
-def _rows_capture_compact(capture: dict) -> list[tuple[str, str]]:
-    """All capture fields from :func:`build_metrics_table`, merged for fewer rows."""
-    device = capture.get("device") or {}
-    host_api = capture.get("host_api") or {}
-    backend = capture.get("backend") or {}
-    audio_format = capture.get("format") or {}
-    stream_info = capture.get("stream") or {}
-    recording = capture.get("recording") or {}
-    statuses = recording.get("callback_statuses") or []
-    device_name = str(device.get("name") or "default input")
-    api = str(host_api.get("name") or backend.get("api") or "unknown")
-    rows: list[tuple[str, str]] = [
-        (
-            "Capture / API",
-            f"{device_name} · {api}",
-        ),
-        (
-            "Format / dev Hz",
-            f"{format_number(audio_format.get('sample_rate_hz'), ' Hz', 0)} / "
-            f"{format_number(audio_format.get('channels'), ' ch', 0)} / "
-            f"{audio_format.get('dtype') or 'unknown'}"
-            f" · {format_number(device.get('default_samplerate_hz'), ' Hz', 0)}",
-        ),
-        ("Latency", format_optional_seconds(stream_info.get("latency_seconds"))),
-        (
-            "Rec / wall",
-            f"{format_seconds(recording.get('capture_seconds'))} / "
-            f"{format_number(recording.get('captured_frames'), ' frames', 0)} / "
-            f"{format_number(recording.get('chunks'), ' chunks', 0)} · "
-            f"wall {format_seconds(recording.get('wall_seconds'))}",
-        ),
-    ]
-    if statuses:
-        rows.append(
-            (
-                "Flags",
-                "; ".join(str(status) for status in statuses[:3]),
-            )
+def format_polish_usage_suffix(pol: dict) -> str:
+    """
+    Human fragment for llama.cpp polish token usage: ``''`` or ``' · tok 10→7 · tot 17'`` style.
+
+    Accepts ``tokens_in`` / ``tokens_out`` (client merge) or ``prompt_tokens`` / ``completion_tokens``
+    (``metrics.polish``), plus optional ``total_tokens``.
+    """
+    pin = pol.get("tokens_in")
+    pout = pol.get("tokens_out")
+    if pin is None:
+        pin = pol.get("prompt_tokens")
+    if pout is None:
+        pout = pol.get("completion_tokens")
+    tot = pol.get("total_tokens")
+    try:
+        pin_i = int(pin) if pin is not None else None
+    except (TypeError, ValueError):
+        pin_i = None
+    try:
+        pout_i = int(pout) if pout is not None else None
+    except (TypeError, ValueError):
+        pout_i = None
+    try:
+        tot_i = int(tot) if tot is not None else None
+    except (TypeError, ValueError):
+        tot_i = None
+    if pin_i is None and pout_i is None and tot_i is None:
+        return ""
+    parts: list[str] = []
+    if pin_i is not None and pout_i is not None:
+        parts.append(f"tok {pin_i}→{pout_i}")
+    elif pin_i is not None:
+        parts.append(f"tok in {pin_i}")
+    elif pout_i is not None:
+        parts.append(f"tok out {pout_i}")
+    if tot_i is not None:
+        parts.append(f"tot {tot_i}")
+    if not parts:
+        return ""
+    return " · " + " · ".join(parts)
+
+
+def _rows_polish_compact(pol: dict) -> list[tuple[str, str]]:
+    err = pol.get("error")
+    e_s = f" | err {str(err)[:80]}" if err else ""
+    tok = format_polish_usage_suffix(pol)
+    prep = pol.get("prepare_seconds")
+    hand = pol.get("handler_seconds")
+    if prep is not None and hand is not None:
+        timing = (
+            f" · prepare {format_number(prep, 's', 2)}"
+            f" · llama {format_number(pol.get('seconds'), 's', 2)}"
+            f" · handler {format_number(hand, 's', 2)}"
         )
-    return rows
-
-
-def _rows_gpu_compact(gpu: dict) -> list[tuple[str, str]]:
-    """All GPU fields from :func:`gpu_metrics_label_value_pairs` in fewer rows (values unchanged)."""
-    if gpu.get("_error"):
-        reason = gpu.get("_reason") or ""
-        msg = str(gpu.get("_error"))
-        if reason:
-            msg = f"{msg} — {reason}"
-        return [("GPU", f"[dim]{msg}[/dim]")]
-
-    fn = format_number
+    else:
+        timing = f" · {format_number(pol.get('seconds'), 's', 2)}"
     return [
-        ("GPU", str(gpu.get("name") or gpu.get("provider") or "available")),
         (
-            "VRAM · util",
-            f"peak {fn(gpu.get('vram_used_peak_mb'), ' MB', 1)} / "
-            f"{fn(gpu.get('vram_total_mb'), ' MB', 1)} · "
-            f"avg {fn(gpu.get('utilization_avg_percent'), '%', 1)} / "
-            f"peak {fn(gpu.get('utilization_peak_percent'), '%', 1)}",
-        ),
-        (
-            "Power",
-            f"avg {fn(gpu.get('power_avg_watts'), ' W', 2)} / "
-            f"peak {fn(gpu.get('power_peak_watts'), ' W', 2)} / "
-            f"limit {fn(gpu.get('power_limit_watts'), ' W', 2)}",
-        ),
-        (
-            "Temp · energy",
-            f"{fn(gpu.get('temperature_peak_c'), ' C', 1)} · "
-            f"{fn(gpu.get('energy_wh_estimate'), ' Wh', 6)}",
-        ),
+            "Re-encode",
+            f"re-encoder {pol.get('model') or '—'} · backend {pol.get('backend') or '—'} "
+            f"· applied {bool(pol.get('applied', True))}{timing}{tok}{e_s}",
+        )
     ]
 
 
@@ -288,6 +278,23 @@ def _rows_transcript_log_compact(metrics: dict) -> list[tuple[str, str]]:
     model = metrics.get("model")
     if isinstance(model, dict):
         rows.extend(_rows_model_compact(model))
+    pol = metrics.get("polish")
+    if isinstance(pol, dict) and (
+        pol.get("model") is not None
+        or pol.get("seconds") is not None
+        or pol.get("error") is not None
+        or any(
+            pol.get(k) is not None
+            for k in (
+                "tokens_in",
+                "tokens_out",
+                "total_tokens",
+                "prompt_tokens",
+                "completion_tokens",
+            )
+        )
+    ):
+        rows.extend(_rows_polish_compact(pol))
     return rows
 
 
