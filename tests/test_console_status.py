@@ -23,8 +23,8 @@ from voxium.standby_telemetry import build_standby_detail_line
 
 
 def test_standing_by_ready_starts_new_panel() -> None:
-    assert standing_by_ready_starts_new_panel("◉ PTT/VOX · ON STATION", None)
-    assert not standing_by_ready_starts_new_panel("◉ PTT/VOX · ON STATION", "")
+    assert standing_by_ready_starts_new_panel("◉ PTT/VOX · Standing by", None)
+    assert not standing_by_ready_starts_new_panel("◉ PTT/VOX · Standing by", "")
     assert not standing_by_ready_starts_new_panel("📻 PTT ACTIVE", None)
 
 
@@ -34,17 +34,17 @@ def test_vox_open_fresh_panel_predicate() -> None:
     assert vox_open_listening_starts_fresh_panel(vox_open, "")
     assert not vox_open_listening_starts_fresh_panel(vox_open, None)
     assert not vox_open_listening_starts_fresh_panel("📻 PTT ACTIVE", " ")
-    assert not vox_open_listening_starts_fresh_panel("◉ PTT/VOX · ON STATION", " ")
+    assert not vox_open_listening_starts_fresh_panel("◉ PTT/VOX · Standing by", " ")
 
 
 def test_status_uses_recording_hud_line() -> None:
     assert status_uses_recording_hud_line("📻 PTT ACTIVE")
     assert not status_uses_recording_hud_line("🤖 EDGE INFERENCE")
-    assert not status_uses_recording_hud_line("◉ PTT/VOX · ON STATION")
+    assert not status_uses_recording_hud_line("◉ PTT/VOX · Standing by")
 
 
 def test_build_status_box_panel_layout() -> None:
-    p1 = build_status_box_panel("◉ PTT/VOX · ON STATION", "Standing by.")
+    p1 = build_status_box_panel("◉ PTT/VOX · Standing by", "Standing by.")
     assert p1 is not None
     assert "Voxium" in str(p1.title)
     p2 = build_status_box_panel("📻 PTT ACTIVE", "F9 drops carrier", recording_hud="")
@@ -57,7 +57,7 @@ def test_build_status_box_panel_layout() -> None:
 def test_session_panel_multi_step() -> None:
     p = build_voxium_session_panel(
         [
-            PttStatusStep("◉ PTT/VOX · ON STATION", "Standing by."),
+            PttStatusStep("◉ PTT/VOX · Standing by", "Standing by."),
             PttStatusStep("🤖 EDGE INFERENCE", "Decoding…"),
         ],
         80,

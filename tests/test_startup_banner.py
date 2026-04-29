@@ -5,6 +5,7 @@ from voxium.startup_banner import (
     _GLYPHS,
     _merge_word,
     build_voxium_banner,
+    default_rig_subtitle,
     show_startup_banner,
 )
 from rich.console import Console
@@ -34,13 +35,19 @@ def test_build_group_and_print_smoke() -> None:
     g = build_voxium_banner(tagline="Custom tagline for test.")
     assert g is not None
     c = Console(force_terminal=True, width=100, record=True, color_system="truecolor")
-    show_startup_banner(c)
+    show_startup_banner(c, tagline="Custom tagline for test.")
     s = c.export_text(clear=True)
     assert "Voxium" in s
     assert "█" in s
+    assert "Custom tagline" in s
 
 
 def test_banner_tagline_pool_nonempty() -> None:
     assert len(_BANNER_TAGLINES) >= 8
     for t in _BANNER_TAGLINES:
         assert t.strip()
+
+
+def test_default_rig_subtitle_hostname_and_rig() -> None:
+    s = default_rig_subtitle("shack-01")
+    assert "Rig" in s and "shack-01" in s and "1960" in s and "PTT" in s

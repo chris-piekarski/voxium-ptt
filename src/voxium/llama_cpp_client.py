@@ -9,8 +9,6 @@ from urllib.parse import urljoin
 
 import requests
 
-from voxium.polish_prompt import system_message, user_message
-
 
 @dataclass
 class LlamaCppChatResult:
@@ -73,25 +71,27 @@ def llama_cpp_loaded_model(base_url: str, *, timeout: float = 1.0) -> str | None
     return str(model_id).strip() if model_id else None
 
 
-def llama_cpp_chat(
+def llama_cpp_chat_completions(
     base_url: str,
     model: str,
-    transcript: str,
+    messages: list[dict[str, str]],
     *,
     timeout: float,
     temperature: float = 0.2,
     max_tokens: int = 1024,
 ) -> LlamaCppChatResult:
+    """
+    OpenAI-style ``POST /v1/chat/completions`` to a local ``llama-server`` instance.
+
+    Reused by the polish pass and the optional on-client UX chatter (different prompts).
+    """
     import time as _time
 
     t0 = _time.perf_counter()
     url = urljoin(_base(base_url), "v1/chat/completions")
     body: dict[str, Any] = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_message()},
-            {"role": "user", "content": user_message(transcript)},
-        ],
+        "messages": messages,
         "stream": False,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -152,6 +152,30 @@ def llama_cpp_chat(
         completion_tokens=_usage_int(usage, "completion_tokens"),
         total_tokens=_usage_int(usage, "total_tokens"),
         raw_status=r.status_code,
+    )
+
+
+def llama_cpp_chat(
+    base_url: str,
+    model: str,
+    transcript: str,
+    *,
+    timeout: float,
+    temperature: float = 0.2,
+    max_tokens: int = 1024,
+) -> LlamaCppChatResult:
+    from voxium.polish_prompt import system_message, user_message
+
+    return llama_cpp_chat_completions(
+        base_url,
+        model,
+        [
+            {"role": "system", "content": system_message()},
+            {"role": "user", "content": user_message(transcript)},
+        ],
+        timeout=timeout,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 

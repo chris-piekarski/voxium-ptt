@@ -97,8 +97,10 @@ def build_standby_detail_line(
     context: dict[str, Any] | None = None,
 ) -> Text:
     """
-    One detail line for **◉ PTT/VOX · ON STATION** + “Standing by…”: local + Zulu, a wide FFT strip
-    of the last accepted take, a **path** from capture, and a tail (last decode when available).
+    Two lines under the green **◉ PTT/VOX · Standing by** head: the **first** is local + Zulu,
+    path, and tail (if ``ux_chatter_wit`` is set, that string leads at the **far left** in place
+    of “Standing by.”; otherwise the line starts with “Standing by.”). The **second** line is
+    only the animated rFFT block strip, flush left, so the spectrum does not start mid-sentence.
     """
     t = 0 if tick is None else int(tick)
     ctx = context or {}
@@ -106,8 +108,12 @@ def build_standby_detail_line(
     path = _format_path_brief(ctx)
     clock = _local_and_utc_hms()
     tail = _tail_from_context(ctx)
-    return (
-        Text("Standing by.  ", style="dim #cbd5e1")
-        + spec
-        + Text(f"  {clock}  ·  {path}  ·  {tail}", style="dim #cbd5e1")
+    w = (ctx.get("ux_chatter_wit") or "").strip() if ctx else ""
+    if w:
+        prefix = f"{w}  "
+    else:
+        prefix = "Standing by.  "
+    line1 = Text(prefix, style="dim #cbd5e1") + Text(
+        f"  {clock}  ·  {path}  ·  {tail}", style="dim #cbd5e1"
     )
+    return line1 + Text("\n", style="dim #cbd5e1") + spec

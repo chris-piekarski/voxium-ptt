@@ -114,13 +114,15 @@ def format_mic_report(mic_info: dict | None) -> str:
     return "\n".join(lines)
 
 
-def format_health_report(server_health: dict | None) -> str:
+def format_health_report(
+    server_health: dict | None, *, session_model: str | None = None
+) -> str:
     """Plain-text readout for the loopback server `/health` payload."""
     if not server_health:
         return "Server health is unavailable. Check the local /transcribe server, copy."
 
     status = str(server_health.get("status") or "unknown")
-    model = str(server_health.get("model") or "—")
+    model = str(server_health.get("startup_model") or server_health.get("model") or "—")
     device = str(server_health.get("device") or "—")
     compute = str(server_health.get("compute") or "—")
     timeout_s = server_health.get("timeout_seconds")
@@ -128,11 +130,21 @@ def format_health_report(server_health: dict | None) -> str:
     lines: list[str] = [
         "Loopback server health:",
         f"  • status: {status}",
-        f"  • transcribe: transcriber {model} · device {device} · compute {compute}",
+        f"  • transcribe default: server booted with {model} · device {device} · compute {compute}",
         f"  • VAD: {'on' if vad_enabled else 'off'} · timeout {timeout_s if timeout_s is not None else '—'}s",
     ]
 
-    model_repo = server_health.get("model_repo")
+    loaded_models = server_health.get("loaded_transcribe_models")
+    if isinstance(loaded_models, list) and loaded_models:
+        disp = ", ".join(str(x) for x in loaded_models if str(x).strip())
+        if disp:
+            lines.append(f"  • transcribe loaded: {disp}")
+    if session_model:
+        lines.append(f"  • transcribe this client: {session_model}")
+
+    model_repo = server_health.get("startup_model_repo") or server_health.get(
+        "model_repo"
+    )
     if model_repo:
         lines.append(f"  • model repo: {model_repo}")
 
@@ -174,6 +186,28 @@ def format_health_report(server_health: dict | None) -> str:
         lines.append(f"  • faster-whisper: {fw.get('version')}")
 
     return "\n".join(lines)
+
+
+def _transcription_model_from_file_config(file_config: dict | None) -> str | None:
+    """
+    Return ``transcription.model`` from operator config (``~/.config/voxium/config.yaml``) when
+    set to a trusted id; else ``None`` (fresh launches use ``--model`` / product default).
+    """
+    if not file_config:
+        return None
+    t = file_config.get("transcription")
+    if not isinstance(t, dict):
+        return None
+    raw = t.get("model")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        return validate_model_name(s)
+    except ValueError:
+        return None
 
 
 def _line_style(*, active: bool = False, installed: bool = False) -> str:
@@ -343,14 +377,24 @@ def _format_models_status(
     session_model: str | None,
     polish_enabled: bool,
     polish_model: str | None,
+    file_config: dict | None = None,
 ) -> str:
     pmod = polish_model or POLISH_DEFAULT_MODEL
     pe = "on" if polish_enabled else "off"
     st = session_model or DEFAULT_MODEL_NAME
+    pinned = _transcription_model_from_file_config(file_config)
+    pin_disp = pinned if pinned is not None else "—"
+    tr = f"  Transcribe: this run: {st} · config: {pin_disp} · product default: {DEFAULT_MODEL_NAME}\n"
+    if pinned is not None and pinned != DEFAULT_MODEL_NAME:
+        tr += (
+            f"  Hint: for {DEFAULT_MODEL_NAME!r} on every launch, set or remove "
+            "`transcription.model` in ~/.config/voxium/config.yaml, or set "
+            "`WHISPER_MODEL` to that id (overrides the file; same as the local server), copy.\n"
+        )
     return (
         "Models\n"
-        f"  Transcribe: active {st} · default {DEFAULT_MODEL_NAME}\n"
-        f"  Re-encode: {pe} · active {pmod} · default {DEFAULT_TRUSTED_POLISH_MODEL_ID} (config: polish)\n"
+        + tr
+        + f"  Re-encode: {pe} · active {pmod} · default {DEFAULT_TRUSTED_POLISH_MODEL_ID} (config: polish)\n"
         "  Backend: transcribe=faster-whisper · re-encode=llama.cpp\n"
         "  Views: /models transcribe list | /models transcribe installed | /models polish list | /models polish installed\n"
         "  Select: /models transcribe use <id> | /models polish use <id> | /models polish on|off"
@@ -363,11 +407,14 @@ def _run_models_line(
     session_model: str | None = None,
     polish_enabled: bool = False,
     polish_model: str | None = None,
+    file_config: dict | None = None,
 ) -> SlashLineResult:
     parts = line.strip().split()
     if len(parts) == 1:
         return SlashLineResult(
-            text=_format_models_status(session_model, polish_enabled, polish_model)
+            text=_format_models_status(
+                session_model, polish_enabled, polish_model, file_config=file_config
+            )
         )
 
     sub1 = parts[1].lower()
@@ -617,6 +664,7 @@ def run_slash_line(
     polish_enabled: bool = False,
     polish_model: str | None = None,
     transcript_history: SessionTranscriptHistory | None = None,
+    file_config: dict | None = None,
 ) -> SlashLineResult:
     """
     Handle one full line the operator committed (``/...``). Return :class:`SlashLineResult`
@@ -634,7 +682,9 @@ def run_slash_line(
     if first in ("mic", "m", "microphone", "input", "audio"):
         return SlashLineResult(text=format_mic_report(mic_info))
     if first in ("health",):
-        return SlashLineResult(text=format_health_report(server_health))
+        return SlashLineResult(
+            text=format_health_report(server_health, session_model=session_model)
+        )
     if first in ("gpu", "g", "cuda"):
         return SlashLineResult(text=format_gpu_metrics_plaintext(gpu))
     if first in ("models", "model"):
@@ -643,6 +693,7 @@ def run_slash_line(
             session_model=session_model,
             polish_enabled=polish_enabled,
             polish_model=polish_model,
+            file_config=file_config,
         )
     if first in ("polish", "p", "re-encode", "reencode"):
         return _run_polish_line(
@@ -670,5 +721,6 @@ def _help_text() -> str:
         "  • /models — summary; /models transcribe list|installed|use <id>; /models polish … (re-encode lane, same as /re-encode), copy.\n"
         "  • /re-encode or /polish — re-encode lane: list|installed|use <id>|on|off (same as /models polish), copy.\n"
         "  • /history — PTT/VOX transcripts (RAM only); /history <n> full line; /history copy <n>; /history clear; /history search <text> — filter the list, copy.\n"
-        "  • /disk — same readout as make disk-usage: models/, logs/, and tools/llama.cpp/ under the repo, copy."
+        "  • /disk — same readout as make disk-usage: models/, logs/, and tools/llama.cpp/ under the repo. "
+        "``grep [stack=ux-chatter] logs/llama_cpp_ux.log`` — which local llama-server is for UX chatter, copy."
     )

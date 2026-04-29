@@ -19,6 +19,7 @@ def _args(**overrides) -> SimpleNamespace:
         "action": None,
         "model_id": None,
         "pull_polish": False,
+        "pull_ux_chatter": False,
         "polish": False,
         "json": False,
     }
@@ -101,3 +102,28 @@ def test_run_models_command_pull_polish_json_reports_provision_failure(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error"] == "download failed"
+
+
+def test_run_models_command_pull_ux_chatter_json_ok(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    from pathlib import Path
+
+    monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
+
+    from voxium.ux_chatter_model_registry import DEFAULT_UX_CHATTER
+
+    def fake_ensure(*, progress=None, **kwargs):
+        p = tmp_path / "models" / "ux" / "gemma-3-1b-it-q4_0.gguf"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"gguf")
+        return (p, DEFAULT_UX_CHATTER)
+
+    monkeypatch.setattr(
+        "voxium.ux_chatter_provision.ensure_ux_chatter_gguf_available",
+        fake_ensure,
+    )
+    assert app.run_models_command(_args(pull_ux_chatter=True, json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert Path(payload["model_path"]).is_file()

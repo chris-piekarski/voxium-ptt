@@ -266,3 +266,25 @@ def test_voxium_polish_hub_tqdm_pushes_line_to_sink() -> None:
     finally:
         pp._set_polish_hf_line_sink(None)
     assert lines and "50" in lines[0]
+
+
+def test_wrap_hf_download_progress_rewrites_bars_on_stderr(monkeypatch) -> None:
+    import io
+
+    err = io.StringIO()
+    emitted: list[str] = []
+    monkeypatch.setattr(pp.sys, "stderr", err)
+    push = pp.wrap_hf_download_progress(emitted.append)
+    push("f  12%  (0.10 / 0.93 GiB)")
+    push("f  50%  (0.47 / 0.93 GiB)")
+    assert emitted == []
+    assert "12%" in err.getvalue() and "50%" in err.getvalue()
+    push("ready")
+    assert emitted == ["ready"]
+
+
+def test_wrap_hf_download_progress_passthrough_without_bar() -> None:
+    emitted: list[str] = []
+    push = pp.wrap_hf_download_progress(emitted.append)
+    push("Fetching from hub…")
+    assert emitted == ["Fetching from hub…"]

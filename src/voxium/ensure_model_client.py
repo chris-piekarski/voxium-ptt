@@ -52,10 +52,15 @@ def ensure_model_on_loopback_server(
     model: str,
     *,
     freeze_for_external_output: Callable[[], None] | None = None,
+    quiet_success: bool = False,
 ) -> bool:
     """
     If the local /transcribe server is on loopback, start or join a model fetch
     and show one live Downlink panel (single progress line) while polling.
+
+    If ``quiet_success`` is True, do not print the green success lines when the model
+    was already loaded (HTTP 200) or when an async job completes — still shows errors
+    and the live progress view while a download or load is in progress (HTTP 202).
 
     Returns True when the model is loaded on the server (or was already), False on hard errors.
     """
@@ -90,10 +95,11 @@ def ensure_model_on_loopback_server(
             "message"
         ) or f"Model {model!r} is on the server stack, copy."
         _freeze_ptt(freeze_for_external_output)
-        print_agent_telemetry_panel(
-            console,
-            [(msg, "info")],
-        )
+        if not quiet_success:
+            print_agent_telemetry_panel(
+                console,
+                [(msg, "info")],
+            )
         return True
     if r.status_code != 202:
         detail: str | object = r.text
@@ -207,10 +213,11 @@ def ensure_model_on_loopback_server(
         )
         return False
 
-    print_agent_telemetry_panel(
-        console,
-        [
-            (f"Model {model!r} is on the stack and ready for PTT, copy.", "info"),
-        ],
-    )
+    if not quiet_success:
+        print_agent_telemetry_panel(
+            console,
+            [
+                (f"Model {model!r} is on the stack and ready for PTT, copy.", "info"),
+            ],
+        )
     return True

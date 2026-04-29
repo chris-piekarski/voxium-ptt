@@ -51,12 +51,12 @@ The product code lives in **`src/voxium/`** (installed as the `voxium` package).
 ```mermaid
 flowchart LR
   subgraph Client["Client process (voxium run)"]
-    CLI[CLI & config]
+    CLI["CLI & config"]
     HK[Hotkeys / state]
     AUD[Audio capture]
     HTTPc[HTTP client to /transcribe + /polish]
-    SLASH[/health · /models · /polish]
-    PST[Paste & clipboard]
+    SLASH["/health · /models · /polish"]
+    PST["Paste & clipboard"]
     CLI --> HK
     HK --> AUD
     AUD --> HTTPc
@@ -78,7 +78,7 @@ flowchart LR
     PROV --> GGUF
     PROV --> LLM
   end
-  REG[Model registry & validation\nSTT + polish]
+  REG["Model registry & validation\nSTT + polish"]
   MK[Make helper scripts/mk.py]
 
   Client -->|loopback HTTP| Server
@@ -184,13 +184,13 @@ The shipped Windows bootstrap owns the full local polish setup: create the venv,
 ```mermaid
 flowchart LR
   user([Operator])
-  setup[scripts/windows/Setup-Voxium.cmd]
-  venv[Create / repair .venv]
-  pip[Editable install + sounddevice probe]
-  pull[voxium models --polish --pull-polish]
-  runtime[tools/llama.cpp/llama-server(.exe)]
-  model[models/polish/default.gguf]
-  ready[voxium run --polish]
+  setup["scripts/windows/Setup-Voxium.cmd"]
+  venv["Create / repair .venv"]
+  pip["Editable install + sounddevice probe"]
+  pull["voxium models --polish --pull-polish"]
+  runtime["tools/llama.cpp/llama-server(.exe)"]
+  model["models/polish/default.gguf"]
+  ready["voxium run --polish"]
 
   user --> setup
   setup --> venv
@@ -218,7 +218,7 @@ flowchart TB
     p[pyproject.toml]
   end
   subgraph srcpkg["src/voxium/"]
-    app[app · client & CLI wiring]
+    app["app · client & CLI wiring"]
     ui[console_status · recording_ui]
     st[standby_* · session_history · slash_*]
     polish[llama_cpp_* · polish_*]

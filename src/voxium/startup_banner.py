@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import colorsys
 import random
+import socket
 from collections.abc import Iterator
 
 from rich.console import Console, Group
@@ -87,6 +88,30 @@ _BANNER_TAGLINES: tuple[str, ...] = (
 )
 
 
+def get_startup_hostname() -> str:
+    """Short host id for the rig line (OS stack; no network call)."""
+    try:
+        h = socket.gethostname()
+    except OSError:
+        h = ""
+    h = (h or "").strip() or "localhost"
+    return h if len(h) <= 120 else h[:117] + "…"
+
+
+def default_rig_subtitle(hostname: str | None = None) -> str:
+    """
+    Italic panel subtitle: **Rig** language, real hostname, 1960s CB/HAM/VOX flavor when Gemma is off
+    or unreachable.
+    """
+    h = (hostname or "").strip() or get_startup_hostname()
+    if len(h) > 56:
+        h = h[:53] + "…"
+    return (
+        f"Rig on station at {h}  ·  PTT & VOX  ·  loopback  ·  "
+        f"1960s base-station copy, you key, stack in the loop"
+    )
+
+
 def _hsv(h: float, s: float, v: float) -> tuple[int, int, int]:
     r, g, b = colorsys.hsv_to_rgb(h % 1.0, s, v)
     return (int(r * 255), int(g * 255), int(b * 255))
@@ -150,10 +175,10 @@ def build_voxium_banner(
     *, tagline: str | None = None, content_width: int | None = None
 ) -> Group:
     # Radio box: PTT & VOX, rig, shack; robotics: inference stack (see docs/brand.md).
-    line = tagline if tagline is not None else random.choice(_BANNER_TAGLINES)
-    top = Text(
-        "  PTT & VOX box — VOX in, text out · shack, no uplink", style="dim #64748b"
-    )
+    # ``tagline`` from the optional Gemma pass (``--ux-chatter``) wins; empty/whitespace → static pool.
+    t = (tagline or "").strip()
+    line = t if t else random.choice(_BANNER_TAGLINES)
+    top = Text("  PTT & VOX Speech-to-Text for Terminal Input", style="dim #64748b")
     rule1 = _rule_text(content_width)
     parts: list[Text | str] = [top, "\n", rule1, "\n", _build_voxium_block()]
     parts.append("\n")
@@ -162,18 +187,21 @@ def build_voxium_banner(
     return Group(*parts)
 
 
-def show_startup_banner(console: Console) -> None:
+def show_startup_banner(
+    console: Console,
+    *,
+    tagline: str | None = None,
+    rig_subtitle: str | None = None,
+) -> None:
     w = voxium_panel_width(console)
     # Border 2 + horizontal padding 1+1 — same inner width as transcribe/PTT panels (app.py).
     inner_w = max(4, w - 4)
+    sub = (rig_subtitle or "").strip() or default_rig_subtitle(get_startup_hostname())
     panel = Panel(
-        build_voxium_banner(content_width=inner_w),
+        build_voxium_banner(content_width=inner_w, tagline=tagline),
         title=Text("Voxium", style="bold rgb(34,211,238)"),
         title_align="left",
-        subtitle=Text(
-            "Rig on station  ·  PTT & VOX  ·  loopback  ·  you key, stack in the loop",
-            style="italic dim #94a3b8",
-        ),
+        subtitle=Text(sub, style="italic dim #94a3b8"),
         subtitle_align="left",
         border_style="rgb(6,182,212)",
         padding=(0, 1),

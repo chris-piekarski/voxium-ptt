@@ -118,9 +118,22 @@ def test_run_slash_models_shows_transcribe_and_polish_in_status() -> None:
         polish_model=DEFAULT_TRUSTED_POLISH_MODEL_ID,
         polish_enabled=True,
     )
-    assert "active base" in out.text
+    assert "this run: base" in out.text
+    assert "product default: small.en" in out.text
     assert "Re-encode: on" in out.text
     assert DEFAULT_TRUSTED_POLISH_MODEL_ID in out.text
+
+
+def test_run_slash_models_shows_pinned_config_vs_product_default() -> None:
+    out = run_slash_line(
+        "/models",
+        session_model="tiny",
+        file_config={"transcription": {"model": "tiny"}},
+    )
+    assert "this run: tiny" in out.text
+    assert "config: tiny" in out.text
+    assert "product default: small.en" in out.text
+    assert "transcription.model" in out.text
 
 
 def test_run_slash_models_select_sets_result() -> None:
@@ -239,7 +252,7 @@ def test_run_slash_health_formats_server_readiness() -> None:
     }
     out = run_slash_line("/health", server_health=health)
     assert "Loopback server health:" in out.text
-    assert "transcriber base" in out.text
+    assert "server booted with base" in out.text
     assert "GPU metrics: on (pynvml)" in out.text
     assert "re-encode default: off" in out.text
     assert "llama.cpp: reachable yes" in out.text
@@ -444,11 +457,14 @@ def test_format_health_report_polish_and_faster_whisper() -> None:
     h = {
         "status": "ok",
         "model": "m",
+        "startup_model": "m",
         "device": "d",
         "compute": "c",
         "timeout_seconds": 5,
         "vad_enabled": True,
         "model_repo": "r/w",
+        "startup_model_repo": "r/w",
+        "loaded_transcribe_models": ["m", "small.en"],
         "gpu_metrics_enabled": False,
         "gpu_metrics_unavailable_reason": "no cuda",
         "polish_backend_default": "llama.cpp",
@@ -461,12 +477,15 @@ def test_format_health_report_polish_and_faster_whisper() -> None:
         "polish_keep_alive_default": "10m",
         "faster_whisper": {"version": "1.2.3"},
     }
-    t = format_health_report(h)
+    t = format_health_report(h, session_model="small.en")
     assert "re-encode" in t
     assert "sleeping" in t
     assert "1.2.3" in t
     assert "no cuda" in t
     assert "r/w" in t
+    assert "server booted with m" in t
+    assert "transcribe loaded: m, small.en" in t
+    assert "transcribe this client: small.en" in t
 
 
 def test_wrap_telemetry_block_breaks_long_lines() -> None:
