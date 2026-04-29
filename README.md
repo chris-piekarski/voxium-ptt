@@ -40,7 +40,7 @@ make start         # same as: .venv/bin/voxium run
 
 If **`.venv` was created on Windows** (it has `Scripts\` / `Lib\`, not `bin/`), `make install` will fail in WSL. Remove that folder from **Windows** or a working shell, then run `make install` again in WSL, **or** keep a separate Linux venv and point Make at it: `make install VENV=.venv-wsl` (and the same `VENV=...` for `make install-dev`, `make lint`, `make test`). The pattern `.venv-*/` is gitignored.
 
-**Developers:** `make install-dev`, `make lint`, `make test`, `make test-cov` (coverage gate; see [docs/testing.md](docs/testing.md)). Full documentation, diagrams, and package layout: **[docs/README.md](docs/README.md)**.
+**Developers:** `make install-dev`, `make lint`, `make test`, `make test-cov` (coverage gate; see [docs/testing.md](docs/testing.md)). The dev install now includes **`py-spy`**, which is the preferred first-pass profiler for Voxium; see [docs/profiling.md](docs/profiling.md). Full documentation, diagrams, and package layout: **[docs/README.md](docs/README.md)**.
 
 **Optional:** `make start TT_ARGS="--server-device cpu"` passes extra flags to `voxium run` (same as typing them after `voxium run`).
 
@@ -50,7 +50,7 @@ If **`.venv` was created on Windows** (it has `Scripts\` / `Lib\`, not `bin/`), 
 
 ## Windows (PowerShell; no Make)
 
-On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`** entry point. After `pip install -e .` and `pip install -e ".[dev]"` for development:
+On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`** entry point. After `pip install -e .` and `pip install -e ".[dev]"` for development (includes **`py-spy`** for profiling):
 
 | Linux `make` target | Equivalent (venv activated) |
 |---------------------|----------------------------|
@@ -77,6 +77,8 @@ voxium run        # or: voxium  /  python -m voxium
 **Windows (simplest):** from the repo root, run **`scripts\windows\Setup-Voxium.cmd`**. That creates the venv, installs Voxium, checks `sounddevice`, and provisions the repo-local polish runtime/model. Then run **`voxium run`** with the venv activated, or `scripts\windows\Voxium.cmd run`.
 
 Install **Linux** packages for paste + audio as above before running. On **Windows**, see the table above for dev commands.
+
+For maintainer profiling, prefer **`py-spy`** on the same OS as the running Voxium process; see [docs/profiling.md](docs/profiling.md).
 
 ## Config
 

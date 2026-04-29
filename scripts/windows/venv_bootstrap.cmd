@@ -59,6 +59,7 @@ if errorlevel 1 (echo [ERROR] pip install -e . failed. See %LOG%&goto :epicfail)
 echo.
 echo OK: venv + install finished. Log: %LOG%
 echo Next: scripts\windows\Setup-Voxium.cmd
+echo Maintainers: .venv\Scripts\python.exe -m pip install -e ".[dev]" adds py-spy and the full dev toolchain.
 echo.
 pause
 exit /b 0

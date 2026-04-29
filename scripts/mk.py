@@ -130,7 +130,10 @@ def cmd_install(root: Path, venvd: Path, python: str) -> int:
         [str(pip), "install", "-e", str(root)],
         check=True,
     )
-    print(f"Install complete. Run: make start  (or: {voxium_bin} run)")
+    print(
+        f"Install complete. Run: make start  (or: {voxium_bin} run). "
+        "Maintainers: make install-dev adds py-spy and the rest of the dev toolchain."
+    )
     return 0
 
 

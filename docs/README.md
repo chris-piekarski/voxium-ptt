@@ -7,6 +7,7 @@ Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows 
 | [brand.md](brand.md) | **Brand voice:** HAM/CB-tinged *PTT* & **VOX** plus Apollo / uncharted-local-stack tone; where to use it. |
 | [architecture.md](architecture.md) | System context, major components, PTT and **VOX (open mic)** request flows, and current layout (with diagrams). |
 | [testing.md](testing.md) | Unit-test strategy, coverage **fail-under** in `pyproject.toml`, markers, and how to run `pytest` / `make test-cov`. |
+| [profiling.md](profiling.md) | Preferred maintainer profiling workflow: **`py-spy` first** on CPython, same-OS attach rules for Windows vs WSL, flamegraph capture. |
 | [repository-stats.md](repository-stats.md) | **LOC snapshot** of the tree (by area and `voxium` subpackages), with Mermaid `pie` diagrams; run `make repo-stats` to refresh. |
 | [llm-polish-plan.md](llm-polish-plan.md) | Design and implementation notes for the optional local **LLM polish** pass: STT text goes through a repo-local **llama.cpp** runtime (`llama-server` + GGUF model) on the loopback stack; Windows setup/bootstrap now provisions the runtime and default model into the repo. |
 | [radio-chatter-context.md](radio-chatter-context.md) | Optional **CB / HAM** phrasing reference for brand-adjacent copy (not legal or protocol guidance). |
@@ -23,6 +24,7 @@ Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows 
 - **Bootstrap provisioning** — `Setup-Voxium.cmd` / `voxium models --polish --pull-polish`: [architecture.md#32-bootstrap-and-local-polish-provisioning](architecture.md#32-bootstrap-and-local-polish-provisioning)
 - **Packaging & files** — `src/voxium` layout (incl. session UI, standby, slash): [architecture.md#4-repository-layout](architecture.md#4-repository-layout)
 - **Coverage & test layers** — unit vs integration, `src/voxium` fail-under, `scripts/` out of gate: [testing.md#2-test-layers](testing.md#2-test-layers)
+- **Profiling** — preferred maintainer workflow (`py-spy` first, CPython, same-OS attach): [profiling.md](profiling.md)
 - **Repository size** — code vs area / package (pies + tables): [repository-stats.md](repository-stats.md)
 - **LLM polish** — STT → optional local LLM, `llama-server`, GGUF model inventory, API sketch: [llm-polish-plan.md](llm-polish-plan.md)
 - **UX chatter** — Gemma on a **second** `llama-server` (same engine as polish), console-only, default on: [ux-chatter-gemma.md](ux-chatter-gemma.md)
