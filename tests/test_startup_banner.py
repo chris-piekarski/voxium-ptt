@@ -10,6 +10,11 @@ from voxium.startup_banner import (
 from rich.console import Console
 
 
+def test_merge_word_skips_unknown_characters() -> None:
+    """Characters not in ``_GLYPHS`` are skipped; no layers → empty result."""
+    assert _merge_word("123") == []
+
+
 def test_merge_voxium_five_rows() -> None:
     lines = _merge_word("VOXIUM")
     assert len(lines) == 5

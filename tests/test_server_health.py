@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 # Heavy imports: ctranslate2, etc.
 pytest.importorskip("ctranslate2", reason="Whisper server stack not installed")
@@ -26,13 +26,17 @@ def test_health_returns_ok_json() -> None:
     ws.stats = ws.ServerStats()
     ws.logger = ws.setup_logging("CRITICAL")
     ws.gpu_probe = ws.GpuProbe(False)
-    with TestClient(ws.app) as client:
-        r = client.get("/health")
-    assert r.status_code == 200
-    body = r.json()
+    body = ws.health()
     assert body["status"] == "ok"
     assert body["model"] == "base"
     assert "device" in body
+    assert body["polish_backend_default"] == "llama.cpp"
+    assert body["polish_default_model"] == "auto"
+    assert body["polish_enabled_default"] is True
+    assert "polish_keep_alive_default" in body
+    assert "polish_llama_cpp_reachable" in body
+    assert "polish_loaded_model" in body
+    assert "polish_model_loaded" in body
 
 
 def test_ensure_model_rejects_bad_id() -> None:
@@ -52,6 +56,6 @@ def test_ensure_model_rejects_bad_id() -> None:
     ws.stats = ws.ServerStats()
     ws.logger = ws.setup_logging("CRITICAL")
     ws.gpu_probe = ws.GpuProbe(False)
-    with TestClient(ws.app) as client:
-        r = client.post("/ensure-model", json={"model": "not-a-valid-model-name"})
-    assert r.status_code == 400
+    with pytest.raises(HTTPException) as excinfo:
+        ws.ensure_model_start(ws.EnsureModelBody(model="not-a-valid-model-name"))
+    assert excinfo.value.status_code == 400

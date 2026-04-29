@@ -86,13 +86,21 @@ from huggingface_hub import snapshot_download
 from pydantic import BaseModel
 from tqdm import tqdm
 
+from voxium.constants import env_polish_enabled_default
 from voxium.model_registry import (
     DEFAULT_MODEL_NAME,
     TRUSTED_MODEL_HELP,
     resolve_model_repo,
     validate_model_name,
 )
-from voxium.loopback import is_loopback_host, normalize_loopback_host
+from voxium.llama_cpp_client import (
+    llama_cpp_chat,
+    llama_cpp_loaded_model,
+    llama_cpp_reachable,
+)
+from voxium.loopback import is_loopback_host, is_loopback_url, normalize_loopback_host
+from voxium.polish_models import DEFAULT_POLISH_MODEL, validate_polish_model_tag
+from voxium.polish_provision import ensure_polish_model_downloaded
 from voxium.model_arg import trusted_model_arg
 from voxium.paths import ensure_runtime_dirs, models_dir
 
@@ -404,6 +412,14 @@ class ServerConfig:
     port: int
     gpu_metrics_enabled: bool
     metrics_sample_interval: float
+    llama_cpp_url: str = "http://127.0.0.1:11435"
+    polish_default_model: str = DEFAULT_POLISH_MODEL
+    polish_timeout_seconds: float = 25.0
+    polish_backend_default: str = "llama.cpp"
+    polish_enabled_default: bool = True
+    polish_keep_alive_default: str = "10m"
+    polish_warmup_on_start: bool = False
+    polish_max_concurrent: int = 2
 
 
 def _as_float(value) -> float | None:
@@ -1038,6 +1054,14 @@ stats: ServerStats = None
 config: ServerConfig = None
 logger: logging.Logger = None
 gpu_probe: GpuProbe = None
+_polish_semaphore: threading.BoundedSemaphore | None = None
+
+
+class PolishRequestBody(BaseModel):
+    text: str
+    model: str | None = None
+    backend: str | None = "llama.cpp"
+    keep_alive: str | int | None = None
 
 
 @app.exception_handler(Exception)
@@ -1100,7 +1124,7 @@ def _run_ensure_model_job(
 def health():
 
     device_info = get_actual_device()
-    return {
+    body: dict[str, Any] = {
         "status": "ok",
         "model": config.model,
         "model_repo": resolve_model_repo(config.model),
@@ -1119,6 +1143,27 @@ def health():
         "metrics_sample_interval_seconds": config.metrics_sample_interval,
         "faster_whisper": faster_whisper_distribution_info,
     }
+    ok_llama, reason_llama = llama_cpp_reachable(
+        config.llama_cpp_url,
+        timeout=min(1.0, max(0.1, config.polish_timeout_seconds / 5)),
+    )
+    loaded_model: str | None = None
+    if ok_llama:
+        loaded_model = llama_cpp_loaded_model(config.llama_cpp_url, timeout=1.0)
+    body.update(
+        {
+            "polish_backend_default": config.polish_backend_default,
+            "polish_enabled_default": config.polish_enabled_default,
+            "polish_default_model": config.polish_default_model,
+            "polish_timeout_seconds": config.polish_timeout_seconds,
+            "polish_keep_alive_default": config.polish_keep_alive_default,
+            "polish_llama_cpp_reachable": ok_llama,
+            "polish_llama_cpp_reachable_reason": reason_llama,
+            "polish_loaded_model": loaded_model,
+            "polish_model_loaded": loaded_model is not None,
+        }
+    )
+    return body
 
 
 @app.post("/ensure-model")
@@ -1220,6 +1265,164 @@ def get_gpu_snapshot():
             },
         )
     return {"gpu": gpu_metrics_dict_from_probe_snapshot(snap, gpu_probe.provider)}
+
+
+@app.post("/polish")
+def polish_endpoint(body: PolishRequestBody):
+
+    t_handler0 = time.perf_counter()
+    if config is None:
+        raise HTTPException(503, "Voxium: server not ready")
+    raw = (body.text or "").strip()
+    if not raw:
+        raise HTTPException(400, "Voxium: polish text is empty, copy.")
+    backend = (body.backend or "llama.cpp").strip().lower()
+    if backend != "llama.cpp":
+        raise HTTPException(
+            400, f"Voxium: unknown polish backend {body.backend!r}, copy."
+        )
+    if not is_loopback_url(config.llama_cpp_url):
+        raise HTTPException(500, "Voxium: llama.cpp URL must be loopback http, copy.")
+    m = (body.model or config.polish_default_model or "").strip()
+    if not m:
+        raise HTTPException(400, "Voxium: polish model is required, copy.")
+    try:
+        requested_model = validate_polish_model_tag(m)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    t_ensure0 = time.perf_counter()
+    try:
+        resolved_model = ensure_polish_model_downloaded(model_name=requested_model)
+    except RuntimeError as e:
+        err = str(e)
+        prep = round(time.perf_counter() - t_ensure0, 4)
+        return {
+            "text": raw,
+            "text_raw": raw,
+            "polish": {
+                "enabled": True,
+                "attempted": True,
+                "applied": False,
+                "model": requested_model,
+                "backend": backend,
+                "seconds": 0.0,
+                "prepare_seconds": prep,
+                "handler_seconds": round(time.perf_counter() - t_handler0, 4),
+                "tokens_in": None,
+                "tokens_out": None,
+                "error": err,
+            },
+            "metrics": {
+                "polish": {
+                    "model": requested_model,
+                    "backend": backend,
+                    "seconds": 0.0,
+                    "prepare_seconds": prep,
+                    "handler_seconds": round(time.perf_counter() - t_handler0, 4),
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "total_tokens": None,
+                    "error": err,
+                }
+            },
+        }
+
+    prepare_seconds = round(time.perf_counter() - t_ensure0, 4)
+    sem = _polish_semaphore
+    if sem is None:
+        raise HTTPException(503, "Voxium: polish capacity not initialized, copy.")
+    try:
+        acquired = sem.acquire(blocking=False)
+    except Exception:
+        acquired = False
+    if not acquired:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "polish_saturated",
+                "detail": "Too many concurrent /polish requests — try again shortly, copy.",
+            },
+        )
+    try:
+        res = llama_cpp_chat(
+            config.llama_cpp_url,
+            resolved_model.name,
+            raw,
+            timeout=float(config.polish_timeout_seconds),
+        )
+    finally:
+        try:
+            sem.release()
+        except ValueError:
+            pass
+
+    handler_seconds = round(time.perf_counter() - t_handler0, 4)
+    if res.ok and (res.text or "").strip():
+        out_text = res.text.strip()
+        pol = {
+            "enabled": True,
+            "attempted": True,
+            "applied": True,
+            "model": resolved_model.name,
+            "backend": backend,
+            "seconds": round(res.seconds, 4),
+            "prepare_seconds": prepare_seconds,
+            "handler_seconds": handler_seconds,
+            "tokens_in": res.prompt_tokens,
+            "tokens_out": res.completion_tokens,
+            "total_tokens": res.total_tokens,
+            "error": None,
+        }
+        metrics_pol = {
+            "model": resolved_model.name,
+            "backend": backend,
+            "seconds": pol["seconds"],
+            "prepare_seconds": prepare_seconds,
+            "handler_seconds": handler_seconds,
+            "prompt_tokens": res.prompt_tokens,
+            "completion_tokens": res.completion_tokens,
+            "total_tokens": res.total_tokens,
+        }
+        return {
+            "text": out_text,
+            "text_raw": raw,
+            "polish": pol,
+            "metrics": {"polish": metrics_pol},
+        }
+
+    err = (res.error or "polish failed") if not res.ok else "empty model output"
+    pol = {
+        "enabled": True,
+        "attempted": True,
+        "applied": False,
+        "model": resolved_model.name,
+        "backend": backend,
+        "seconds": round(res.seconds, 4),
+        "prepare_seconds": prepare_seconds,
+        "handler_seconds": handler_seconds,
+        "tokens_in": res.prompt_tokens,
+        "tokens_out": res.completion_tokens,
+        "total_tokens": res.total_tokens,
+        "error": err,
+    }
+    return {
+        "text": raw,
+        "text_raw": raw,
+        "polish": pol,
+        "metrics": {
+            "polish": {
+                "model": resolved_model.name,
+                "backend": backend,
+                "seconds": pol["seconds"],
+                "prepare_seconds": prepare_seconds,
+                "handler_seconds": handler_seconds,
+                "prompt_tokens": res.prompt_tokens,
+                "completion_tokens": res.completion_tokens,
+                "total_tokens": res.total_tokens,
+                "error": err,
+            }
+        },
+    }
 
 
 @app.post("/transcribe")
@@ -1407,7 +1610,7 @@ def handle_shutdown(_signum, _frame):
 
 
 def main(argv: list[str] | None = None):
-    global config, logger, stats, gpu_probe
+    global config, logger, stats, gpu_probe, _polish_semaphore
 
     parser = argparse.ArgumentParser(
         description="Voxium transcription server (faster-whisper) — internal / diagnostics use; normally started by voxium run.",
@@ -1475,9 +1678,62 @@ Examples:
         default="INFO",
         help="Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)",
     )
+    parser.add_argument(
+        "--llama-cpp-url",
+        default=(
+            os.getenv("VOXIUM_LLAMA_CPP_URL")
+            or os.getenv("VOXIUM_OLLAMA_URL")
+            or "http://127.0.0.1:11435"
+        ),
+        help="Loopback URL for llama.cpp (default: http://127.0.0.1:11435)",
+    )
+    parser.add_argument(
+        "--polish-default-model",
+        default=os.getenv("VOXIUM_POLISH_MODEL", DEFAULT_POLISH_MODEL),
+        metavar="MODEL",
+        help=f"Default GGUF model selector for /polish (default: {DEFAULT_POLISH_MODEL})",
+    )
+    parser.add_argument(
+        "--polish-timeout",
+        type=float,
+        default=float(os.getenv("VOXIUM_POLISH_TIMEOUT", "25")),
+        help="Per-/polish timeout in seconds (default: 25)",
+    )
+    parser.add_argument(
+        "--polish-enabled-by-default",
+        action=argparse.BooleanOptionalAction,
+        default=env_polish_enabled_default(),
+        help="Health hint: default on for client re-encode (default: on; VOXIUM_POLISH_ENABLED=0 to opt out)",
+    )
+    parser.add_argument(
+        "--polish-keep-alive",
+        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "10m"),
+        help="Default llama.cpp idle unload window for /polish telemetry (default: 10m)",
+    )
+    parser.add_argument(
+        "--polish-warmup-on-start",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("VOXIUM_POLISH_WARMUP", "").lower()
+        in ("1", "true", "yes"),
+        help="Minimal llama.cpp chat at startup to warm the polish model",
+    )
+    parser.add_argument(
+        "--polish-max-concurrent",
+        type=int,
+        default=int(os.environ.get("VOXIUM_POLISH_MAX_CONCURRENT", "2")),
+        help="Max concurrent /polish requests (default: 2)",
+    )
     args = parser.parse_args(argv)
     try:
         args.model = validate_model_name(args.model)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not is_loopback_url(args.llama_cpp_url):
+        parser.error(
+            "llama-cpp-url must be http loopback (127.0.0.1, localhost, or ::1)"
+        )
+    try:
+        args.polish_default_model = validate_polish_model_tag(args.polish_default_model)
     except ValueError as exc:
         parser.error(str(exc))
     if not is_loopback_host(args.host):
@@ -1498,7 +1754,15 @@ Examples:
         port=args.port,
         gpu_metrics_enabled=not args.no_gpu_metrics,
         metrics_sample_interval=max(0.05, args.metrics_sample_interval),
+        llama_cpp_url=args.llama_cpp_url,
+        polish_default_model=args.polish_default_model,
+        polish_timeout_seconds=max(1.0, float(args.polish_timeout)),
+        polish_enabled_default=bool(args.polish_enabled_by_default),
+        polish_keep_alive_default=str(args.polish_keep_alive or "10m"),
+        polish_warmup_on_start=bool(args.polish_warmup_on_start),
+        polish_max_concurrent=max(1, int(args.polish_max_concurrent)),
     )
+    _polish_semaphore = threading.BoundedSemaphore(config.polish_max_concurrent)
     gpu_probe = GpuProbe(config.gpu_metrics_enabled)
 
     signal.signal(signal.SIGTERM, handle_shutdown)
@@ -1530,8 +1794,40 @@ Examples:
         logger.error(f"Voxium: failed to load model: {e}")
         sys.exit(1)
 
+    if config.polish_warmup_on_start:
+        ok_l, lmsg = llama_cpp_reachable(
+            config.llama_cpp_url,
+            timeout=min(3.0, max(0.5, config.polish_timeout_seconds)),
+        )
+        if ok_l:
+            try:
+                warm_model = ensure_polish_model_downloaded(
+                    model_name=config.polish_default_model
+                ).name
+            except (ValueError, RuntimeError) as exc:
+                logger.warning("Voxium: polish warmup skipped: %s", exc)
+            else:
+                w = llama_cpp_chat(
+                    config.llama_cpp_url,
+                    warm_model,
+                    "warmup",
+                    timeout=min(20.0, max(2.0, config.polish_timeout_seconds)),
+                    temperature=0.0,
+                    max_tokens=1,
+                )
+                if w.ok:
+                    logger.info(
+                        "Voxium: polish llama.cpp warmup copy — model primed, copy."
+                    )
+                else:
+                    logger.warning("Voxium: polish warmup skipped: %s", w.error)
+        else:
+            logger.warning(
+                "Voxium: llama.cpp not reachable for polish warmup: %s", lmsg
+            )
+
     logger.info(
-        "Voxium: server on station — /transcribe open for traffic (roger, copy)"
+        "Voxium: server on station — /transcribe and /polish open for traffic (roger, copy)"
     )
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

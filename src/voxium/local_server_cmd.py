@@ -17,6 +17,13 @@ class LocalServerLaunchConfig:
     server_compute: str | None
     server_vad: bool
     server_gpu_metrics: bool
+    llama_cpp_url: str = "http://127.0.0.1:11435"
+    polish_default_model: str | None = None
+    polish_timeout: float = 25.0
+    polish_enabled_by_default: bool = True
+    polish_keep_alive: str = "10m"
+    polish_warmup_on_start: bool = False
+    polish_max_concurrent: int = 2
 
 
 def argv_after_interpreter(
@@ -53,4 +60,18 @@ def argv_after_interpreter(
         cmd.append("--no-vad")
     if not cfg.server_gpu_metrics:
         cmd.append("--no-gpu-metrics")
+    cmd.extend(["--llama-cpp-url", cfg.llama_cpp_url])
+    if cfg.polish_default_model:
+        cmd.extend(["--polish-default-model", cfg.polish_default_model])
+    cmd.extend(["--polish-timeout", str(cfg.polish_timeout)])
+    if cfg.polish_enabled_by_default:
+        cmd.append("--polish-enabled-by-default")
+    else:
+        cmd.append("--no-polish-enabled-by-default")
+    cmd.extend(["--polish-keep-alive", cfg.polish_keep_alive])
+    if cfg.polish_warmup_on_start:
+        cmd.append("--polish-warmup-on-start")
+    else:
+        cmd.append("--no-polish-warmup-on-start")
+    cmd.extend(["--polish-max-concurrent", str(cfg.polish_max_concurrent)])
     return cmd

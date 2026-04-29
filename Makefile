@@ -34,12 +34,12 @@ install: ## Create venv and pip install -e . (installs .venv/bin/voxium)
 uninstall: ## Remove .venv, all *.egg-info, and .dev-install-stamp (undoes: make install, make install-dev)
 	@"$(PYTHON)" "$(MKPY)" uninstall --root "$(ROOT)" --venvd "$(VENVDIR)" --dev-stamp "$(DEV_STAMP)"
 
-clean: ## Remove tool caches, __pycache__, build/dist, coverage, root *.egg-info (keeps .venv/.dev-install-stamp)
+clean: ## Remove tool caches, __pycache__, build/dist, coverage, root *.egg-info, tools/llama.cpp (keeps .venv/.dev-install-stamp)
 	@"$(PYTHON)" "$(MKPY)" clean --root "$(ROOT)" --venvd "$(VENVDIR)" --dev-stamp "$(DEV_STAMP)"
 
 ##@ Info
 
-disk-usage: ## Show disk usage for models/ and logs/ in the repo
+disk-usage: ## Show disk usage for models/, logs/, and tools/llama.cpp in the repo
 	@"$(PYTHON)" "$(MKPY)" disk-usage --root "$(ROOT)" --venvd "$(VENVDIR)" --dev-stamp "$(DEV_STAMP)"
 
 mic-info: ## Print default mic, host APIs, and all PortAudio / sounddevice devices

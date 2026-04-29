@@ -1,7 +1,11 @@
 """Unit tests for on-station standby (local + Zulu, FFT strip, path, tail)."""
 
 from voxium.standby_fft import SPECTRUM_BARS, SPECTRUM_DISPLAY_WIDTH
-from voxium.standby_telemetry import build_standby_detail_line
+from voxium.standby_telemetry import (
+    _format_path_brief,
+    _tail_from_context,
+    build_standby_detail_line,
+)
 
 _FAKE_SPEC = "▁" * 4 + "▆" * 4 + "▇" * 8 + "▃" * 16  # 32
 
@@ -68,3 +72,40 @@ def test_decode_tail_shows_level_not_redundant_audio_duration() -> None:
     assert "RMS -28" in s.plain
     assert "audio in" not in s.plain
     assert "9.99" not in s.plain
+
+
+def test_path_brief_falls_back_on_non_numeric_durations() -> None:
+    s = _format_path_brief(
+        {
+            "last_ptt_wall_s": "nope",
+            "last_ptt_audio_s": "bad",
+        }
+    )
+    assert "kHz" in s and "PTT" in s
+
+
+def test_path_brief_same_key_and_wire_hides_key() -> None:
+    s = _format_path_brief(
+        {
+            "last_ptt_wall_s": 1.0,
+            "last_ptt_audio_s": 1.05,
+        }
+    )
+    assert "1.1s on wire" in s and "key" not in s
+
+
+def test_tail_partial_decode_without_metrics() -> None:
+    t = _tail_from_context({"has_last_decode": True})
+    assert "partial" in t
+
+
+def test_tail_skips_non_numeric_metrics() -> None:
+    t = _tail_from_context(
+        {
+            "has_last_decode": True,
+            "last_realtime_factor": "nope",
+            "last_capture_peak": "bad",
+            "last_capture_rms_dbfs": "x",
+        }
+    )
+    assert "partial" in t

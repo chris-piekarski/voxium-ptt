@@ -46,7 +46,7 @@ If **`.venv` was created on Windows** (it has `Scripts\` / `Lib\`, not `bin/`), 
 
 **Repo snapshot:** `make repo-stats` regenerates [docs/repository-stats.md](docs/repository-stats.md) (line counts and Mermaid pie charts; uses system `python3`, not the venv).
 
-**Cleanup:** `make clean` (tool caches, `__pycache__`, coverage, root `*.egg-info`; keeps `.venv` and `.dev-install-stamp`), `make uninstall` (removes `.venv`, `.dev-install-stamp`, root `*.egg-info`), `make disk-usage` (size of `models/` and `logs/` under the repo).
+**Cleanup:** `make clean` (tool caches, `__pycache__`, coverage, root `*.egg-info`, and `tools/llama.cpp/` for the local polish runtime; keeps `.venv` and `.dev-install-stamp`), `make uninstall` (removes `.venv`, `.dev-install-stamp`, root `*.egg-info`), `make disk-usage` (size of `models/`, `logs/`, and `tools/llama.cpp/` under the repo).
 
 ## Windows (PowerShell; no Make)
 
@@ -60,9 +60,9 @@ On Windows, **do not rely on the Makefile** — use a venv, then the **`voxium`*
 | `make test` | `python -m pytest tests` |
 | `make test-cov` | run `pytest` with the same options as in [docs/testing.md](docs/testing.md) and `pyproject.toml` (pytest-cov) |
 | `make repo-stats` | `python3 scripts/generate_repo_stats.py` to refresh [docs/repository-stats.md](docs/repository-stats.md) |
-| `make disk-usage` | show sizes of `models/`, `logs/` under the repo (or use your shell’s `du`) |
+| `make disk-usage` | show sizes of `models/`, `logs/`, `tools/llama.cpp/` under the repo (or use your shell’s `du`) |
 
-**Convenience (from a clone):** run **`scripts\windows\Setup-Voxium.cmd`** once, then start the app with **`Voxium.cmd` in the repository root** (next to `pyproject.toml`) — that file calls `scripts\windows\Voxium.cmd` with the correct folder. If you need a shortcut in the **parent** of the clone (e.g. `Desktop\WSL-Workspaces\` with the repo in `WSL-Workspaces\voxium\`), use **`scripts\windows\Voxium-From-Parent-Folder.cmd`** there — do **not** copy `scripts\windows\Voxium.cmd` alone; it will `cd` to the wrong directory. The app sets a short window/tab title (override with `VOXIUM_WINDOW_TITLE` if needed).
+**Convenience (from a clone):** run **`scripts\windows\Setup-Voxium.cmd`** once, then start the app with **`Voxium.cmd` in the repository root** (next to `pyproject.toml`) — that file calls `scripts\windows\Voxium.cmd` with the correct folder. Setup now provisions the repo-local **`llama.cpp`** runtime and default **GGUF** polish model by default; pass **`-SkipPolish`** only if you want the STT path without the optional local polish stack. If you need a shortcut in the **parent** of the clone (e.g. `Desktop\WSL-Workspaces\` with the repo in `WSL-Workspaces\voxium\`), use **`scripts\windows\Voxium-From-Parent-Folder.cmd`** there — do **not** copy `scripts\windows\Voxium.cmd` alone; it will `cd` to the wrong directory. The app sets a short window/tab title (override with `VOXIUM_WINDOW_TITLE` if needed).
 
 ## Install (pip, no Make)
 
@@ -74,7 +74,7 @@ pip install -e .
 voxium run        # or: voxium  /  python -m voxium
 ```
 
-**Windows (simplest):** from the repo root, run **`scripts\windows\Setup-Voxium.cmd`**, then **`voxium run`** with the venv activated, or `scripts\windows\Voxium.cmd run`.
+**Windows (simplest):** from the repo root, run **`scripts\windows\Setup-Voxium.cmd`**. That creates the venv, installs Voxium, checks `sounddevice`, and provisions the repo-local polish runtime/model. Then run **`voxium run`** with the venv activated, or `scripts\windows\Voxium.cmd run`.
 
 Install **Linux** packages for paste + audio as above before running. On **Windows**, see the table above for dev commands.
 
@@ -86,11 +86,21 @@ If the file is missing, Voxium uses CLI defaults (see `voxium run --help`). Exam
 
 ```yaml
 transcription:
-  model: base
+  model: small.en
   language: null
+  polish_enabled: true
+  polish_model: auto
 server:
   device: cuda
   compute: float16
+  # When polish is enabled, Voxium starts a local `llama-server` if needed.
+  # `Setup-Voxium.cmd` or `voxium models --polish --pull-polish` provisions
+  # the repo-local runtime under tools/llama.cpp and the default GGUF model under models/polish.
+  llama_cpp_url: http://127.0.0.1:11435
+  llama_cpp_auto_start: true
+  llama_cpp_cmd: null
+  llama_cpp_gpu_layers: auto
+  llama_cpp_ctx_size: 0
 hotkeys:
   record: f9
   recovery: f8
@@ -100,6 +110,10 @@ history:
   limit: 100
   max_total_chars: 512000
   pending_audio_max_mib: 32
+ui:
+  # Default false: ``/`` command input only when this terminal window is focused (not other apps).
+  # Set true or use ``voxium run --slash-global`` to restore system-wide ``/`` like older builds.
+  slash_global: false
 ```
 
 ## Run
@@ -112,9 +126,11 @@ voxium --server-device cpu
 ```
 
 - **F9 (default):** start/stop recording and transcribe; **F7:** toggle **PTT** (push-to-talk) vs **VOX** (open mic with utterance gating); **F8:** cycle replay of transcripts; **F6 (default):** re-transmit last pending in-RAM capture.
+- **`/…` command line:** with the default ``ui.slash_global: false`` (or ``--no-slash-global``), the leading ``/`` only opens the command bar when **this terminal** is the focused window (Windows and Linux X11 with ``$WINDOWID`` + ``xdotool``; **macOS** and **Wayland** best-effort may still allow ``/`` anywhere until we add a tighter check). Once the command bar is open, Voxium keeps accepting the command so brief focus-probe misses do not drop `/help` mid-type. Use ``--slash-global`` or ``VOXIUM_SLASH_GLOBAL=1`` to match legacy behavior.
 - **Transcript log:** session-only, in process RAM (bounded: `--history-limit`, `--history-max-chars`); use **`/history`** in the downlink to list, **`/history <n>`** to expand, **`/history copy <n>`** to put one line on the system clipboard.
 - **Local data (same paths on all platforms):** `models/` (Hugging Face downloads for faster-whisper), `logs/` (server log, client lock). Override the project root with `VOXIUM_REPO_ROOT` if needed. The server log defaults to `logs/voxium_server.log` (or `--server-log-file`).
 - **Health:** `voxium health`, `voxium stats`; foreground server: `voxium server --help`.
+- **Re-encode (local GGUF, default on):** By default, Voxium runs a local `llama.cpp` second pass after STT. Use `voxium run --no-polish` or `transcription.polish_enabled: false` in config to skip it. Voxium probes or starts a local `llama-server`, serves GGUF models from `models/polish`, uses a repo-local runtime under `tools/llama.cpp` when present, and shuts down only the `llama-server` process it launched. Use `voxium models` for the two-lane summary, `voxium models transcribe installed` for downloaded STT models, `voxium models polish list` for trusted re-encoder ids plus installed local GGUF selectors, and `voxium models --polish --pull-polish` to provision the default repo-local runtime/model bundle.
 
 Voxium only uses a **local loopback** HTTP server for transcription.
 
@@ -135,8 +151,9 @@ systemctl --user enable --now voxium
 
 - **Windows: `Voxium.cmd` / `Setup-Voxium.cmd` says `pyproject.toml not found` or paths look wrong:** the launchers **must stay** in `scripts\windows\` inside your clone. Do **not** copy only `Voxium.cmd` to the Desktop or another folder — the script finds the repo by going **up two levels** from its own file. Run **`scripts\windows\Setup-Voxium.cmd` once** from Explorer (double-click) only when that file lives under your Voxium repository. If the repo is under **OneDrive** and installs fail with file locks, clone to e.g. `C:\src\voxium` or pause OneDrive sync for that folder.
 - **Windows: still broken after setup:** run **`scripts\windows\Diagnose-Voxium.cmd`**. It writes **`%TEMP%\voxium-diagnose.log`**, shows Python / venv / `import voxium` / `import sounddevice`, and opens the log in Notepad. Share that file if you need help. Setup also leaves **`logs\voxium-windows-setup.log`** and **`logs\pip-editable-install.log`** in the repo.
-- **`No pyvenv.cfg file` (or Activate.ps1 not found):** the **`.venv` is invalid** — often a **WSL-created** venv used on **Windows**, or an incomplete copy. In **cmd** or PowerShell from the repo root, remove the folder: `rmdir /s /q .venv` (cmd) or `Remove-Item -Recurse -Force .venv` (PowerShell), then run **`scripts\windows\Recreate-Windows-Venv.cmd`** or full **`scripts\windows\Setup-Voxium.cmd`**. After a good venv, `.\.venv\Scripts\python.exe -m pip ...` works (no second `python` after `.exe`).
-- **`ModuleNotFoundError: No module named 'voxium'`** (including when running `voxium` or `python -m voxium`): the package is not installed into that Python environment. From the **repository root** (the folder that contains `pyproject.toml` and `src/voxium/`), install the project in editable mode (PowerShell or cmd):
+- **Polish runtime/model missing after setup:** rerun **`.\.venv\Scripts\python.exe -m voxium models --polish --pull-polish`** from the repo root. Then check **`.\.venv\Scripts\python.exe -m voxium models polish list`** to confirm the trusted ids and installed local GGUF selectors. Setup provisions the repo-local `llama-server` runtime under `tools\llama.cpp` and the default GGUF model under `models\polish`. If you intentionally skipped this during setup, rerun `scripts\windows\Setup-Voxium.cmd` without `-SkipPolish`.
+- **`No pyvenv.cfg file` (or Activate.ps1 not found):** the **`.venv` is invalid** — often a **WSL-created** venv used on **Windows**, or an incomplete copy. **Launching** with **`Voxium.cmd`** (repo or `scripts\windows\`) will run **`Setup-Voxium.ps1 -SkipPolish`** once to repair (set **`VOXIUM_NO_AUTO_SETUP=1`** to skip auto-repair and only show manual steps). Or remove the folder: `rmdir /s /q .venv` (cmd) or `Remove-Item -Recurse -Force .venv` (PowerShell), then run **`scripts\windows\Recreate-Windows-Venv.cmd`** or **`scripts\windows\Setup-Voxium.cmd`**. After a good venv, `.\.venv\Scripts\python.exe -m pip ...` works (no second `python` after `.exe`).
+- **`No module named 'voxium'`** (including `ModuleNotFoundError`): the editable install is missing in **`.venv`**. **`Voxium.cmd`** will run setup for you unless **`VOXIUM_NO_AUTO_SETUP=1`**. Or from the **repository root**, install the project in editable mode (PowerShell or cmd):
   ```text
   .\.venv\Scripts\python -m pip install -U pip setuptools wheel
   .\.venv\Scripts\python -m pip install -e .
@@ -155,8 +172,9 @@ systemctl --user enable --now voxium
 
 1. **pynput** — global hotkeys  
 2. **sounddevice** — microphone  
-3. **faster-whisper** (local HTTP worker) — transcription  
-4. **pyperclip + OS tools** — paste
+3. **faster-whisper** (local HTTP worker) — transcription on loopback  
+4. **llama.cpp** (optional, default on) — local `llama-server` re-encode pass after STT when **polish** is enabled; falls back to raw text if the runtime is missing or errors  
+5. **pyperclip + OS tools** — paste
 
 ## License
 

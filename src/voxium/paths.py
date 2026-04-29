@@ -25,6 +25,25 @@ def models_dir() -> Path:
     return repo_root() / "models"
 
 
+def polish_models_dir() -> Path:
+    """Repository-local GGUF polish models."""
+    return models_dir() / "polish"
+
+
+def ollama_models_dir() -> Path:
+    """Backward-compatible alias; the polish path now uses local GGUF files."""
+    return polish_models_dir()
+
+
+def tools_dir() -> Path:
+    return repo_root() / "tools"
+
+
+def llama_cpp_dir() -> Path:
+    """Repository-local llama.cpp runtime directory."""
+    return tools_dir() / "llama.cpp"
+
+
 def logs_dir() -> Path:
     return repo_root() / "logs"
 
@@ -38,5 +57,5 @@ def instance_lock_path() -> Path:
 
 
 def ensure_runtime_dirs() -> None:
-    for d in (models_dir(), logs_dir()):
+    for d in (models_dir(), polish_models_dir(), llama_cpp_dir(), logs_dir()):
         d.mkdir(parents=True, exist_ok=True)

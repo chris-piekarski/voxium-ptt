@@ -203,6 +203,56 @@ def format_downlink_title(subtitle: str) -> str:
     return f"[bold #a78bfa]Downlink[/] [dim]· {subtitle}[/]"
 
 
+def build_polish_slash_ensure_downlink_panel(
+    console: Console,
+    *,
+    command_line: str,
+    result_text: str,
+    result_rich: Text | None,
+    hf_status_line: str,
+) -> Panel:
+    """
+    One violet frame: slash command + static result + **one** HF / stack status line (Live-updated).
+    """
+    w = voxium_panel_width(console)
+    inner = max(20, w - 4)
+    body = Text()
+    body.append(
+        f"Command: {command_line.rstrip()}\n\n", style=_TELEMETRY_LINE_STYLES["info"]
+    )
+    if result_rich is not None:
+        body.append(result_rich)
+    else:
+        block = wrap_telemetry_block(result_text, inner)
+        body.append(block, style=_TELEMETRY_LINE_STYLES["info"])
+    pl = (hf_status_line or "…").strip().replace("\n", " ")
+    if len(pl) > 420:
+        pl = pl[:417] + "…"
+    body.append("\n\n", style="")
+    body.append(pl, style="dim #ddd6fe")
+    return build_downlink_telemetry_panel(
+        console, body, title=format_downlink_title("re-encode")
+    )
+
+
+def build_polish_ensure_stack_downlink_panel(
+    console: Console,
+    *,
+    headline: str,
+    hf_status_line: str,
+) -> Panel:
+    """Startup re-encode ensure: headline + one live-updating status line in the same purple frame."""
+    pl = (hf_status_line or "…").strip().replace("\n", " ")
+    if len(pl) > 420:
+        pl = pl[:417] + "…"
+    body = Text()
+    body.append(headline.rstrip() + "\n\n", style=_TELEMETRY_LINE_STYLES["info"])
+    body.append(pl, style="dim #ddd6fe")
+    return build_downlink_telemetry_panel(
+        console, body, title=format_downlink_title("re-encode")
+    )
+
+
 def downlink_subtitle_for_slash_line(line: str) -> str:
     """
     Subtitle token for the downlink frame after a committed ``/...`` line
@@ -219,6 +269,8 @@ def downlink_subtitle_for_slash_line(line: str) -> str:
         return "command"
     if first in ("help", "?", "h"):
         return "help"
+    if first in ("health",):
+        return "health"
     if first in ("history", "hist", "transcripts"):
         return "history"
     if first in ("mic", "m", "microphone", "input", "audio"):
@@ -227,6 +279,8 @@ def downlink_subtitle_for_slash_line(line: str) -> str:
         return "GPU"
     if first in ("models", "model"):
         return "models"
+    if first in ("polish", "p", "re-encode", "reencode"):
+        return "re-encode"
     if first in ("disk", "du", "usage"):
         return "disk / storage"
     return "session command"
@@ -611,7 +665,7 @@ class PttSessionStatusBox:
             if self._command_hints:
                 hwrap = wrap_telemetry_block(self._command_hints, inner)
                 line_block = Text(wrapped or " ", style="white") + Text(
-                    " ▎", style="dim #38bdf8"
+                    "▎", style="dim #38bdf8"
                 )
                 body = Group(
                     Text("▶ ", style="bold #38bdf8") + line_block,
@@ -621,7 +675,7 @@ class PttSessionStatusBox:
                 body = (
                     Text("▶ ", style="bold #38bdf8")
                     + Text(wrapped or " ", style="white")
-                    + Text(" ▎", style="dim #38bdf8")
+                    + Text("▎", style="dim #38bdf8")
                 )
         else:
             if self._footer_input_mode == "vox":

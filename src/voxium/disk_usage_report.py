@@ -7,8 +7,13 @@ from pathlib import Path
 
 from voxium.paths import repo_root
 
-# Under :func:`repo_root`: model snapshots and client/server logs (transcript history is RAM-only).
-VOXIUM_DATA_DIR_NAMES: tuple[str, ...] = ("models", "logs")
+# Under :func:`repo_root`: model snapshots, logs, and repo-local llama.cpp (polish runtime;
+# transcript history is RAM-only). Paths use "/" for display; ``Path`` resolves on Windows too.
+VOXIUM_DATA_RELPATHS: tuple[str, ...] = (
+    "models",
+    "logs",
+    "tools/llama.cpp",
+)
 
 
 def _human_size(n: int) -> str:
@@ -64,8 +69,10 @@ def format_repo_disk_usage_text(root: Path | None = None) -> str:
     """
     base = (root or repo_root()).resolve()
     lines: list[str] = ["=== Voxium local data (repository) ==="]
-    for name in VOXIUM_DATA_DIR_NAMES:
-        p = base / name
-        lines.append(f"--- {name}/ ---")
+    for rel in VOXIUM_DATA_RELPATHS:
+        p = base / rel
+        rel_fs = rel.replace("\\", "/").rstrip("/")
+        header = f"{rel_fs}/"
+        lines.append(f"--- {header} ---")
         lines.append(_line_for_path(p))
     return "\n".join(lines) + "\n"

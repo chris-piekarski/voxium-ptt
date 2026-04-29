@@ -4,6 +4,7 @@ from voxium.metrics_text import (
     describe_server,
     format_bytes,
     format_number,
+    format_number_plain,
     format_optional_seconds,
     format_seconds,
 )
@@ -30,6 +31,13 @@ def test_format_number_none_and_int():
     assert format_number(3.0) == "3"
     assert "weird" in format_number("weird")
     assert "1.1" in format_number(1.1)
+
+
+def test_format_number_plain_non_numeric():
+    assert format_number_plain(None) == "n/a"
+    assert "weird" in format_number_plain("weird")
+    assert "3" in format_number_plain(3.0)
+    assert "1.20" in format_number_plain(1.2) or "1.2" in format_number_plain(1.2)
 
 
 def test_format_bytes_scales():

@@ -107,6 +107,54 @@ def test_mid_utterance_1_5s_gap_stays_one_chunk_until_final_pause() -> None:
     assert len(out) == 1
 
 
+def test_silence_add_uncertain_band_lower_half_accrues() -> None:
+    ch = UtteranceChunker(
+        16_000,
+        pre_roll_ms=0.0,
+        speech_rms=0.1,
+        silence_rms=0.02,
+        uncertain_silence_weight=0.4,
+    )
+    ch._in = True  # noqa: SLF001
+    mid = 0.5 * (ch._sil_th + ch._sp_th)  # noqa: SLF001
+    r = ch._sil_th + (mid - ch._sil_th) * 0.3  # noqa: SLF001
+    ch._silence_add_for_frame(r)  # noqa: SLF001
+    assert ch._sil_accum > 0.0  # noqa: SLF001
+
+
+def test_silence_add_uncertain_upper_half_decays() -> None:
+    ch = UtteranceChunker(16_000, pre_roll_ms=0.0, speech_rms=0.1, silence_rms=0.02)
+    ch._in = True  # noqa: SLF001
+    ch._sil_accum = 1.0  # noqa: SLF001
+    mid = 0.5 * (ch._sil_th + ch._sp_th)  # noqa: SLF001
+    r = mid + (ch._sp_th - mid) * 0.5
+    assert ch._sil_th < r < ch._sp_th
+    ch._silence_add_for_frame(r)  # noqa: SLF001
+    assert ch._sil_accum < 1.0  # noqa: SLF001
+
+
+def test_min_speech_frames_uses_ema_for_start() -> None:
+    ch = UtteranceChunker(
+        16_000,
+        pre_roll_ms=0.0,
+        min_speech_frames_to_start=2,
+        speech_rms=0.01,
+        ema_alpha=0.5,
+    )
+    loud = np.full(480, 0.05, dtype=np.float32)
+    for _ in range(4):
+        ch.feed(loud)
+    assert ch.state_label() in ("utterance", "listening", "gating")
+
+
+def test_concat_pre_multiple_frames() -> None:
+    ch = UtteranceChunker(16_000, pre_roll_ms=0.0)
+    a = np.ones(480, dtype=np.float32) * 0.2
+    ch._pre = [a.copy(), a.copy()]  # noqa: SLF001
+    o = ch._concat_pre()  # noqa: SLF001
+    assert o.size == 960
+
+
 def test_max_utterance_splits_with_mid_stream_emit() -> None:
     # max_n=800 (50ms @ 16k), min_n small; long loud segment triggers split in feed()
     ch = UtteranceChunker(

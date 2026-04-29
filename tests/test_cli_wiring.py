@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import importlib
 import sys
-from types import SimpleNamespace
+from types import ModuleType
 
 
 def test_cli_main_delegates_to_injected_app_main() -> None:
-    app_mod = SimpleNamespace()
+    app_mod = ModuleType("voxium.app")
 
     def app_main() -> int:
         return 77
 
-    app_mod.main = app_main
+    setattr(app_mod, "main", app_main)
     saved = sys.modules.get("voxium.app")
     try:
         sys.modules["voxium.app"] = app_mod

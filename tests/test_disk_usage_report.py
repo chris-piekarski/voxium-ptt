@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from voxium.disk_usage_report import (
-    VOXIUM_DATA_DIR_NAMES,
+    VOXIUM_DATA_RELPATHS,
     _dir_size,
     _human_size,
     _iter_files,
@@ -19,13 +19,17 @@ def test_format_repo_disk_usage_text_counts_files(tmp_path, monkeypatch) -> None
     (tmp_path / "models" / "sub" / "a.bin").write_bytes(b"x" * 5000)
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "a.log").write_text("x")
+    (tmp_path / "tools" / "llama.cpp").mkdir(parents=True)
+    (tmp_path / "tools" / "llama.cpp" / "llama-server.exe").write_bytes(b"ab")
     out = format_repo_disk_usage_text()
     assert "=== Voxium local data (repository) ===" in out
-    for name in VOXIUM_DATA_DIR_NAMES:
-        assert f"--- {name}/ ---" in out
+    for rel in VOXIUM_DATA_RELPATHS:
+        h = f"{rel}/" if not rel.endswith("/") else rel
+        assert f"--- {h} ---" in out
     assert "K\t" in out  # models/ subtree (non-trivial size)
     assert str(tmp_path / "models") in out
     assert str(tmp_path / "logs") in out
+    assert "tools" in out and "llama.cpp" in out
 
 
 def test_human_size_bytes_and_gigabytes() -> None:

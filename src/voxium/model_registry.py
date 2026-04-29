@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 TRUSTED_MODEL_NAMESPACE = "Systran"
-DEFAULT_MODEL_NAME = "base"
+# Default for `voxium run` when `transcription.model` is unset (better English accuracy; ~2GB VRAM).
+DEFAULT_MODEL_NAME = "small.en"
 
 TRUSTED_MODELS: dict[str, dict[str, str]] = {
     "tiny.en": {

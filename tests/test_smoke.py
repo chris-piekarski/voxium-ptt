@@ -3,6 +3,7 @@
 import pytest
 
 from voxium.model_registry import (
+    DEFAULT_MODEL_NAME,
     TRUSTED_MODELS,
     resolve_model_repo,
     validate_model_name,
@@ -12,6 +13,10 @@ from voxium.model_registry import (
 def test_validate_model_name_accepts_default():
     name = next(iter(TRUSTED_MODELS))
     assert validate_model_name(name) == name
+
+
+def test_validate_model_name_none_uses_bundled_default():
+    assert validate_model_name(None) == DEFAULT_MODEL_NAME
 
 
 def test_validate_model_name_rejects_untrusted():
@@ -29,6 +34,12 @@ def test_import_voxium_module():
     import voxium
 
     assert callable(voxium.main)
+
+
+def test_import_app_module_without_audio_or_keyboard_side_effects():
+    import voxium.app
+
+    assert hasattr(voxium.app, "build_parser")
 
 
 def test_voxium_getattr_unknown():

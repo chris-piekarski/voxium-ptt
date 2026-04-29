@@ -31,6 +31,10 @@ dist/
 /models/
 /logs/
 
+# Repo-local llama.cpp prebuild (llama-server, DLLs, etc. — provisioned by setup or
+# ``voxium models --polish --pull-polish``; platform-specific and large; same idea as models/)
+tools/llama.cpp/
+
 # IDE
 .idea/
 

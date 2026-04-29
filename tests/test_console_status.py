@@ -1,10 +1,13 @@
 """Session status box: layout helper and recording-HUD switch."""
 
+from typing import cast
+
 from rich.console import Console
 
 from voxium.standby_fft import SPECTRUM_BARS, SPECTRUM_DISPLAY_WIDTH
 
 from voxium.console_status import (
+    PttSessionStatusBox,
     PttStatusStep,
     build_status_box_panel,
     build_voxium_session_panel,
@@ -94,11 +97,15 @@ def test_standby_detail_line_no_decode_vs_with_decode() -> None:
 
 
 def test_downlink_subtitle_for_slash_line() -> None:
+    assert downlink_subtitle_for_slash_line("/health") == "health"
     assert downlink_subtitle_for_slash_line("/history") == "history"
     assert downlink_subtitle_for_slash_line("/hist 2") == "history"
     assert downlink_subtitle_for_slash_line("/gpu") == "GPU"
     assert downlink_subtitle_for_slash_line("/mic") == "mic / capture"
     assert downlink_subtitle_for_slash_line("/models base") == "models"
+    assert downlink_subtitle_for_slash_line("/polish on") == "re-encode"
+    assert downlink_subtitle_for_slash_line("/p on") == "re-encode"
+    assert downlink_subtitle_for_slash_line("/re-encode on") == "re-encode"
     assert downlink_subtitle_for_slash_line("/disk") == "disk / storage"
     assert downlink_subtitle_for_slash_line("/du") == "disk / storage"
     assert downlink_subtitle_for_slash_line("/unknown-cmd") == "session command"
@@ -114,13 +121,23 @@ def test_input_mode_downlink_in_violet_panel() -> None:
     assert "🎤" in t and "VOX" in t
 
 
+def test_command_footer_cursor_sits_after_text() -> None:
+    c = Console(force_terminal=True, width=100, record=True, color_system="truecolor")
+    box = PttSessionStatusBox(c)
+    box.set_command_line("/help", True)
+    c.print(box._build_footer())
+    text = c.export_text(clear=True)
+    assert "/help▎" in text
+    assert "/help ▎" not in text
+
+
 def test_voxium_panel_width_uses_terminal_columns() -> None:
     class _C:
         width = 100
 
-    assert voxium_panel_width(_C()) == 100
+    assert voxium_panel_width(cast(Console, _C())) == 100
 
     class _Zero:
         width = 0
 
-    assert voxium_panel_width(_Zero()) == 80
+    assert voxium_panel_width(cast(Console, _Zero())) == 80

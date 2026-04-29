@@ -74,7 +74,7 @@ def main() -> int:
             hostapis = [ha_raw]
         else:
             try:
-                hostapis = [ha_raw[i] for i in range(len(ha_raw))]  # type: ignore[index]
+                hostapis = list(ha_raw)
             except Exception:
                 hostapis = list(ha_raw) if ha_raw else []
     names_by_id = {
