@@ -26,7 +26,6 @@ from voxium.ux_chatter import (
     request_ux_chatter_edge_line_full,
     request_ux_chatter_line,
     request_ux_chatter_line_full,
-    schedule_ux_chatter_after_transcript,
     sync_ux_chatter_for_transcript,
     ux_chatter_runtime_from_config,
     ux_output_likely_echoes_seed,
@@ -638,12 +637,6 @@ def test_fetch_ux_startup_tagline_drops_prompt_scaffolding(
 
     monkeypatch.setattr("voxium.ux_chatter.llama_cpp_chat_completions", fake_comp)
     assert fetch_ux_startup_tagline({}, cli_enabled=True) is None
-
-
-def test_schedule_ux_chatter_noop_when_disabled() -> None:
-    clear_ux_chatter_wit()
-    f = schedule_ux_chatter_after_transcript("hi", {}, cli_enabled=False)
-    assert f is None
 
 
 def test_sync_ux_chatter_for_transcript_fills_wit(

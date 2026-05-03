@@ -1,7 +1,7 @@
 """
 Optional on-station “UX chatter”: a short Gemma one-liner via a **separate** local ``llama-server``.
 
-Default **off**; when off or on error, the UI uses the same static copy as before.
+Default **on**; when off or on error, the UI uses the same static copy as before.
 See ``docs/ux-chatter-gemma.md``.
 """
 
@@ -11,10 +11,7 @@ import logging
 import os
 import re
 import threading
-import time
 from difflib import SequenceMatcher
-from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -44,12 +41,8 @@ from voxium.ux_chatter_prompt import (
 
 _LOG = logging.getLogger(__name__)
 
-# One background worker; never block PTT / paste.
-_executor: ThreadPoolExecutor | None = None
 _wit_lock = threading.Lock()
 _cached_wit: str = ""
-_last_request_mono: float = 0.0
-_last_transcript_sig: str = ""
 # Set by :func:`voxium.app.ensure_llama_cpp_for_ux_chatter` so ``POST /v1/chat/completions``
 # uses the same ``--alias`` as the managed or discovered ``llama-server`` (Gemma vs TinyLlama).
 _resolved_ux_chatter_model_id: str | None = None
@@ -577,44 +570,11 @@ def get_ux_chatter_wit() -> str:
         return _cached_wit
 
 
-def set_ux_chatter_wit_for_tests(value: str) -> None:
-    global _cached_wit
-    with _wit_lock:
-        _cached_wit = (value or "").strip()
-
-
 def clear_ux_chatter_wit() -> None:
     clear_resolved_ux_chatter_model_id()
-    global _cached_wit, _last_transcript_sig, _last_request_mono
+    global _cached_wit
     with _wit_lock:
         _cached_wit = ""
-        _last_transcript_sig = ""
-        _last_request_mono = 0.0
-
-
-def clear_ux_chatter_wit_for_tests() -> None:
-    clear_ux_chatter_wit()
-
-
-def _executor_singleton() -> ThreadPoolExecutor:
-    global _executor
-    if _executor is None:
-        _executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="voxium-ux-chatter"
-        )
-    return _executor
-
-
-def shutdown_ux_chatter_executor() -> None:
-    """Best-effort stop background threads (e.g. client exit)."""
-    global _executor
-    ex = _executor
-    _executor = None
-    if ex is not None:
-        try:
-            ex.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
 
 
 def _tail_transcript(t: str, n: int) -> str:
@@ -832,7 +792,7 @@ def sync_ux_chatter_for_transcript(
     file_config: dict[str, Any] | None,
     cli_enabled: bool,
     *,
-    on_complete: Callable[[UxChatterLineResult, UxChatterRuntime], None] | None = None,
+    on_complete: Any = None,
 ) -> UxChatterLineResult | None:
     """
     Two synchronous :func:`request_ux_chatter_line_full` calls: **copy** (readback for the green
@@ -848,67 +808,14 @@ def sync_ux_chatter_for_transcript(
     rt = ux_chatter_runtime_from_config(file_config)
     full_copy = request_ux_chatter_line_full(rt, t, purpose="copy")
     full_standby = request_ux_chatter_line_full(rt, t, purpose="standby")
-    now = time.monotonic()
-    sig = t[:200]
     sw = (full_standby.wit or "").strip()
     with _wit_lock:
-        global _cached_wit, _last_request_mono, _last_transcript_sig
+        global _cached_wit
         if sw:
             _cached_wit = sw
-        _last_request_mono = now
-        _last_transcript_sig = sig
     if on_complete is not None:
         try:
             on_complete(full_copy, rt)
         except Exception:
             _LOG.debug("ux chatter on_complete (sync) failed", exc_info=True)
     return full_copy
-
-
-def schedule_ux_chatter_after_transcript(
-    transcript: str,
-    file_config: dict[str, Any] | None,
-    cli_enabled: bool,
-    on_complete: Callable[[UxChatterLineResult, UxChatterRuntime], None] | None = None,
-) -> Future[str] | None:
-    """
-    If enabled, enqueue a **non-blocking** double call (copy + standby) after a STT result. On
-    completion, sets **standby** cached wit; ``on_complete`` receives the **copy** result for
-    Downlink metrics.
-    """
-    if not is_ux_chatter_wanted(cli_enabled=cli_enabled, file_config=file_config):
-        return None
-    t = (transcript or "").strip()
-    if not t:
-        return None
-    global _last_request_mono, _last_transcript_sig
-    rt = ux_chatter_runtime_from_config(file_config)
-    now = time.monotonic()
-    sig = t[:200]
-    with _wit_lock:
-        # Cooldown: skip the same short transcript re-fired too quickly (e.g. duplicate takes).
-        if sig == _last_transcript_sig and (now - _last_request_mono) < max(
-            0.5, float(rt.cooldown_s)
-        ):
-            return None
-        _last_request_mono = now
-        _last_transcript_sig = sig
-
-    ex = _executor_singleton()
-
-    def _run() -> str:
-        full_copy = request_ux_chatter_line_full(rt, t, purpose="copy")
-        full_standby = request_ux_chatter_line_full(rt, t, purpose="standby")
-        sw = (full_standby.wit or "").strip()
-        with _wit_lock:
-            global _cached_wit
-            if sw:
-                _cached_wit = sw
-        if on_complete is not None:
-            try:
-                on_complete(full_copy, rt)
-            except Exception:
-                _LOG.debug("ux chatter on_complete failed", exc_info=True)
-        return (full_copy.wit or "").strip()
-
-    return ex.submit(_run)

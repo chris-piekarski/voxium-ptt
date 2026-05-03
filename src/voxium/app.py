@@ -1554,6 +1554,14 @@ def ensure_llama_cpp_for_ux_chatter() -> None:
     global managed_llama_cpp_ux, _llama_cpp_ux_ready_checked
     if not config or not getattr(config, "ux_chatter", False):
         return
+    from voxium.ux_chatter import is_ux_chatter_wanted
+
+    fc = getattr(config, "file_config", None) or {}
+    if not is_ux_chatter_wanted(
+        cli_enabled=bool(getattr(config, "ux_chatter", False)),
+        file_config=fc,
+    ):
+        return
     if _llama_cpp_ux_ready_checked:
         return
     _llama_cpp_ux_ready_checked = True
@@ -2642,9 +2650,6 @@ def is_client_shutting_down() -> bool:
 def cleanup_client_runtime():
 
     global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, managed_llama_cpp_ux, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked
-    from voxium.ux_chatter import shutdown_ux_chatter_executor
-
-    shutdown_ux_chatter_executor()
     _stop_vox_listening()
     _set_input_mode("ptt")
     client_shutdown_event.set()
@@ -3945,7 +3950,6 @@ def run_client(args, _raw_argv: list[str]) -> int:
             validate_model_name(str(config.model)),
             quiet_success=True,
         )
-    ensure_llama_cpp_for_ux_chatter()
     if getattr(config, "ux_chatter", False) and not config.minimal:
         _uxu = str(getattr(config, "ux_chatter_url", None) or "http://127.0.0.1:11436")
         cli_log(
