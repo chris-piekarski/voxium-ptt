@@ -65,7 +65,6 @@ _H0, _H1 = 0.5, 0.78
 _WORD = "VOXIUM"
 # Decorative rule when width is not passed (e.g. tests) — with content_width, rules scale to the panel.
 _DEFAULT_RULE_DOTS = 64
-_MIN_FACEPLATE_WIDTH = 52
 
 # One line per startup; rotate for flavor. PTT & VOX, shack, light 10-codes, edge = local STT (see docs/brand.md).
 _BANNER_TAGLINES: tuple[str, ...] = (
@@ -182,7 +181,9 @@ def _fit_plain(text: str, width: int) -> str:
 def _faceplate_width(content_width: int | None) -> int:
     if content_width is None:
         return _DEFAULT_RULE_DOTS
-    return max(_MIN_FACEPLATE_WIDTH, content_width - 2)
+    # Never exceed usable panel width (borders eat two columns); wide terminals still get a
+    # full-width faceplate because usable grows with content_width.
+    return max(0, content_width - 2)
 
 
 def _build_faceplate(hostname: str | None, content_width: int | None) -> Text:

@@ -62,6 +62,15 @@ def test_accumulate_stats_counts_sources_and_metric_fields() -> None:
     assert stats["output_words_total"] == 8
 
 
+def test_save_stats_writes_via_atomic_replace(tmp_path) -> None:
+    path = tmp_path / "stats.json"
+    save_stats({"inference_requests_total": 1}, path)
+    assert path.is_file()
+    assert load_stats(path)["inference_requests_total"] == 1
+    # No stray temp files left beside the final JSON name.
+    assert not list(tmp_path.glob(".stats.*.tmp"))
+
+
 def test_save_and_record_stats_round_trip(tmp_path) -> None:
     path = tmp_path / "voxium" / "stats.json"
     save_stats({"inference_requests_total": "2", "by_source": {"ptt": "2"}}, path)

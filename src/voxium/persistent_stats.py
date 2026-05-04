@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,7 +112,23 @@ def save_stats(stats: dict[str, Any], path: Path | None = None) -> None:
     p = path or config_stats_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     data = normalize_stats(stats)
-    p.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".stats.",
+        suffix=".tmp",
+        dir=str(p.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        tmp_path.write_text(payload, encoding="utf-8")
+        os.replace(tmp_path, p)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _polish_token_counts(polish: Any) -> tuple[int, int, int]:

@@ -156,7 +156,7 @@ def test_standby_head_shows_compact_morse_indicator() -> None:
     c.print(box._build_main_panel())
     text = c.export_text(clear=True)
     assert "PTT/VOX · Standing by" in text
-    assert "M 🔊" in text
+    assert "M 🔇" in text
 
     box = PttSessionStatusBox(
         c,
@@ -170,7 +170,7 @@ def test_standby_head_shows_compact_morse_indicator() -> None:
     c.print(box._build_main_panel())
     text = c.export_text(clear=True)
     assert "PTT/VOX · Standing by" in text
-    assert "M 🔇" in text
+    assert "M 🔊" in text
 
 
 def test_voxium_panel_width_uses_terminal_columns() -> None:

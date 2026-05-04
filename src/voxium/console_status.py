@@ -68,10 +68,10 @@ def _head_style_for_status_title(head: str) -> str:
 def _standby_head_with_morse_hint(head: str, ctx: dict) -> str:
     """Append the compact terminal ``M`` Morse indicator to the on-station head."""
     if ctx.get("morse_audio_playing"):
-        return f"{head}  M 🔇"
+        return f"{head}  M 🔊"
     transcript = str(ctx.get("last_transcript_text") or "").strip()
     if transcript:
-        return f"{head}  M 🔊"
+        return f"{head}  M 🔇"
     return head
 
 
@@ -455,6 +455,8 @@ class PttSessionStatusBox:
         self._standby_tick: int = 0
         self._standby_stop = threading.Event()
         self._standby_thread: threading.Thread | None = None
+        # Footer layout width last pushed to the nested Live (resize-only refresh in hot paths).
+        self._footer_last_render_width: int | None = None
 
     def set_command_line(
         self,
@@ -547,7 +549,8 @@ class PttSessionStatusBox:
             self._session_steps[-1].live_hud = content
             if self._main_live.is_started:
                 self._main_live.update(self._build_main_panel(), refresh=True)
-                self._refresh_footer_live_unsafe()
+                if self._box_width() != self._footer_last_render_width:
+                    self._refresh_footer_live_unsafe()
 
     def freeze_before_external_output(self) -> None:
         self._stop_standby_anim()
@@ -657,7 +660,8 @@ class PttSessionStatusBox:
                 if not self._standby_stop.is_set():
                     try:
                         self._main_live.update(self._build_main_panel(), refresh=True)
-                        self._refresh_footer_live_unsafe()
+                        if self._box_width() != self._footer_last_render_width:
+                            self._refresh_footer_live_unsafe()
                     except Exception:
                         break
 
@@ -751,6 +755,7 @@ class PttSessionStatusBox:
             except Exception:
                 pass
         self._footer_live = None
+        self._footer_last_render_width = None
 
     def _start_footer_unsafe(self) -> None:
         if self._footer_live is not None and self._footer_live.is_started:
@@ -766,10 +771,12 @@ class PttSessionStatusBox:
             redirect_stderr=False,
         )
         self._footer_live.start(refresh=True)
+        self._footer_last_render_width = self._box_width()
 
     def _refresh_footer_only_unsafe(self) -> None:
         if self._footer_live is not None and self._footer_live.is_started:
             self._footer_live.update(self._build_footer(), refresh=True)
+            self._footer_last_render_width = self._box_width()
         elif self._main_running and not self._suspended:
             self._rerender_unsafe()
         # else: full render will run on next set_status
@@ -777,6 +784,7 @@ class PttSessionStatusBox:
     def _refresh_footer_live_unsafe(self) -> None:
         if self._footer_live is not None and self._footer_live.is_started:
             self._footer_live.update(self._build_footer(), refresh=True)
+            self._footer_last_render_width = self._box_width()
 
     def _rerender_unsafe(self) -> None:
         main = self._build_main_panel()
@@ -826,6 +834,7 @@ class PttSessionStatusBox:
             self._main_live.update(main, refresh=True)
             if self._footer_live is not None and self._footer_live.is_started:
                 self._footer_live.update(foot, refresh=True)
+                self._footer_last_render_width = self._box_width()
             else:
                 try:
                     self._start_footer_unsafe()
