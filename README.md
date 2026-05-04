@@ -18,8 +18,6 @@
 ╰─ Rig on station at {hostname}  ·  PTT & VOX  ·  loopback  ·  1960s local copy ╯
 ```
 
-<p align="center"><img src="docs/images/voxium.png" width="800" alt="Voxium running in a terminal: startup banner, downlink panels, on-station standby box with rFFT spectrum, and inference metrics"></p>
-
 # Voxium 0.0.1
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.1-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.1-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
@@ -27,6 +25,12 @@
 **PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path; model provisioning may download assets from Hugging Face.
 
 It is the same muscle memory as a **radio key**: short transmissions, then **copy** to the screen. Under the hood you are **stacking** mic, CPU/GPU, and model in a very **Apollo** way: humans at the key, **robot** work in the inference path, **uncharted** only in the sense of *your* machine’s first clean run. Press a hotkey, speak, press again: text is pasted where you are typing. Default path is **GPU (CUDA)**; use `--server-device cpu` if you have no working CUDA stack. **Brand story (radio + space-race tone):** [docs/brand.md](docs/brand.md).
+
+## Live screenshot
+
+Example of the client **on station** after a short PTT take: startup banner, violet downlink panels, on-station standby with rFFT spectrum, and the inference readout block.
+
+<p align="center"><img src="docs/images/voxium.png" width="800" alt="Voxium running in a terminal: startup banner, downlink panels, on-station standby box with rFFT spectrum, and inference metrics"></p>
 
 ## What you need
 
