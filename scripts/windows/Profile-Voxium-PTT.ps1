@@ -7,15 +7,16 @@
   Two modes:
 
   * Attach (default): finds the running .venv client PID and runs py-spy record -p …
-    On Windows, --subprocesses is added by default (unless you pass -Native) because
-    venv-launched clients often hit "Failed to find python version from target process"
-    without it (see benfred/py-spy issues around Windows venvs and console scripts).
-    -Native cannot be combined with --subprocesses on Windows; if you use -Native,
-    attach may fail — try an elevated shell, pip install -U py-spy, or -Spawn.
+    Windows venv + console-script clients are flaky; the script auto-retries in order:
+    plain attach, then --nonblocking, then --subprocesses (skipped if -NoSubprocesses).
+    If all attempts fail, try Administrator PowerShell, pip install -U py-spy, or -Spawn.
+    -Native performs a single attach with --native only (cannot combine with --subprocesses
+    on Windows).
 
   * Spawn (-Spawn): runs py-spy record -- .venv\Scripts\python.exe -m voxium … so py-spy
     owns the process from startup. Use this when attach keeps failing. You will get a
-    second Voxium client — close your normal one first if you only want one instance.
+    second Voxium client. On Windows the single-instance mutex usually blocks a second
+    run while your main client is up — close the main client first, or rely on attach mode.
 
   Same-OS rule: run on Windows when the Voxium client is Windows Python. See docs/profiling.md.
 
@@ -43,6 +44,9 @@ param(
     [string[]] $SpawnArguments = @("run"),
     [switch] $NoSubprocesses
 )
+
+# Exit code from py-spy (set in attach / spawn branches below).
+$code = 1
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -82,8 +86,6 @@ Start the client first, pass -ClientProcessId <id>, or use -Spawn to profile a f
     $targetPid = [int]$candidates.ProcessId
 }
 
-$useSubprocesses = (-not $Spawn) -and (-not $Native) -and (-not $NoSubprocesses)
-
 Write-Host "Repo:  $RepoRoot"
 Write-Host "py-spy: $PySpy"
 if ($Spawn) {
@@ -93,7 +95,7 @@ else {
     Write-Host "PID:   $targetPid"
 }
 Write-Host "Out:   $OutputPath"
-Write-Host "Duration: ${Duration}s  Rate: ${Rate}/s  Native: $($Native.IsPresent)  Subprocesses: $useSubprocesses  Spawn: $($Spawn.IsPresent)"
+Write-Host "Duration: ${Duration}s  Rate: ${Rate}/s  Native: $($Native.IsPresent)  NoSubprocesses: $($NoSubprocesses.IsPresent)  Spawn: $($Spawn.IsPresent)"
 Write-Host ""
 Write-Host "Start your PTT takes as soon as py-spy begins sampling." -ForegroundColor Yellow
 Write-Host ""
@@ -120,9 +122,10 @@ if ($Spawn) {
         $spyArgs += $a
     }
     & $PySpy @spyArgs
+    $code = $LASTEXITCODE
 }
 else {
-    $spyArgs = @(
+    $baseArgs = @(
         "record",
         "-o", $OutputPath,
         "-p", "$targetPid",
@@ -130,21 +133,38 @@ else {
         "-r", "$Rate"
     )
     if ($Native) {
-        $spyArgs += "--native"
+        $spyArgs = $baseArgs + @("--native")
+        Write-Host "py-spy attach (--native) …" -ForegroundColor Cyan
+        & $PySpy @spyArgs
+        $code = $LASTEXITCODE
     }
-    elseif ($useSubprocesses) {
-        $spyArgs += "--subprocesses"
+    else {
+        $chain = @(
+            @{ Label = "attach (plain)"; Extra = @() },
+            @{ Label = "attach (--nonblocking)"; Extra = @("--nonblocking") }
+        )
+        if (-not $NoSubprocesses) {
+            $chain += @{ Label = "attach (--subprocesses)"; Extra = @("--subprocesses") }
+        }
+        $code = 1
+        foreach ($step in $chain) {
+            Write-Host "Trying $($step.Label) …" -ForegroundColor Cyan
+            $spyArgs = $baseArgs + $step.Extra
+            & $PySpy @spyArgs
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+                break
+            }
+            Write-Host "  exit code $code" -ForegroundColor DarkYellow
+        }
     }
-    & $PySpy @spyArgs
 }
 
-$code = $LASTEXITCODE
 if ($code -ne 0) {
     Write-Host ""
-    Write-Host "py-spy exited with code $code." -ForegroundColor Red
-    Write-Host "Try, in order: run this script again (default now uses --subprocesses on attach);" -ForegroundColor Yellow
-    Write-Host "  Administrator PowerShell;  pip install -U py-spy;" -ForegroundColor Yellow
-    Write-Host "  or spawn mode: add -Spawn (and -SpawnArguments to match your usual voxium flags)." -ForegroundColor Yellow
+    Write-Host "py-spy exited with code $code (all attach strategies failed)." -ForegroundColor Red
+    Write-Host "Next steps: Administrator PowerShell;  pip install -U py-spy;" -ForegroundColor Yellow
+    Write-Host "  or -Spawn (close the main client first on Windows — single-instance mutex)." -ForegroundColor Yellow
     exit $code
 }
 
