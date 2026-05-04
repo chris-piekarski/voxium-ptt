@@ -68,7 +68,7 @@ To record a flame graph of the **Windows client** during PTT without fragile one
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
 ```
 
-Optional flags: `-Duration`, `-Rate`, `-Native`, `-ClientProcessId`, `-OutputPath`. Run `Get-Help .\scripts\windows\Profile-Voxium-PTT.ps1 -Full` after install for details.
+Optional flags: `-Duration`, `-Rate`, `-Native`, `-ClientProcessId`, `-OutputPath`, `-Spawn`, `-SpawnArguments`, `-NoSubprocesses`. Attach mode adds `--subprocesses` by default on Windows (unless `-Native`) to avoid py-spy “Failed to find python version from target process” on venv clients; if attach still fails, use `-Spawn` so py-spy starts `python -m voxium` itself. Run `Get-Help .\scripts\windows\Profile-Voxium-PTT.ps1 -Full` for details.
 
 ## 3. Same-OS rule
 

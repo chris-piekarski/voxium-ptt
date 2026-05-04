@@ -4,11 +4,20 @@
   Record a py-spy flame graph of the Voxium Windows client during PTT activity.
 
 .DESCRIPTION
-  Resolves the repo-local .venv Python process that runs voxium.exe (not voxium server,
-  not llama-server), then runs py-spy record for a fixed duration. Start PTT takes as
-  soon as py-spy prints "Sampling process".
+  Two modes:
 
-  Same-OS rule: run this on Windows when the Voxium client is Windows Python. See docs/profiling.md.
+  * Attach (default): finds the running .venv client PID and runs py-spy record -p …
+    On Windows, --subprocesses is added by default (unless you pass -Native) because
+    venv-launched clients often hit "Failed to find python version from target process"
+    without it (see benfred/py-spy issues around Windows venvs and console scripts).
+    -Native cannot be combined with --subprocesses on Windows; if you use -Native,
+    attach may fail — try an elevated shell, pip install -U py-spy, or -Spawn.
+
+  * Spawn (-Spawn): runs py-spy record -- .venv\Scripts\python.exe -m voxium … so py-spy
+    owns the process from startup. Use this when attach keeps failing. You will get a
+    second Voxium client — close your normal one first if you only want one instance.
+
+  Same-OS rule: run on Windows when the Voxium client is Windows Python. See docs/profiling.md.
 
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
@@ -18,13 +27,21 @@
 
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1 -ClientProcessId 52460 -Native
+
+.EXAMPLE
+  pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1 -Spawn -SpawnArguments run,--server-device,cuda,--server-compute,float16
+
+  (Prefer splitting arguments: -SpawnArguments run --server-device cuda --server-compute float16)
 #>
 param(
     [int] $Duration = 30,
     [int] $Rate = 200,
     [string] $OutputPath = "",
     [int] $ClientProcessId = 0,
-    [switch] $Native
+    [switch] $Native,
+    [switch] $Spawn,
+    [string[]] $SpawnArguments = @("run"),
+    [switch] $NoSubprocesses
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +58,10 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $env:USERPROFILE "Desktop\voxium-ptt-$stamp.svg"
 }
 
-if ($ClientProcessId -gt 0) {
+if ($Spawn) {
+    $targetPid = 0
+}
+elseif ($ClientProcessId -gt 0) {
     $targetPid = $ClientProcessId
 }
 else {
@@ -56,37 +76,75 @@ else {
     if (-not $candidates) {
         Write-Error @"
 Could not find a Voxium client process (.venv\Scripts\python.exe ... voxium.exe, not 'voxium server').
-Start the client first, or pass -ClientProcessId <id> from Task Manager / Get-CimInstance Win32_Process.
+Start the client first, pass -ClientProcessId <id>, or use -Spawn to profile a fresh python -m voxium process.
 "@
     }
     $targetPid = [int]$candidates.ProcessId
 }
 
+$useSubprocesses = (-not $Spawn) -and (-not $Native) -and (-not $NoSubprocesses)
+
 Write-Host "Repo:  $RepoRoot"
 Write-Host "py-spy: $PySpy"
-Write-Host "PID:   $targetPid"
+if ($Spawn) {
+    Write-Host "Mode:  spawn (py-spy starts python -m voxium)"
+}
+else {
+    Write-Host "PID:   $targetPid"
+}
 Write-Host "Out:   $OutputPath"
-Write-Host "Duration: ${Duration}s  Rate: ${Rate}/s  Native: $($Native.IsPresent)"
+Write-Host "Duration: ${Duration}s  Rate: ${Rate}/s  Native: $($Native.IsPresent)  Subprocesses: $useSubprocesses  Spawn: $($Spawn.IsPresent)"
 Write-Host ""
 Write-Host "Start your PTT takes as soon as py-spy begins sampling." -ForegroundColor Yellow
 Write-Host ""
 
-$args = @(
-    "record",
-    "-o", $OutputPath,
-    "-p", "$targetPid",
-    "-d", "$Duration",
-    "-r", "$Rate"
-)
-if ($Native) {
-    $args += "--native"
+if ($Spawn) {
+    $pythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $pythonExe)) {
+        Write-Error "Python not found at $pythonExe"
+    }
+    $spyArgs = @(
+        "record",
+        "-o", $OutputPath,
+        "-d", "$Duration",
+        "-r", "$Rate"
+    )
+    if ($Native) {
+        $spyArgs += "--native"
+    }
+    $spyArgs += "--"
+    $spyArgs += $pythonExe
+    $spyArgs += "-m"
+    $spyArgs += "voxium"
+    foreach ($a in $SpawnArguments) {
+        $spyArgs += $a
+    }
+    & $PySpy @spyArgs
+}
+else {
+    $spyArgs = @(
+        "record",
+        "-o", $OutputPath,
+        "-p", "$targetPid",
+        "-d", "$Duration",
+        "-r", "$Rate"
+    )
+    if ($Native) {
+        $spyArgs += "--native"
+    }
+    elseif ($useSubprocesses) {
+        $spyArgs += "--subprocesses"
+    }
+    & $PySpy @spyArgs
 }
 
-& $PySpy @args
 $code = $LASTEXITCODE
 if ($code -ne 0) {
     Write-Host ""
-    Write-Host "py-spy exited with code $code. If attach failed, try an elevated PowerShell or: pip install -U py-spy" -ForegroundColor Red
+    Write-Host "py-spy exited with code $code." -ForegroundColor Red
+    Write-Host "Try, in order: run this script again (default now uses --subprocesses on attach);" -ForegroundColor Yellow
+    Write-Host "  Administrator PowerShell;  pip install -U py-spy;" -ForegroundColor Yellow
+    Write-Host "  or spawn mode: add -Spawn (and -SpawnArguments to match your usual voxium flags)." -ForegroundColor Yellow
     exit $code
 }
 
