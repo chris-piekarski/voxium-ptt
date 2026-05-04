@@ -20,9 +20,9 @@
 
   Same-OS rule: run on Windows when the Voxium client is Windows Python. See docs/profiling.md.
 
-  Default SVG path: your shell Desktop from [Environment]::GetFolderPath('Desktop') (follows OneDrive
-  redirection). If that folder is missing, the script falls back to logs\ under the repository root
-  and creates it.
+  Default SVG directory: first existing folder among GetFolderPath(Desktop), %USERPROFILE%\OneDrive\Desktop,
+  %USERPROFILE%\Desktop, and %PUBLIC%\Desktop. If none exist, the script uses repo logs\py-spy\ (created
+  if needed) so the path is always writable inside the clone.
 
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
@@ -61,15 +61,32 @@ if (-not (Test-Path -LiteralPath $PySpy)) {
     Write-Error "py-spy not found at $PySpy — run: pip install -e `".[dev]`" from the repo venv."
 }
 
+function Get-VoxiumPySpyOutDirectory {
+    param([string]$RepoRoot)
+    $candidates = @(
+        [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop),
+        (Join-Path $env:USERPROFILE "OneDrive\Desktop"),
+        (Join-Path $env:USERPROFILE "Desktop"),
+        (Join-Path $env:PUBLIC "Desktop")
+    )
+    foreach ($d in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($d)) {
+            continue
+        }
+        if (Test-Path -LiteralPath $d -PathType Container) {
+            return (Resolve-Path -LiteralPath $d).Path
+        }
+    }
+    $fallback = Join-Path $RepoRoot "logs\py-spy"
+    New-Item -ItemType Directory -Force -Path $fallback | Out-Null
+    return (Resolve-Path -LiteralPath $fallback).Path
+}
+
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $outDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
-    if ([string]::IsNullOrWhiteSpace($outDir) -or -not (Test-Path -LiteralPath $outDir)) {
-        $outDir = Join-Path $RepoRoot "logs"
-        if (-not (Test-Path -LiteralPath $outDir)) {
-            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-        }
-        Write-Host "Desktop folder not found; using repo logs: $outDir" -ForegroundColor Yellow
+    $outDir = Get-VoxiumPySpyOutDirectory -RepoRoot $RepoRoot
+    if ($outDir -match 'logs[/\\]py-spy') {
+        Write-Host "No Desktop folder found; using: $outDir" -ForegroundColor Yellow
     }
     $OutputPath = Join-Path $outDir "voxium-ptt-$stamp.svg"
 }
