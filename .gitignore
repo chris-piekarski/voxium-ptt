@@ -30,6 +30,8 @@ dist/
 # Voxium data (see voxium.paths; same layout on all platforms)
 /models/
 /logs/
+.config/voxium/config.*
+.config/voxium/stats.*
 
 # Repo-local llama.cpp prebuild (llama-server, DLLs, etc. — provisioned by setup or
 # ``voxium models --polish --pull-polish``; platform-specific and large; same idea as models/)
