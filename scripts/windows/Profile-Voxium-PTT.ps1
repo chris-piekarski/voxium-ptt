@@ -20,11 +20,15 @@
 
   Same-OS rule: run on Windows when the Voxium client is Windows Python. See docs/profiling.md.
 
+  Default SVG path: your shell Desktop from [Environment]::GetFolderPath('Desktop') (follows OneDrive
+  redirection). If that folder is missing, the script falls back to logs\ under the repository root
+  and creates it.
+
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
 
 .EXAMPLE
-  pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1 -Duration 45 -OutputPath "$env:USERPROFILE\Desktop\voxium-ptt.svg"
+  pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1 -Duration 45 -OutputPath "C:\Temp\voxium-ptt.svg"
 
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1 -ClientProcessId 52460 -Native
@@ -59,7 +63,21 @@ if (-not (Test-Path -LiteralPath $PySpy)) {
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $OutputPath = Join-Path $env:USERPROFILE "Desktop\voxium-ptt-$stamp.svg"
+    $outDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
+    if ([string]::IsNullOrWhiteSpace($outDir) -or -not (Test-Path -LiteralPath $outDir)) {
+        $outDir = Join-Path $RepoRoot "logs"
+        if (-not (Test-Path -LiteralPath $outDir)) {
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        }
+        Write-Host "Desktop folder not found; using repo logs: $outDir" -ForegroundColor Yellow
+    }
+    $OutputPath = Join-Path $outDir "voxium-ptt-$stamp.svg"
+}
+
+$outParent = Split-Path -LiteralPath $OutputPath -Parent
+if (-not (Test-Path -LiteralPath $outParent)) {
+    New-Item -ItemType Directory -Force -Path $outParent | Out-Null
+    Write-Host "Created output directory: $outParent" -ForegroundColor Yellow
 }
 
 if ($Spawn) {
