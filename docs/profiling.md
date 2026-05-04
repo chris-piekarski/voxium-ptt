@@ -127,6 +127,16 @@ py-spy record -o voxium-profile.svg --pid <PID> --duration 20
 
 Then open `voxium-profile.svg` in a browser.
 
+### 4.5 Reference flame graph: idle / standby
+
+A captured `py-spy` flame graph for **idle / standby** lives at
+[`docs/profiling/idle-standby-default.svg`](profiling/idle-standby-default.svg).
+GitHub renders it as a static preview in the markdown view; download the raw
+SVG and open it in a browser to keep the inferno hover, zoom, and search
+controls. Use it as the **shape baseline** when comparing a new capture from
+the same scenario — if the new capture's tall stacks differ from this one,
+that delta is your investigation target.
+
 ## 5. How to capture useful traces
 
 Profile **one scenario at a time**. Avoid mixing startup, PTT, slash commands, and VOX behavior in the same capture unless the problem is truly global.

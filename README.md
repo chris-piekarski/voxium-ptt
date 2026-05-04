@@ -1,22 +1,30 @@
 ```text
-····················································································
-  PTT & VOX  —  VOX in, text out on the loopback  —  you key, the stack is in the loop
-····················································································
-
-  █   █  ███  █   █  ███  █   █ █   █
-  █   █ █   █ █   █   █   █   █ ██ ██
-  █   █ █   █  ███    █   █   █ █ █ █
-   █ █  █   █ █   █   █   █   █ █   █
-    █    ███  █   █  ███   ███  █   █
-
-····················································································
+╭─ Voxium ─────────────────────────────────────────────────────────────────────╮
+│   PTT & VOX Speech-to-Text for Terminal Input                                │
+│   ┌─ CLI Radio ────────────────────────────────────────────────────────────┐ │
+│   │ VFO 97.3 MHz  ·  RSSI S1 S3 S5 S7 S9  ▂▃▅▆▇█                           │ │
+│   │ NEEDLE  -20 -10  0  +10  +20        ◂──────╂───▸                       │ │
+│   │ GAIN [██████░░]  SQL [███░░░░░]  PTT/VOX ARMED                         │ │
+│   │ RIG {hostname}  ·  LOOPBACK LOCAL  ·  STACK ON STATION                 │ │
+│   └────────────────────────────────────────────────────────────────────────┘ │
+│   ·········································································· │
+│     █   █  ███  █   █  ███  █   █ █   █                                      │
+│     █   █ █   █ █   █   █   █   █ ██ ██                                      │
+│     █   █ █   █  ███    █   █   █ █ █ █                                      │
+│      █ █  █   █ █   █   █   █   █ █   █                                      │
+│       █    ███  █   █  ███   ███  █   █                                      │
+│   ·········································································· │
+│   Mic keyed. Loop closed. Robot copying locally.                             │
+╰─ Rig on station at {hostname}  ·  PTT & VOX  ·  loopback  ·  1960s local copy ╯
 ```
+
+<p align="center"><img src="docs/images/voxium.png" width="800" alt="Voxium running in a terminal: startup banner, downlink panels, on-station standby box with rFFT spectrum, and inference metrics"></p>
 
 # Voxium 0.0.1
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.1-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.1-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
 
-**PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path.
+**PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path; model provisioning may download assets from Hugging Face.
 
 It is the same muscle memory as a **radio key**: short transmissions, then **copy** to the screen. Under the hood you are **stacking** mic, CPU/GPU, and model in a very **Apollo** way: humans at the key, **robot** work in the inference path, **uncharted** only in the sense of *your* machine’s first clean run. Press a hotkey, speak, press again: text is pasted where you are typing. Default path is **GPU (CUDA)**; use `--server-device cpu` if you have no working CUDA stack. **Brand story (radio + space-race tone):** [docs/brand.md](docs/brand.md).
 
@@ -82,7 +90,7 @@ For maintainer profiling, prefer **`py-spy`** on the same OS as the running Voxi
 
 ## Config
 
-Optional: **`%USERPROFILE%\.config\voxium\config.yaml`** on Windows, or **`~/.config/voxium/config.yaml`** elsewhere.
+Optional settings live in **`%USERPROFILE%\.config\voxium\config.yaml`** on Windows, or **`~/.config/voxium/config.yaml`** elsewhere. Long-running inference totals live separately in **`~/.config/voxium/stats.json`** so `config.yaml` stays focused on settings.
 
 If the file is missing, Voxium uses CLI defaults (see `voxium run --help`). Example:
 
@@ -116,6 +124,10 @@ ui:
   # Default false: ``/`` command input only when this terminal window is focused (not other apps).
   # Set true or use ``voxium run --slash-global`` to restore system-wide ``/`` like older builds.
   slash_global: false
+ux_chatter:
+  # Default true: short one-liners for startup, standby, copy, and sign-off.
+  # Uses the same selected polish GGUF and llama.cpp URL as re-encode.
+  enabled: true
 ```
 
 ## Run
@@ -129,16 +141,18 @@ voxium --server-device cpu
 
 - **F9 (default):** start/stop recording and transcribe; **F7:** toggle **PTT** (push-to-talk) vs **VOX** (open mic with utterance gating); **F8:** cycle replay of transcripts; **F6 (default):** re-transmit last pending in-RAM capture.
 - **`/…` command line:** with the default ``ui.slash_global: false`` (or ``--no-slash-global``), the leading ``/`` only opens the command bar when **this terminal** is the focused window (Windows and Linux X11 with ``$WINDOWID`` + ``xdotool``; **macOS** and **Wayland** best-effort may still allow ``/`` anywhere until we add a tighter check). Once the command bar is open, Voxium keeps accepting the command so brief focus-probe misses do not drop `/help` mid-type. Use ``--slash-global`` or ``VOXIUM_SLASH_GLOBAL=1`` to match legacy behavior.
+- **Hotkey changes from the command line:** use **`/hotkeys`** to show active bindings, **`/hotkeys ptt f10`** to change the PTT transmit key, or **`/hotkeys replay f8`** to change replay. Changes are written to `~/.config/voxium/config.yaml` and take effect in the current session.
+- **Inference stats:** use **`/stats`** for persisted local totals across PTT, VOX, and re-transmit requests, plus current server-process counters when the loopback server is online. The local file is `~/.config/voxium/stats.json`; the server `/stats` counters reset when the server restarts.
 - **Transcript log:** session-only, in process RAM (bounded: `--history-limit`, `--history-max-chars`); use **`/history`** in the downlink to list, **`/history <n>`** to expand, **`/history copy <n>`** to put one line on the system clipboard.
 - **Local data (same paths on all platforms):** `models/` (Hugging Face downloads for faster-whisper), `logs/` (server log, client lock). Override the project root with `VOXIUM_REPO_ROOT` if needed. The server log defaults to `logs/voxium_server.log` (or `--server-log-file`).
 - **Health:** `voxium health`, `voxium stats`; foreground server: `voxium server --help`.
-- **Re-encode (local GGUF, default on):** By default, Voxium runs a local `llama.cpp` second pass after STT. Use `voxium run --no-polish` or `transcription.polish_enabled: false` in config to skip it. Voxium probes or starts a local `llama-server`, serves GGUF models from `models/polish`, uses a repo-local runtime under `tools/llama.cpp` when present, and shuts down only the `llama-server` process it launched. Use `voxium models` for the two-lane summary, `voxium models transcribe installed` for downloaded STT models, `voxium models polish list` for trusted re-encoder ids plus installed local GGUF selectors, and `voxium models --polish --pull-polish` to provision the default repo-local runtime/model bundle.
+- **Re-encode and UX chatter (shared local GGUF, default on):** By default, Voxium runs a local `llama.cpp` second pass after STT and also uses that same selected GGUF for short console chatter: startup tagline, host-aware rig subtitle, standby/copy wit, log footer, edge-status line, and Ctrl+C sign-off. Use `voxium run --no-polish` or `transcription.polish_enabled: false` to skip the paste rewrite while keeping the model available for chatter; use `voxium run --no-ux-chatter`, `ux_chatter.enabled: false`, or `VOXIUM_UX_CHATTER=0` to disable console chatter. Voxium probes or starts one local `llama-server`, serves GGUF models from `models/polish`, uses a repo-local runtime under `tools/llama.cpp` when present, and shuts down only the process it launched. Use `voxium models polish list` for trusted shared polish/chatter ids plus installed local GGUF selectors, `/models polish use <id>` to switch in-session, and `voxium models --polish --pull-polish` to provision the default repo-local runtime/model bundle. `voxium models --pull-ux-chatter` remains as a deprecated alias for pulling the shared Gemma polish/chatter model.
 
-Voxium only uses a **local loopback** HTTP server for transcription.
+Voxium only uses **local loopback** HTTP servers for transcription and optional GGUF sidecars.
 
 ## Model list
 
-`voxium models` (or `voxium models --json`). Voxium only allows the trusted Systran model names shipped in the CLI.
+`voxium models` (or `voxium models --json`). Voxium only allows the trusted Systran model names shipped in the CLI for transcription and trusted/shared GGUF ids for polish plus UX chatter under `models/polish/`.
 
 ## Systemd (Linux, optional)
 
@@ -154,6 +168,7 @@ systemctl --user enable --now voxium
 - **Windows: `Voxium.cmd` / `Setup-Voxium.cmd` says `pyproject.toml not found` or paths look wrong:** the launchers **must stay** in `scripts\windows\` inside your clone. Do **not** copy only `Voxium.cmd` to the Desktop or another folder — the script finds the repo by going **up two levels** from its own file. Run **`scripts\windows\Setup-Voxium.cmd` once** from Explorer (double-click) only when that file lives under your Voxium repository. If the repo is under **OneDrive** and installs fail with file locks, clone to e.g. `C:\src\voxium` or pause OneDrive sync for that folder.
 - **Windows: still broken after setup:** run **`scripts\windows\Diagnose-Voxium.cmd`**. It writes **`%TEMP%\voxium-diagnose.log`**, shows Python / venv / `import voxium` / `import sounddevice`, and opens the log in Notepad. Share that file if you need help. Setup also leaves **`logs\voxium-windows-setup.log`** and **`logs\pip-editable-install.log`** in the repo.
 - **Polish runtime/model missing after setup:** rerun **`.\.venv\Scripts\python.exe -m voxium models --polish --pull-polish`** from the repo root. Then check **`.\.venv\Scripts\python.exe -m voxium models polish list`** to confirm the trusted ids and installed local GGUF selectors. Setup provisions the repo-local `llama-server` runtime under `tools\llama.cpp` and the default GGUF model under `models\polish`. If you intentionally skipped this during setup, rerun `scripts\windows\Setup-Voxium.cmd` without `-SkipPolish`.
+- **UX chatter missing or quiet:** chatter now shares the polish GGUF and `--llama-cpp-url`. Confirm `voxium models polish list` shows an installed shared model, then use `/models polish use <id>` or `voxium run --polish-model <id>` to select it. For Gemma, run `huggingface-cli login`, accept the Gemma terms if needed, then pull with `voxium models polish pull gemma-2-2b-it-q5km` (or the deprecated alias `voxium models --pull-ux-chatter`). Disable chatter with `voxium run --no-ux-chatter` or `VOXIUM_UX_CHATTER=0`.
 - **`No pyvenv.cfg file` (or Activate.ps1 not found):** the **`.venv` is invalid** — often a **WSL-created** venv used on **Windows**, or an incomplete copy. **Launching** with **`Voxium.cmd`** (repo or `scripts\windows\`) will run **`Setup-Voxium.ps1 -SkipPolish`** once to repair (set **`VOXIUM_NO_AUTO_SETUP=1`** to skip auto-repair and only show manual steps). Or remove the folder: `rmdir /s /q .venv` (cmd) or `Remove-Item -Recurse -Force .venv` (PowerShell), then run **`scripts\windows\Recreate-Windows-Venv.cmd`** or **`scripts\windows\Setup-Voxium.cmd`**. After a good venv, `.\.venv\Scripts\python.exe -m pip ...` works (no second `python` after `.exe`).
 - **`No module named 'voxium'`** (including `ModuleNotFoundError`): the editable install is missing in **`.venv`**. **`Voxium.cmd`** will run setup for you unless **`VOXIUM_NO_AUTO_SETUP=1`**. Or from the **repository root**, install the project in editable mode (PowerShell or cmd):
   ```text
@@ -175,8 +190,9 @@ systemctl --user enable --now voxium
 1. **pynput** — global hotkeys  
 2. **sounddevice** — microphone  
 3. **faster-whisper** (local HTTP worker) — transcription on loopback  
-4. **llama.cpp** (optional, default on) — local `llama-server` re-encode pass after STT when **polish** is enabled; falls back to raw text if the runtime is missing or errors  
+4. **llama.cpp** (optional, default on) — one local `llama-server` for the shared polish/chatter GGUF; the polish pass falls back to raw text if the runtime is missing or errors  
 5. **pyperclip + OS tools** — paste
+6. **UX chatter** (optional, default on) — short console wit from the same selected polish GGUF; does not alter STT/paste output and falls back to static strings if unavailable
 
 ## License
 
