@@ -91,8 +91,12 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $outDir "voxium-ptt-$stamp.svg"
 }
 
-$outParent = Split-Path -LiteralPath $OutputPath -Parent
-if (-not (Test-Path -LiteralPath $outParent)) {
+# Avoid Split-Path -LiteralPath -Parent (parameter set issues on some pwsh builds).
+$outParent = [string]::Empty
+if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+    $outParent = [System.IO.Path]::GetDirectoryName($OutputPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($outParent) -and -not (Test-Path -LiteralPath $outParent)) {
     New-Item -ItemType Directory -Force -Path $outParent | Out-Null
     Write-Host "Created output directory: $outParent" -ForegroundColor Yellow
 }
