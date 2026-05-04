@@ -30,6 +30,9 @@ def test_argv_includes_flags_and_extras():
     assert "--llama-cpp-url" in out
     assert "http://127.0.0.1:11435" in out
     assert "--polish-timeout" in out
+    assert "--polish-keep-alive" in out
+    assert "-1" in out
+    assert "--polish-warmup-on-start" in out
     assert "--polish-max-concurrent" in out
 
 

@@ -174,7 +174,7 @@ if ($SkipPolish) {
     Write-SetupLog "Skipping local polish runtime/model provisioning (-SkipPolish)."
 } else {
     Write-Host "Provisioning local llama.cpp runtime and default GGUF polish model…" -ForegroundColor Cyan
-    $ec = Invoke-LoggedCommand -Exe $VenvPython -Args @("-m", "voxium", "models", "--polish", "--pull-polish") -Label "voxium models --polish --pull-polish"
+    $ec = Invoke-LoggedCommand -Exe $VenvPython -Args @("-m", "voxium", "models", "polish", "pull") -Label "voxium models polish pull"
     if ($ec -ne 0) {
         Exit-SetupFail "Could not provision the local polish runtime/model (exit $ec). See logs."
     }

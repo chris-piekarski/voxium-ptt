@@ -7,6 +7,7 @@ from rich.console import Console
 from voxium.standby_fft import SPECTRUM_BARS, SPECTRUM_DISPLAY_WIDTH
 
 from voxium.console_status import (
+    ON_STATION_HEAD,
     PttSessionStatusBox,
     PttStatusStep,
     build_status_box_panel,
@@ -131,6 +132,47 @@ def test_command_footer_cursor_sits_after_text() -> None:
     assert "/help ▎" not in text
 
 
+def test_idle_footer_shows_morse_audio_toggle_state() -> None:
+    c = Console(force_terminal=True, width=120, record=True, color_system="truecolor")
+    box = PttSessionStatusBox(c)
+    c.print(box._build_footer())
+    off_text = c.export_text(clear=True)
+
+    box.set_morse_audio_state(True)
+    c.print(box._build_footer())
+    on_text = c.export_text(clear=True)
+
+    assert "M Morse" in off_text and "off" in off_text
+    assert "M Morse on" in on_text
+
+
+def test_standby_head_shows_compact_morse_indicator() -> None:
+    c = Console(force_terminal=True, width=120, record=True, color_system="truecolor")
+    box = PttSessionStatusBox(
+        c, standby_context=lambda: {"last_transcript_text": "sos"}
+    )
+    box._session_steps = [PttStatusStep(ON_STATION_HEAD, "")]
+
+    c.print(box._build_main_panel())
+    text = c.export_text(clear=True)
+    assert "PTT/VOX · Standing by" in text
+    assert "M 🔇" in text
+
+    box = PttSessionStatusBox(
+        c,
+        standby_context=lambda: {
+            "last_transcript_text": "sos",
+            "morse_audio_playing": True,
+        },
+    )
+    box._session_steps = [PttStatusStep(ON_STATION_HEAD, "")]
+
+    c.print(box._build_main_panel())
+    text = c.export_text(clear=True)
+    assert "PTT/VOX · Standing by" in text
+    assert "M 🔊" in text
+
+
 def test_voxium_panel_width_uses_terminal_columns() -> None:
     class _C:
         width = 100
@@ -141,3 +183,50 @@ def test_voxium_panel_width_uses_terminal_columns() -> None:
         width = 0
 
     assert voxium_panel_width(cast(Console, _Zero())) == 80
+
+
+def test_status_box_builders_pick_up_changed_console_width() -> None:
+    class _MutableConsole:
+        width = 100
+
+    c = cast(Console, _MutableConsole())
+    box = PttSessionStatusBox(c)
+
+    assert box._build_footer().width == 100
+    c.width = 72
+    assert box._build_footer().width == 72
+
+    box._session_steps = [PttStatusStep("◉ PTT/VOX · Standing by", "")]
+    assert box._build_main_panel().width == 72
+    c.width = 90
+    assert box._build_main_panel().width == 90
+
+
+def test_recording_hud_refresh_updates_footer_at_current_width() -> None:
+    class _MutableConsole:
+        width = 100
+
+    class _FakeLive:
+        is_started = True
+
+        def __init__(self) -> None:
+            self.widths: list[int] = []
+
+        def update(self, renderable, *, refresh: bool = False) -> None:
+            assert refresh
+            self.widths.append(renderable.width)
+
+    c = cast(Console, _MutableConsole())
+    box = PttSessionStatusBox(c)
+    main_live = _FakeLive()
+    footer_live = _FakeLive()
+    box._main_live = main_live
+    box._footer_live = footer_live
+    box._main_running = True
+    box._session_steps = [PttStatusStep("📻 PTT ACTIVE", "", live_hud="old")]
+
+    c.width = 76
+    box.update_recording_hud("new")
+
+    assert main_live.widths[-1] == 76
+    assert footer_live.widths[-1] == 76

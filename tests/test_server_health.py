@@ -33,10 +33,12 @@ def test_health_returns_ok_json() -> None:
     assert body["polish_backend_default"] == "llama.cpp"
     assert body["polish_default_model"] == "auto"
     assert body["polish_enabled_default"] is True
+    assert body["polish_keep_alive_default"] == "-1"
     assert "polish_keep_alive_default" in body
     assert "polish_llama_cpp_reachable" in body
     assert "polish_loaded_model" in body
     assert "polish_model_loaded" in body
+    assert "warmed_transcribe_models" in body
 
 
 def test_ensure_model_rejects_bad_id() -> None:

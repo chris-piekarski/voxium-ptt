@@ -1,5 +1,6 @@
 """
-Optional on-station “UX chatter”: a short Gemma one-liner via a **separate** local ``llama-server``.
+Optional on-station “UX chatter”: short one-liners from the shared local polish/chatter
+``llama-server`` lane.
 
 Default **on**; when off or on error, the UI uses the same static copy as before.
 See ``docs/ux-chatter-gemma.md``.
@@ -21,7 +22,10 @@ from voxium.llama_cpp_client import (
     llama_cpp_reachable,
 )
 from voxium.metrics_table import format_polish_usage_suffix
-from voxium.ux_chatter_model_registry import DEFAULT_UX_CHATTER_API_MODEL
+from voxium.polish_model_registry import (
+    DEFAULT_TRUSTED_POLISH_MODEL_ID,
+    POLISH_DEFAULT_MODEL,
+)
 from voxium.ux_chatter_prompt import (
     system_message_ux_banner,
     system_message_ux_chatter_copy,
@@ -40,12 +44,14 @@ from voxium.ux_chatter_prompt import (
 )
 
 _LOG = logging.getLogger(__name__)
+_SHARED_LLAMA_CPP_URL_DEFAULT = "http://127.0.0.1:11435"
 
 _wit_lock = threading.Lock()
 _cached_wit: str = ""
-# Set by :func:`voxium.app.ensure_llama_cpp_for_ux_chatter` so ``POST /v1/chat/completions``
-# uses the same ``--alias`` as the managed or discovered ``llama-server`` (Gemma vs TinyLlama).
+# Set by :func:`voxium.app.ensure_llama_cpp_for_ux_chatter` so UX chatter shares
+# the active polish/re-encode ``llama-server`` and selected model.
 _resolved_ux_chatter_model_id: str | None = None
+_resolved_ux_chatter_base_url: str | None = None
 
 # When the local model parrots STT (common on small GGUFs), ship on-brand lines instead.
 _UX_ECHO_FALLBACK_WITS: tuple[str, ...] = (
@@ -302,8 +308,17 @@ def set_resolved_ux_chatter_model_id(model_id: str | None) -> None:
     _resolved_ux_chatter_model_id = m or None
 
 
+def set_resolved_ux_chatter_runtime(base_url: str | None, model_id: str | None) -> None:
+    global _resolved_ux_chatter_base_url, _resolved_ux_chatter_model_id
+    b = (base_url or "").strip()
+    m = (model_id or "").strip()
+    _resolved_ux_chatter_base_url = b or None
+    _resolved_ux_chatter_model_id = m or None
+
+
 def clear_resolved_ux_chatter_model_id() -> None:
-    global _resolved_ux_chatter_model_id
+    global _resolved_ux_chatter_base_url, _resolved_ux_chatter_model_id
+    _resolved_ux_chatter_base_url = None
     _resolved_ux_chatter_model_id = None
 
 
@@ -342,14 +357,31 @@ def ux_chatter_runtime_from_config(
 ) -> UxChatterRuntime:
     raw = (file_config or {}).get("ux_chatter")
     uxc: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    server = (file_config or {}).get("server")
+    server_cfg: dict[str, Any] = server if isinstance(server, dict) else {}
+    transcription = (file_config or {}).get("transcription")
+    transcription_cfg: dict[str, Any] = (
+        transcription if isinstance(transcription, dict) else {}
+    )
+    base_url = (
+        _resolved_ux_chatter_base_url
+        or str(uxc.get("base_url") or "").strip()
+        or str(server_cfg.get("llama_cpp_url") or "").strip()
+        or _SHARED_LLAMA_CPP_URL_DEFAULT
+    )
+    base_url = base_url or _SHARED_LLAMA_CPP_URL_DEFAULT
     if _resolved_ux_chatter_model_id:
         model = _resolved_ux_chatter_model_id
     else:
-        model = str(uxc.get("model") or DEFAULT_UX_CHATTER_API_MODEL).strip()
-        model = model or DEFAULT_UX_CHATTER_API_MODEL
+        model = str(uxc.get("model") or "").strip()
+        if not model:
+            model = str(
+                transcription_cfg.get("polish_model") or POLISH_DEFAULT_MODEL
+            ).strip()
+        if not model or model == POLISH_DEFAULT_MODEL:
+            model = DEFAULT_TRUSTED_POLISH_MODEL_ID
     return UxChatterRuntime(
-        base_url=str(uxc.get("base_url") or "http://127.0.0.1:11436").strip()
-        or "http://127.0.0.1:11436",
+        base_url=base_url,
         model=model,
         timeout_s=float(uxc.get("timeout_s") or 0.45),
         max_tokens=int(uxc.get("max_tokens") or 48),
@@ -509,7 +541,18 @@ def fetch_ux_log_subtitle(
     return s or None
 
 
-def _normalize_shutdown_line(raw: str) -> str:
+def _shutdown_line_has_wit(line: str) -> bool:
+    body = re.sub(r"^voxium:\s*", "", line.strip(), flags=re.IGNORECASE)
+    body = body.strip(" \t\r\n.:-—–")
+    if not body:
+        return False
+    compact = re.sub(r"[\s()._`'\"-]+", "", body).lower()
+    if compact in {"ctrlc", "controlc", "sigint", "keyboardinterrupt"}:
+        return False
+    return any(ch.isalpha() for ch in body) and len(body) >= 12
+
+
+def _normalize_shutdown_line(raw: str) -> str | None:
     # Keep in sync with :data:`voxium.app._VOXIUM_SHUTDOWN_DEFAULT` (static Ctrl+C line).
     static = "Voxium: 73 / 10-7 — going clear, copy."
     s = (raw or "").replace("\n", " ")
@@ -518,8 +561,10 @@ def _normalize_shutdown_line(raw: str) -> str:
         return static
     s = s[:130].rstrip()
     if s.lower().startswith("voxium:"):
-        return s if len(s) < 200 else s[:199] + "…"
-    return f"Voxium: {s}"
+        line = s if len(s) < 200 else s[:199] + "…"
+    else:
+        line = f"Voxium: {s}"
+    return line if _shutdown_line_has_wit(line) else None
 
 
 def fetch_ux_shutdown_line(

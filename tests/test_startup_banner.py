@@ -2,7 +2,9 @@
 
 from voxium.startup_banner import (
     _BANNER_TAGLINES,
+    _DEFAULT_RULE_DOTS,
     _GLYPHS,
+    _faceplate_width,
     _merge_word,
     build_voxium_banner,
     default_rig_subtitle,
@@ -51,3 +53,10 @@ def test_banner_tagline_pool_nonempty() -> None:
 def test_default_rig_subtitle_hostname_and_rig() -> None:
     s = default_rig_subtitle("shack-01")
     assert "Rig" in s and "shack-01" in s and "1960" in s and "PTT" in s
+
+
+def test_faceplate_width_clamps_to_usable_columns() -> None:
+    """Narrow terminals must not force a faceplate wider than the panel (Copilot PR #7)."""
+    assert _faceplate_width(40) == 38
+    assert _faceplate_width(None) == _DEFAULT_RULE_DOTS
+    assert _faceplate_width(120) == 118

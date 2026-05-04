@@ -3,7 +3,7 @@
 **Status:** implementation reference for the local polish path; keep this doc aligned with the shipped code and remaining hardening work.  
 **Audience:** operators and contributors who will wire **local** speech-to-text (STT) to an optional **local** text post-processor for clearer English.
 
-> Current runtime note: the shipped polish path now uses a repo-local **`llama.cpp`** runtime (`llama-server`) plus **GGUF** models under `models/polish`. On Windows, **`scripts\windows\Setup-Voxium.cmd`** and **`voxium models --polish --pull-polish`** provision the repo-local runtime under `tools/llama.cpp` and the default GGUF model under `models/polish`. Older references to **Ollama** in this draft are historical and should be treated as migration notes, not the active runtime contract.
+> Current runtime note: the shipped polish path now uses a repo-local **`llama.cpp`** runtime (`llama-server`) plus **GGUF** models under `models/polish`. On Windows, **`scripts\windows\Setup-Voxium.cmd`** and **`voxium models polish pull`** provision the repo-local runtime under `tools/llama.cpp` and the default GGUF model under `models/polish`. Older references to **Ollama** in this draft are historical and should be treated as migration notes, not the active runtime contract.
 
 **Brand note (for future user-facing copy):** Frame this as a **second pass on the local stack** — *humans* key the mic, **robot** work does STT then a short *local* rewrite, still on **your** machine (see [brand.md](brand.md)). Avoid promising “perfect” English; prefer “smoother copy / clearer line” in UI and logs.
 
@@ -146,7 +146,7 @@ No polish controls are added to `/transcribe` in v1. Existing request/response c
   "text": "… raw STT text …",
   "model": "qwen3.5:4b",    // optional override
   "backend": "ollama",      // optional, v1 supports ollama only
-  "keep_alive": "10m"       // optional passthrough hint (duration, seconds, -1, or 0)
+  "keep_alive": "-1"        // optional passthrough hint (duration, seconds, -1, or 0)
 }
 ```
 
@@ -211,8 +211,8 @@ Do not include secrets.
 - **API:** `POST /api/chat` with `model`, `messages: [{role, content}]`, `stream: false`, `options` with low creativity and output cap.
 - **System prompt (central artifact):** short, testable rules, e.g. *“You fix grammar and disfluency only. Do not add facts. Do not answer questions. Output one paragraph.”* Store in a dedicated module and version it.
 - **Timeout:** separate polish timeout (recommended 15–30s default) from STT runtime.
-- **Model residency / warm path:** support `keep_alive` policy for low-latency follow-up requests. Keep configurable default (recommended `10m` in v1) and allow per-request override from `/polish`.
-- **Warmup:** optional startup no-op/chat warmup call when polish is enabled so first dictation does not pay full cold-start cost.
+- **Model residency / warm path:** support `keep_alive` policy for low-latency follow-up requests. Default to `-1` in v1 so the active GGUF stays resident unless the operator configures an unload window, and allow per-request override from `/polish`.
+- **Warmup:** startup no-op/chat warmup call is on by default when polish is enabled so first dictation does not pay full cold-start cost.
 - **Parsing:** normalize both success and non-success Ollama responses into one internal result object so callers never parse raw response JSON directly.
 
 ```mermaid
@@ -243,7 +243,7 @@ transcription:
 server:
   ollama_url: "http://127.0.0.1:11434"
   polish_timeout: 20
-  polish_keep_alive: "10m"
+  polish_keep_alive: "-1"
   polish_warmup_on_start: true
 
 hotkeys:
@@ -270,7 +270,7 @@ Keep unknown keys allowed (current Pydantic `extra="allow"` behavior).
 
 - `tools/llama.cpp/llama-server(.exe)` for the runtime,
 - `models/polish/*.gguf` for local polish models, and
-- `voxium models --polish --pull-polish` for provisioning the default runtime/model bundle.
+- `voxium models polish pull` for provisioning the default runtime/model bundle.
 
 Wire run defaults from config in `add_run_options`, server defaults in `add_server_options`.
 
@@ -485,7 +485,7 @@ These defaults remove ambiguity from implementation; change only with explicit p
 1. **History buffer stores final pasted text only** (`text`), not both variants.
 2. **`/transcribe` remains STT-only** in v1 (no polish form fields).
 3. **Failure policy is raw fallback** when polish fails after STT success (`/polish` fallback payload or client-side fallback if `/polish` is unreachable).
-4. **Default polish residency uses keep-alive** (v1 default: `10m`, configurable; per-request override allowed).
+4. **Default polish residency uses keep-alive** (v1 default: `-1`, keep loaded; configurable; per-request override allowed).
 5. **Feature name in UX is “Polish”** (`/polish`, `--polish`, downlink label `Polish:`).
 6. **No new `voxium doctor` command in v1**; health/readiness is surfaced through `/health` and docs.
 7. **Enable/disable controls are first-class** and equivalent across surfaces:

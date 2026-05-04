@@ -106,10 +106,7 @@ def default_rig_subtitle(hostname: str | None = None) -> str:
     h = (hostname or "").strip() or get_startup_hostname()
     if len(h) > 56:
         h = h[:53] + "…"
-    return (
-        f"Rig on station at {h}  ·  PTT & VOX  ·  loopback  ·  "
-        f"1960s base-station copy, you key, stack in the loop"
-    )
+    return f"Rig on station at {h}  ·  PTT & VOX  ·  loopback  ·  1960s local copy"
 
 
 def _hsv(h: float, s: float, v: float) -> tuple[int, int, int]:
@@ -171,20 +168,91 @@ def _rule_text(content_width: int | None) -> Text:
     return Text("  " + "·" * n, style="dim #475569")
 
 
+def _fit_plain(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text.ljust(width)
+    if width == 1:
+        return "…"
+    return text[: width - 1] + "…"
+
+
+def _faceplate_width(content_width: int | None) -> int:
+    if content_width is None:
+        return _DEFAULT_RULE_DOTS
+    # Never exceed usable panel width (borders eat two columns); wide terminals still get a
+    # full-width faceplate because usable grows with content_width.
+    return max(0, content_width - 2)
+
+
+def _build_faceplate(hostname: str | None, content_width: int | None) -> Text:
+    """
+    Static startup rig faceplate. The wordmark remains the RGB element; this frame gives the
+    banner a host-personalized radio console around it.
+    """
+    width = _faceplate_width(content_width)
+    inner_w = width - 4
+    h = (hostname or "").strip() or get_startup_hostname()
+    if len(h) > 28:
+        h = h[:25] + "…"
+
+    title = " CLI Radio "
+    title_rule = max(0, width - len(title) - 3)
+    out = Text("  ┌─", style="dim #0891b2")
+    out.append(title, style="bold #67e8f9")
+    out.append("─" * title_rule + "┐", style="dim #0891b2")
+    out.append("\n  │ ", style="dim #0891b2")
+    out.append(
+        _fit_plain("VFO 97.3 MHz  ·  RSSI S1 S3 S5 S7 S9  ▂▃▅▆▇█", inner_w),
+        style="bold #67e8f9",
+    )
+    out.append(" │", style="dim #0891b2")
+    out.append("\n  │ ", style="dim #0891b2")
+    out.append(
+        _fit_plain("NEEDLE  -20 -10  0  +10  +20        ◂──────╂───▸", inner_w),
+        style="dim #94a3b8",
+    )
+    out.append(" │", style="dim #0891b2")
+    out.append("\n  │ ", style="dim #0891b2")
+    out.append(
+        _fit_plain("GAIN [██████░░]  SQL [███░░░░░]  PTT/VOX ARMED", inner_w),
+        style="dim #94a3b8",
+    )
+    out.append(" │", style="dim #0891b2")
+    out.append("\n  │ ", style="dim #0891b2")
+    out.append(
+        _fit_plain(f"RIG {h}  ·  LOOPBACK LOCAL  ·  STACK ON STATION", inner_w),
+        style="dim #94a3b8",
+    )
+    out.append(" │", style="dim #0891b2")
+    out.append("\n  └" + "─" * (width - 2) + "┘", style="dim #0891b2")
+    return out
+
+
 def build_voxium_banner(
-    *, tagline: str | None = None, content_width: int | None = None
+    *,
+    tagline: str | None = None,
+    content_width: int | None = None,
+    hostname: str | None = None,
 ) -> Group:
     # Radio box: PTT & VOX, rig, shack; robotics: inference stack (see docs/brand.md).
     # ``tagline`` from the optional Gemma pass (``--ux-chatter``) wins; empty/whitespace → static pool.
     t = (tagline or "").strip()
     line = t if t else random.choice(_BANNER_TAGLINES)
     top = Text("  PTT & VOX Speech-to-Text for Terminal Input", style="dim #64748b")
-    rule1 = _rule_text(content_width)
-    parts: list[Text | str] = [top, "\n", rule1, "\n", _build_voxium_block()]
-    parts.append("\n")
-    parts.append(_rule_text(content_width))
-    parts.append(Text("\n  " + escape(line), style="dim #94a3b8"))
-    return Group(*parts)
+    out = Text()
+    out += top
+    out.append("\n")
+    out += _build_faceplate(hostname, content_width)
+    out.append("\n")
+    out += _rule_text(content_width)
+    out.append("\n")
+    out += _build_voxium_block()
+    out.append("\n")
+    out += _rule_text(content_width)
+    out.append("\n  " + escape(line), style="dim #94a3b8")
+    return Group(out)
 
 
 def show_startup_banner(
@@ -196,9 +264,10 @@ def show_startup_banner(
     w = voxium_panel_width(console)
     # Border 2 + horizontal padding 1+1 — same inner width as transcribe/PTT panels (app.py).
     inner_w = max(4, w - 4)
-    sub = (rig_subtitle or "").strip() or default_rig_subtitle(get_startup_hostname())
+    host = get_startup_hostname()
+    sub = (rig_subtitle or "").strip() or default_rig_subtitle(host)
     panel = Panel(
-        build_voxium_banner(content_width=inner_w, tagline=tagline),
+        build_voxium_banner(content_width=inner_w, tagline=tagline, hostname=host),
         title=Text("Voxium", style="bold rgb(34,211,238)"),
         title_align="left",
         subtitle=Text(sub, style="italic dim #94a3b8"),

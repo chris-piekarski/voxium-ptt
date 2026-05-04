@@ -79,28 +79,6 @@ def format_gpu_metrics_plaintext(gpu: dict | None) -> str:
     return "\n".join(lines)
 
 
-def _rows_request_output_compact(metrics: dict) -> list[tuple[str, str]]:
-    """Request timing + I/O: same numbers as the first :func:`_rows_request_block` fields, merged lines."""
-    return [
-        ("Request", str(metrics.get("request_id", "n/a"))),
-        (
-            "Audio / Inf / Total",
-            f"{format_seconds(metrics.get('audio_seconds'))} · "
-            f"{format_seconds(metrics.get('transcription_seconds'))} · "
-            f"{format_seconds(metrics.get('total_request_seconds'))}",
-        ),
-        (
-            "RTF / Input",
-            f"{format_number(metrics.get('realtime_factor'), 'x', 4)} · "
-            f"{format_bytes(metrics.get('input_bytes'))}",
-        ),
-        (
-            "Output",
-            f"{metrics.get('output_chars', 0)} chars / {metrics.get('segments', 0)} segments",
-        ),
-    ]
-
-
 def _rows_audio_input_compact(metrics: dict) -> list[tuple[str, str]]:
     """
     Transcript (cyan) panel: one dense row with **audio in**, **infer / total** latency, and **RTF**.

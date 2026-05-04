@@ -81,7 +81,6 @@ class UtteranceChunker:
         self._sil_accum = 0.0
         self._ema: float | None = None
         self._pre_speech_streak = 0
-        self._hud = "idle"
         self._emitted = 0
         # Minimum voiced span (seconds) before a pause can end a segment.
         self._min_speech_s = max(0.0, 0.2)

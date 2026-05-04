@@ -6,7 +6,6 @@ from voxium.paths import (
     instance_lock_path,
     llama_cpp_dir,
     models_dir,
-    ollama_models_dir,
     polish_models_dir,
     repo_root,
 )
@@ -17,7 +16,6 @@ def test_voxium_repo_root_respects_env(monkeypatch, tmp_path) -> None:
     assert repo_root() == tmp_path.resolve()
     assert models_dir() == tmp_path / "models"
     assert polish_models_dir() == tmp_path / "models" / "polish"
-    assert ollama_models_dir() == polish_models_dir()
     assert llama_cpp_dir() == tmp_path / "tools" / "llama.cpp"
     assert default_server_log_path().name == "voxium_server.log"
     assert instance_lock_path().name == "voxium.lock"
@@ -31,7 +29,6 @@ def test_ensure_runtime_dirs_creates_subdirs(monkeypatch, tmp_path) -> None:
         p = tmp_path / name
         assert p.is_dir(), name
     assert (tmp_path / "models" / "polish").is_dir()
-    assert (tmp_path / "models" / "ux").is_dir()
     assert (tmp_path / "tools" / "llama.cpp").is_dir()
 
 

@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 # Launch Voxium. Tab title is set by the app (SetConsoleTitleW + VT); optional: $env:VOXIUM_WINDOW_TITLE = "My title"
 # Usage: pwsh -File scripts\windows\Voxium.ps1 run
-# Double-click: use Voxium.cmd in the repo root (or scripts\windows\Voxium.cmd) so the window pauses on errors.
+# Double-click: prefer Voxium.cmd in the repo root (or scripts\windows\Voxium.cmd). This script also
+# pauses on error when not VOXIUM_NO_PAUSE=1 so the window does not vanish before you can read it.
 #
 # Do not call Set-ExecutionPolicy here: the .cmd wrapper already passes -ExecutionPolicy Bypass, and
 # Set-ExecutionPolicy -Scope Process can throw under strict Group Policy. With $ErrorActionPreference
@@ -17,6 +18,17 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $RepoRoot
 
+function Exit-VoxiumLauncher {
+    param([int]$Code)
+    $skipPause = $env:VOXIUM_SKIP_PS_PAUSE -eq "1" -or $env:VOXIUM_NO_PAUSE -eq "1"
+    if (-not $skipPause -and $Code -ne 0 -and $Code -ne 130) {
+        Write-Host ""
+        Write-Host "Press Enter to close…" -ForegroundColor DarkYellow
+        try { $null = Read-Host } catch { }
+    }
+    exit $Code
+}
+
 # When unset, seed the same default STT model as voxium.model_registry.DEFAULT_MODEL_NAME
 # (English, ~2GB VRAM). Override: set WHISPER_MODEL, or transcription.model in config.yaml.
 if (-not $env:WHISPER_MODEL) {
@@ -30,8 +42,8 @@ if (-not $env:VOXIUM_POLISH_ENABLED) {
 
 # Gemma UX chatter is **on** by default (`voxium run`). To disable: `voxium run --no-ux-chatter`, or
 #   ux_chatter: { enabled: false }  in  %USERPROFILE%\.config\voxium\config.yaml , or  VOXIUM_UX_CHATTER=0 .
-# First-time:  voxium models --pull-ux-chatter  and auto-start (or a llama-server on 127.0.0.1:11436 on the
-# *same* OS as this voxium — Windows vs WSL are different loopbacks).
+# First-time shared stack:  voxium models polish pull  (or Setup-Voxium). llama-server must be reachable on
+# `--llama-cpp-url` (default 127.0.0.1:11435) on the *same* OS as this voxium — Windows vs WSL are different loopbacks.
 
 $PyProject = Join-Path $RepoRoot "pyproject.toml"
 if (-not (Test-Path -LiteralPath $PyProject)) {
@@ -40,7 +52,7 @@ if (-not (Test-Path -LiteralPath $PyProject)) {
     Write-Host "Voxium.ps1 must live in the clone at:  <repo>\scripts\windows\" -ForegroundColor Yellow
     Write-Host "Do not move or copy this script out of the repository." -ForegroundColor Yellow
     Write-Host ""
-    exit 1
+    Exit-VoxiumLauncher 1
 }
 
 if ($env:VOXIUM_WINDOWS_DEBUG -eq "1") {
@@ -96,7 +108,7 @@ if (-not (Test-ValidWindowsVenv)) {
         Write-Host "  Or double-click:  scripts\windows\Setup-Voxium.cmd" -ForegroundColor Cyan
         Write-Host "  (Unset VOXIUM_NO_AUTO_SETUP to allow automatic repair on launch.)" -ForegroundColor DarkGray
         Write-Host ""
-        exit 1
+        Exit-VoxiumLauncher 1
     }
     if ((Test-Path -LiteralPath $VenvDir) -and -not (Test-Path -LiteralPath $VenvCfg)) {
         Write-Host "" 
@@ -110,11 +122,11 @@ if (-not (Test-ValidWindowsVenv)) {
     }
     & $SetupScript -SkipPolish
     if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+        Exit-VoxiumLauncher $LASTEXITCODE
     }
     if (-not (Test-ValidWindowsVenv)) {
         Write-Host "[ERROR] Setup finished but .venv is still not usable. See logs\voxium-windows-setup.log" -ForegroundColor Red
-        exit 1
+        Exit-VoxiumLauncher 1
     }
 }
 
@@ -127,17 +139,17 @@ if ((Test-ValidWindowsVenv) -and -not (Test-VoxiumPackageImportable)) {
         Write-Host "    .\.venv\Scripts\python -m pip install -e ." -ForegroundColor Cyan
         Write-Host "  Or:  pwsh -ExecutionPolicy Bypass -File .\scripts\windows\Setup-Voxium.ps1" -ForegroundColor Cyan
         Write-Host ""
-        exit 1
+        Exit-VoxiumLauncher 1
     }
     Write-Host ""
     Write-Host "Voxium: package not installed in .venv. Running setup (pip install -e ., skip heavy polish pull)…" -ForegroundColor Yellow
     & $SetupScript -SkipPolish
     if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+        Exit-VoxiumLauncher $LASTEXITCODE
     }
     if (-not (Test-VoxiumPackageImportable)) {
         Write-Host "[ERROR] import voxium still fails after setup. See logs\voxium-windows-setup.log" -ForegroundColor Red
-        exit 1
+        Exit-VoxiumLauncher 1
     }
 }
 
@@ -148,7 +160,7 @@ if (Test-Path -LiteralPath $Vox) {
     } else {
         & $Vox
     }
-    exit $LASTEXITCODE
+    Exit-VoxiumLauncher $LASTEXITCODE
 }
 if (Test-Path -LiteralPath $Py) {
     if ($VoxiumArgs) {
@@ -156,7 +168,7 @@ if (Test-Path -LiteralPath $Py) {
     } else {
         & $Py -m voxium
     }
-    exit $LASTEXITCODE
+    Exit-VoxiumLauncher $LASTEXITCODE
 }
 Write-Host ""
 Write-Host "Voxium is not set up: .venv\Scripts\python.exe is missing after setup." -ForegroundColor Red
@@ -165,4 +177,4 @@ Write-Host "    pwsh -ExecutionPolicy Bypass -File .\scripts\windows\Setup-Voxiu
 Write-Host "  Or double-click:  scripts\windows\Setup-Voxium.cmd" -ForegroundColor Cyan
 Write-Host "  (Legacy) cmd:  scripts\windows\venv_bootstrap.cmd" -ForegroundColor DarkGray
 Write-Host ""
-exit 1
+Exit-VoxiumLauncher 1

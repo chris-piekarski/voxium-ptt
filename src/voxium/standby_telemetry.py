@@ -10,6 +10,7 @@ from typing import Any
 
 from rich.text import Text
 
+from voxium.morse_code import morse_marquee_rows_for_tick
 from voxium.standby_fft import SPECTRUM_DISPLAY_WIDTH, spectrum_rich_for_tick
 
 _DEFAULT_SR = 16000
@@ -62,9 +63,13 @@ def _format_path_brief(ctx: dict[str, Any]) -> str:
 
 def _tail_from_context(ctx: dict[str, Any]) -> str:
     if not ctx.get("has_last_decode"):
+        if ctx.get("morse_audio_playing"):
+            return "CW audio on · no decode yet in this run"
         return "no decode yet in this run — PTT a clear take"
 
     parts: list[str] = []
+    if ctx.get("morse_audio_playing"):
+        parts.append("CW audio on")
     rtf = ctx.get("last_realtime_factor")
     if rtf is not None:
         try:
@@ -95,16 +100,37 @@ def _tail_from_context(ctx: dict[str, Any]) -> str:
 def build_standby_detail_line(
     tick: int,
     context: dict[str, Any] | None = None,
+    *,
+    content_width: int | None = None,
 ) -> Text:
     """
-    Two lines under the green **◉ PTT/VOX · Standing by** head: the **first** is local + Zulu,
-    path, and tail (if ``ux_chatter_wit`` is set, that string leads at the **far left** in place
-    of “Standing by.”; otherwise the line starts with “Standing by.”). The **second** line is
-    only the animated rFFT block strip, flush left, so the spectrum does not start mid-sentence.
+    Lines under the green **◉ PTT/VOX · Standing by** head: the first is local + Zulu,
+    path, and tail (if ``ux_chatter_wit`` is set, that string leads at the far left in place
+    of “Standing by.”; otherwise the line starts with “Standing by.”). The lower row is
+    the animated rFFT block strip; when transcript text is available, a CW trainer label row
+    appears above the Morse marquee to the right of the spectrum.
     """
     t = 0 if tick is None else int(tick)
     ctx = context or {}
     spec = _spectrum_segment(t, ctx)
+    line2 = spec
+    label_line: Text | None = None
+    transcript = str(ctx.get("last_transcript_text") or "").strip()
+    if transcript and content_width is not None:
+        separator = "  "
+        morse_width = int(content_width) - SPECTRUM_DISPLAY_WIDTH - len(separator)
+        if morse_width > 0:
+            labels, code = morse_marquee_rows_for_tick(transcript, t, morse_width)
+            label_line = (
+                Text(" " * SPECTRUM_DISPLAY_WIDTH, style="dim #4b5563")
+                + Text(separator, style="dim #4ade80")
+                + Text(labels, style="dim #fde68a")
+            )
+            line2 = (
+                spec
+                + Text(separator, style="dim #4ade80")
+                + Text(code, style="dim #fbbf24")
+            )
     path = _format_path_brief(ctx)
     clock = _local_and_utc_hms()
     tail = _tail_from_context(ctx)
@@ -116,4 +142,12 @@ def build_standby_detail_line(
     line1 = Text(prefix, style="dim #cbd5e1") + Text(
         f"  {clock}  ·  {path}  ·  {tail}", style="dim #cbd5e1"
     )
-    return line1 + Text("\n", style="dim #cbd5e1") + spec
+    if label_line is not None:
+        return (
+            line1
+            + Text("\n", style="dim #cbd5e1")
+            + label_line
+            + Text("\n", style="dim #cbd5e1")
+            + line2
+        )
+    return line1 + Text("\n", style="dim #cbd5e1") + line2

@@ -16,7 +16,7 @@ echo === where py / python ===>> "%LOG%"
 where py >> "%LOG%" 2>&1
 where python >> "%LOG%" 2>&1
 where pwsh >> "%LOG%" 2>&1
-where ollama >> "%LOG%" 2>&1
+where llama-server >> "%LOG%" 2>&1
 type "%LOG%"
 
 echo.

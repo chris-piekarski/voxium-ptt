@@ -37,6 +37,8 @@ def test_list_empty_prefix_all_ordered() -> None:
         "disk",
         "mic",
         "gpu",
+        "stats",
+        "hotkeys",
         "models",
         "re-encode",
         "polish",
@@ -56,6 +58,11 @@ def test_list_prefix_d_matches_disk() -> None:
 def test_list_prefix_du_matches_disk() -> None:
     m = list_slash_command_matches("du")
     assert m == ["disk"]
+
+
+def test_list_prefix_s_matches_stats() -> None:
+    m = list_slash_command_matches("s")
+    assert m == ["stats"]
 
 
 def test_list_alias_h_matches_help() -> None:
@@ -99,6 +106,24 @@ def test_format_hints_for_polish_subcommands(monkeypatch) -> None:
     assert "/polish list" in h2
     assert "/polish use" in h2
     assert "/polish on" in h2
+
+
+def test_hotkeys_completion() -> None:
+    out = apply_slash_tab("/hot", tab_cycle=0)
+    assert out.new_buffer == "/hotkeys"
+
+    actions = _completion_matches_for_buffer("/hotkeys ")
+    assert "/hotkeys ptt" in actions
+    assert "/hotkeys replay" in actions
+
+    ptt_keys = _completion_matches_for_buffer("/hotkeys ptt f1")
+    assert "/hotkeys ptt f10" in ptt_keys
+    assert "/hotkeys ptt f12" in ptt_keys
+
+
+def test_stats_completion() -> None:
+    out = apply_slash_tab("/sta", tab_cycle=0)
+    assert out.new_buffer == "/stats"
 
 
 def test_tab_one_match_completes() -> None:

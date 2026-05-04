@@ -55,6 +55,43 @@ def test_decode_bars_use_spectrum_chars() -> None:
     assert "audio in" not in s.plain
 
 
+def test_morse_marquee_fills_remaining_standby_width() -> None:
+    content_width = SPECTRUM_DISPLAY_WIDTH + 2 + 18
+    s = build_standby_detail_line(
+        0,
+        {
+            "last_spectrum_fft": _FAKE_SPEC,
+            "last_transcript_text": "sos",
+        },
+        content_width=content_width,
+    )
+    label_line = s.plain.splitlines()[1]
+    code_line = s.plain.splitlines()[2]
+
+    assert label_line.startswith(" " * SPECTRUM_DISPLAY_WIDTH + "  ")
+    assert len(label_line) == content_width
+    assert " S   O   S " in label_line
+    assert code_line.startswith(_FAKE_SPEC + "  ")
+    assert len(code_line) == content_width
+    assert "... --- ..." in code_line
+
+
+def test_morse_marquee_animates_with_standby_tick() -> None:
+    context = {
+        "last_spectrum_fft": _FAKE_SPEC,
+        "last_transcript_text": "copy",
+    }
+    a = build_standby_detail_line(
+        0, context, content_width=SPECTRUM_DISPLAY_WIDTH + 2 + 18
+    )
+    b = build_standby_detail_line(
+        3, context, content_width=SPECTRUM_DISPLAY_WIDTH + 2 + 18
+    )
+
+    assert a.plain.splitlines()[1] != b.plain.splitlines()[1]
+    assert a.plain.splitlines()[2] != b.plain.splitlines()[2]
+
+
 def test_decode_tail_shows_level_not_redundant_audio_duration() -> None:
     s = build_standby_detail_line(
         0,
@@ -72,6 +109,18 @@ def test_decode_tail_shows_level_not_redundant_audio_duration() -> None:
     assert "RMS -28" in s.plain
     assert "audio in" not in s.plain
     assert "9.99" not in s.plain
+
+
+def test_decode_tail_shows_cw_audio_playing() -> None:
+    s = build_standby_detail_line(
+        0,
+        {
+            "has_last_decode": True,
+            "morse_audio_playing": True,
+            "last_realtime_factor": 0.4,
+        },
+    )
+    assert "CW audio on" in s.plain
 
 
 def test_path_brief_falls_back_on_non_numeric_durations() -> None:

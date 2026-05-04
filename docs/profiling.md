@@ -62,6 +62,16 @@ From the repository root:
 
 That installs the maintained developer tool set, including `py-spy`.
 
+To record a flame graph of the **Windows client** during PTT without fragile one-line pastes, from the repository root:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
+```
+
+With OneDrive, the default SVG path is often `%USERPROFILE%\OneDrive\Desktop\voxium-ptt-YYYYMMDD-HHMMSS.svg` (for example `voxium-ptt-20260504-150612.svg`).
+
+Optional flags: `-Duration`, `-Rate`, `-Native`, `-ClientProcessId`, `-OutputPath`, `-Spawn`, `-SpawnArguments`, `-NoSubprocesses`. Default `-OutputPath` picks the first existing directory among `GetFolderPath(Desktop)`, `%USERPROFILE%\OneDrive\Desktop`, `%USERPROFILE%\Desktop`, and `%PUBLIC%\Desktop`; if none exist, it writes under `logs\py-spy\` in the repo (created automatically). Attach mode auto-retries on Windows: plain and `--nonblocking` use a short probe (up to 5s) before a full `-Duration` capture with the same flags; then `--subprocesses` for a full capture (with `-NoSubprocesses`, a final plain full-duration step is used instead). If every attach strategy fails, use `-Spawn` so py-spy starts `python -m voxium` (close the main client first — Windows single-instance mutex). Run `Get-Help .\scripts\windows\Profile-Voxium-PTT.ps1 -Full` for details.
+
 ## 3. Same-OS rule
 
 Run `py-spy` from the **same OS context** as the Voxium process you want to profile.
@@ -126,6 +136,16 @@ py-spy record -o voxium-profile.svg --pid <PID> --duration 20
 ```
 
 Then open `voxium-profile.svg` in a browser.
+
+### 4.5 Reference flame graph: idle / standby
+
+A captured `py-spy` flame graph for **idle / standby** lives at
+[`docs/profiling/idle-standby-default.svg`](profiling/idle-standby-default.svg).
+GitHub renders it as a static preview in the markdown view; download the raw
+SVG and open it in a browser to keep the inferno hover, zoom, and search
+controls. Use it as the **shape baseline** when comparing a new capture from
+the same scenario — if the new capture's tall stacks differ from this one,
+that delta is your investigation target.
 
 ## 5. How to capture useful traces
 

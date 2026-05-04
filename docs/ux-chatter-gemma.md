@@ -1,7 +1,8 @@
-# UX chatter (Gemma) — design and implementation plan
+# UX chatter — shared polish model lane
 
-**Status:** Implemented (default **on**; use `voxium run --no-ux-chatter`, `ux_chatter.enabled: false` in `~/.config/voxium/config.yaml`, or `VOXIUM_UX_CHATTER=0` to disable). **Provision:** On first run, the client **auto-pulls** the Gemma GGUF into `models/ux/` when it is missing (override with `--no-ux-chatter-auto-pull` or `ux_chatter.auto_pull: false` in config). You can also run `voxium models --pull-ux-chatter` (HF Gemma access may be gated; accept the license or use `huggingface-cli login`). **Run:** `voxium run` (no extra flag). A **second** local `llama-server` is started on `--ux-chatter-url` when **auto-start** is on and the Gemma file exists under `models/ux/` (separate from re-encode; log: `logs/llama_cpp_ux.log`).  
-**Goal:** Add **optional, fun, on-brand** dynamic lines in the **console / Rich** experience, driven by a **small local GGUF** and the latest **transcribed text**, without changing PTT/VOX/transcribe/paste behavior and without new regression risk. **`make test` and `make lint` must pass;** when the feature is off or the model is missing, fall back to static copy.
+**Status:** Implemented (default **on**; use `voxium run --no-ux-chatter`, `ux_chatter.enabled: false` in `~/.config/voxium/config.yaml`, or `VOXIUM_UX_CHATTER=0` to disable). **Model lane:** UX chatter uses the **same selected polish GGUF** as re-encode, served by the same local `llama-server` on `--llama-cpp-url` and stored under `models/polish/`. Select it with `/models polish use <id>` or `voxium run --polish-model <id>`. **Provision:** use `voxium models polish pull <id>`.
+
+**Goal:** Add **optional, fun, on-brand** dynamic lines in the **console / Rich** experience, driven by the shared local GGUF and the latest **transcribed text**, without changing PTT/VOX/transcribe/paste behavior and without new regression risk. **`make test` and `make lint` must pass;** when the feature is off or the model is missing, fall back to static copy.
 
 **References:** [brand.md](brand.md), [radio-chatter-context.md](radio-chatter-context.md), [architecture.md](architecture.md), [llm-polish-plan.md](llm-polish-plan.md).
 
@@ -18,24 +19,17 @@
 
 ---
 
-## 2. Model: `google/gemma-3-1b-it-qat-q4_0-gguf`
+## 2. Model lane: `models/polish/`
 
-- **Size:** small (≈1B-class QAT GGUF), appropriate for **very short** completions.  
-- **Name in ops copy:** e.g. **Gemma (UX)** or **ux-chatter** in config — avoid overloading the word **polish** (that lane stays STT post-edit).
+- **Selection:** the active `--polish-model` is also the UX chatter model. `auto` resolves to the registry default in `voxium.polish_model_registry`.
+- **Gemma option:** `gemma-2-2b-it-q5km` (`gemma-2-2b-it-Q5_K_M.gguf`) is available as a trusted shared polish/chatter model.
+- **Name in ops copy:** say **polish/chatter model lane** or **shared local GGUF**. Do not imply there is a separate active UX model.
 
 ### 2.1 Reuse **llama.cpp** only (no third inference *framework*)
 
-Voxium already uses **`llama-server`** (llama.cpp) for the **polish / re-encode** path via `voxium.llama_cpp_client` and `voxium.llama_cpp_daemon` (see [llm-polish-plan.md](llm-polish-plan.md)).
+Voxium uses **one** `llama-server` process for the shared **polish / re-encode / UX chatter** path via `voxium.llama_cpp_client` and `voxium.llama_cpp_daemon` (see [llm-polish-plan.md](llm-polish-plan.md)). A single `llama-server` serves one loaded GGUF at a time, so the product rule is simple: **chatter and polish always use the same selected model**.
 
-**Important:** A single `llama-server` process typically serves **one loaded GGUF** at a time (`-m ...`). The **polish** default is a different GGUF (e.g. Qwen) than the proposed **Gemma 1B**. Therefore:
-
-| Approach | Reuse of engine | When to use |
-|----------|-----------------|------------|
-| **A — Second `llama-server` (recommended baseline)** | Same **binary** as polish; second process on a **separate loopback port** (e.g. `11436` vs polish’s port); **Gemma only** in that process. | Polish and UX can both be “on” without unloading/reloading a multi‑GB model between requests. |
-| **B — Same port as polish** | Same process = **one** model loaded. | Implies **either** polish **or** UX model is loaded, or heavy **model swap** between requests — **poor for latency** and **not** recommended. |
-| **C — UX only when polish is disabled** | One server, one small model. | Possible **future** simplification; conflicts with “power user runs polish + fun UX” unless (A) exists. |
-
-**Implementation direction:** extend the **same HTTP client** (`llama_cpp_chat` or a thin `ux_chatter_complete` wrapper) with **configurable** `base_url`, `model` id, **system prompt**, `max_tokens`, and `timeout` — not a new HTTP stack. Optionally **factor** a shared “chat completion” helper if polish and UX only differ in prompts and limits.
+The UX path still has its own prompts, short timeouts, and fallbacks. It does **not** have its own model registry, model directory, or active port.
 
 ---
 
@@ -67,19 +61,20 @@ Implement **behind a flag**; wire **one** surface first, then expand.
 
 ---
 
-## 5. Configuration (sketch)
+## 5. Configuration
 
 | Key | Purpose |
 |-----|--------|
-| `ux_chatter_enabled` (bool, default `False`) | Master switch. |
-| `ux_chatter_base_url` | e.g. `http://127.0.0.1:11436` (second `llama-server`) |
-| `ux_chatter_model` | Server “model” id (alias for loaded GGUF). |
-| `ux_chatter_timeout_s`, `ux_chatter_max_tokens` | Hard limits. |
-| Paths | New trusted entry for the **Gemma** GGUF (e.g. under `models/ux/` or `models/polish/` with a **distinct** filename) — TBD: mirror `TrustedPolishModel` pattern in a **small** `ux_chatter_model_registry` or a single row in a shared “local GGUF” table. |
+| `ux_chatter.enabled` (bool, default `True`) | Master switch for console-only chatter. |
+| `server.llama_cpp_url` | Shared polish/chatter `llama-server` base URL. |
+| `transcription.polish_model` | Shared model id for polish and UX chatter. |
+| `ux_chatter.base_url`, `ux_chatter.model` | Optional overrides for chatter HTTP only; when unset, `server.llama_cpp_url` and `transcription.polish_model` apply. |
+| `ux_chatter.timeout_s`, `ux_chatter.max_tokens` | Hard limits for chatter requests. |
+| Paths | Trusted GGUFs live under `models/polish/` and are listed by `/models polish list`. |
 
-**Env / CLI:** optional `VOXIUM_UX_CHATTER=0` for CI and for users who want zero sidecar traffic.
+**Env / CLI:** use `VOXIUM_UX_CHATTER=0` for CI or for operators who want zero chatter traffic. `voxium run --no-ux-chatter` disables the chatter surfaces while leaving the shared polish model lane available.
 
-**Provisioning:** optional `voxium models --ux-chatter` (or combined with Windows bootstrap) to download **only** when the operator opts in — idempotent, like `--pull-polish`.
+**Provisioning:** `voxium models polish pull <id>` downloads a shared GGUF.
 
 ---
 
@@ -92,75 +87,49 @@ flowchart LR
     ui["Console Rich standby"]
     uxc["ux_chatter optional"]
   end
-  uxs["llama-server Gemma 1B UX only"]
+  sharedLlama["llama-server shared polish/chatter GGUF"]
 
   stt --> ui
   ui -.->|after transcript| uxc
-  uxc -->|HTTP chat| uxs
+  uxc -->|HTTP chat| sharedLlama
 ```
 
-*(Polish continues to use its own `llama-server` and GGUF; this diagram only shows the optional UX chatter path.)*
-
-Polish path continues to use **its** `llama-server` instance; UX chatter uses **llama.cpp** only, on a **separate** process when both are needed.
+Polish and UX chatter share the same `llama-server` instance and selected GGUF. The STT server remains separate.
 
 ---
 
-## 7. Implementation phases (for the coding agent)
+## 7. Current operator behavior
 
-1. **Config + registry stub**  
-   - Feature flag default off.  
-   - Optional trusted GGUF record + repo path (no default download in minimal install).
+1. **One shared lane:** `/models polish use <id>` and `voxium run --polish-model <id>` switch the model used for both re-encode and UX chatter.
 
-2. **Second daemon helper (or generalized `ensure` with port + model)**  
-   - Reuse `ensure_llama_cpp_*` patterns; **do not** bind polish and UX to the same process without an explicit “single server” mode doc.
+2. **One shared runtime:** `server.llama_cpp_url` / `--llama-cpp-url` is the default base URL for both paths. Optional `ux_chatter.base_url` overrides the chatter HTTP client only when you need a different loopback endpoint than re-encode.
 
-3. **Pure helper: `build_ux_chatter_request` / `complete_ux_line`**  
-   - Input: transcript snippet, `phase` enum (`standby` | `startup` | `after_tx` …).  
-   - Output: short string or `None` → caller uses static default.
+3. **One active GGUF at a time:** when the selected polish model changes, Voxium rebinds chatter to the same loaded model. There is no separate active UX model or UX-only port.
 
-4. **Wire one UI slot** (e.g. `standby_telemetry` detail line) with async + timeout + static fallback.
+4. **Graceful fallback:** if chatter is disabled, the shared runtime is unavailable, or a request times out, the console falls back to static on-brand copy and the STT/paste path stays unchanged.
 
-5. **Tests**  
-   - Mocks, no real `llama-server` in default `make test`.  
-   - Grep/extend `tests/test_console_status.py` only with **static** default or fixture flag.
-
-6. **Docs**  
-   - This file + one paragraph in [architecture.md](architecture.md) (optional) when behavior is real.
-
-7. **Optional:** Windows `Setup-Voxium` / `voxium models` to pull Gemma when operator wants full “fun” experience.
+5. **Provisioning:** operators inspect and install the shared lane with `voxium models polish list`, `voxium models polish installed`, and `voxium models polish pull <id>`.
 
 ---
 
-## 8. Open questions (resolve before or during first PR)
-
-1. **Port:** Fixed second port vs configurable only — is `11436` acceptable, or follow polish port +1 convention?  
-2. **Coexistence:** Is **polish + UX** simultaneously in scope for v1? (If **yes**, plan **A** (two `llama-server` processes) is the default; document RAM impact.)  
-3. **Trigger set:** **Only** after a **successfully transcribed** line, or also on idle/startup with **empty** context (may need **static** seed lines)?  
-4. **Privacy:** Should the UX prompt **never** include the full raw transcript, only a **redacted** or **max-N-char** tail? (Recommended: cap at ~200–400 chars in the prompt.)  
-5. **Disk and HF:** exact filename after download and Hugging Face revision pinning for reproducible installs.  
-6. **Naming in UI:** “Gemma” / “ux-chatter” in DEBUG logs only vs never expose model names to the operator.  
-7. **Internationalization:** English-only v1, or pass-through of operator locale later?
-
----
-
-## 9. Verification (merge bar)
+## 8. Verification
 
 - `make test`  
 - `make lint`  
-- Manual: `voxium` / `voxium run` with **flag off** — indistinguishable from pre-feature behavior.  
-- With flag on and **no** second server: instant fallback, no hang.  
-- Mermaid in this file: use **quoted node labels** for paths, `--`, and parentheses (see [architecture.md](architecture.md) fixes).
+- Manual: `voxium` / `voxium run` with `--no-ux-chatter` keeps the pre-chatter operator experience except for the shared runtime/model controls.
+- Manual: switch models with `/models polish use <id>` and confirm chatter follows the newly selected model without a separate UX startup path.
+- Manual: with chatter on and the shared `llama-server` unavailable, the UI falls back immediately without blocking STT or paste.
 
 ---
 
-## 10. Related code map
+## 9. Related code map
 
 | Module | Role |
 |--------|------|
 | `voxium/llama_cpp_client.py` | `llama_cpp_chat`, `llama_cpp_reachable` — **reuse** with different prompts/limits. |
-| `voxium/llama_cpp_daemon.py` | `ensure_llama_cpp_daemon` — **pattern** for a second instance. |
-| `voxium/polish_model_registry.py` | **Pattern** for trusted GGUF; UX model may be a separate table. |
+| `voxium/llama_cpp_daemon.py` | `ensure_llama_cpp_daemon` — manages the shared local `llama-server`. |
+| `voxium/polish_model_registry.py` | Trusted GGUF registry for the shared polish/chatter lane. |
 | `voxium/polish_prompt.py` | **Do not** overload `system_message()` for polish with UX; **separate** `ux_chatter_prompt.py` (or similar). |
 | `voxium/startup_banner.py`, `voxium/standby_telemetry.py`, `voxium/radio_readback.py` | Primary **string** injection points. |
 
-This document is the handoff for implementation; keep **defaults safe**, **tests green**, and **one llama.cpp stack** (one or two **processes**, not a new inference engine).
+This document reflects the shipped shared-lane design: **one active GGUF**, **one local `llama-server` lane** for polish plus chatter, and safe fallbacks when that lane is unavailable.
