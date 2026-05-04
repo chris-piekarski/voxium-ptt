@@ -421,19 +421,17 @@ def _merge_run_file_config(args: Any) -> dict:
         "enabled": bool(getattr(args, "ux_chatter", False)),
     }
     u["base_url"] = str(
-        getattr(args, "ux_chatter_url", None)
-        or u.get("base_url")
-        or server_cfg.get("llama_cpp_url")
-        or "http://127.0.0.1:11435"
-    )
+        u.get("base_url") or server_cfg.get("llama_cpp_url") or "http://127.0.0.1:11435"
+    ).strip()
     u["model"] = str(
-        getattr(args, "ux_chatter_model", None)
-        or u.get("model")
+        u.get("model")
         or transcription_cfg.get("polish_model")
         or DEFAULT_TRUSTED_POLISH_MODEL_ID
     )
-    u["auto_start"] = bool(getattr(args, "ux_chatter_auto_start", True))
-    u["auto_pull"] = bool(getattr(args, "ux_chatter_auto_pull", True))
+    u.setdefault("auto_start", True)
+    u.setdefault("auto_pull", True)
+    u["auto_start"] = bool(u["auto_start"])
+    u["auto_pull"] = bool(u["auto_pull"])
     if not is_loopback_url(u["base_url"]):
         u["base_url"] = str(server_cfg.get("llama_cpp_url") or "").strip()
     if not is_loopback_url(u["base_url"]):
@@ -636,11 +634,7 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         default=server.get("metrics_sample_interval", DEFAULT_METRICS_SAMPLE_INTERVAL),
         help="GPU metrics sampling interval in seconds",
     )
-    llama_cpp_url_default = (
-        server.get("llama_cpp_url")
-        or server.get("ollama_url")
-        or "http://127.0.0.1:11435"
-    )
+    llama_cpp_url_default = server.get("llama_cpp_url") or "http://127.0.0.1:11435"
     if not is_loopback_url(llama_cpp_url_default):
         llama_cpp_url_default = "http://127.0.0.1:11435"
     server_group.add_argument(
@@ -651,9 +645,7 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     server_group.add_argument(
         "--llama-cpp-auto-start",
         action=argparse.BooleanOptionalAction,
-        default=bool(
-            server.get("llama_cpp_auto_start", server.get("ollama_auto_start", True))
-        ),
+        default=bool(server.get("llama_cpp_auto_start", True)),
         help="When re-encode (polish) is enabled, start/stop a local llama-server if none is reachable",
     )
     server_group.add_argument(
@@ -681,14 +673,14 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     )
     server_group.add_argument(
         "--polish-keep-alive",
-        default=str(server.get("polish_keep_alive", "10m") or "10m"),
-        help="Idle unload window for llama.cpp re-encode runtime (e.g. 10m, 0, -1)",
+        default=str(server.get("polish_keep_alive", "-1") or "-1"),
+        help="Idle unload window for llama.cpp re-encode runtime (default: -1, keep loaded; e.g. 10m, 0, -1)",
     )
     server_group.add_argument(
         "--polish-warmup-on-start",
         action=argparse.BooleanOptionalAction,
-        default=bool(server.get("polish_warmup_on_start", False)),
-        help="After STT model load, probe/warm the local llama.cpp re-encode runtime",
+        default=bool(server.get("polish_warmup_on_start", True)),
+        help="After STT model load, probe/warm the local llama.cpp re-encode runtime (default: on)",
     )
     server_group.add_argument(
         "--polish-max-concurrent",
@@ -774,11 +766,6 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
 
     uxc = file_config.get("ux_chatter")
     uxc = uxc if isinstance(uxc, dict) else {}
-    uxc_default_url = str(
-        uxc.get("base_url") or server.get("llama_cpp_url") or "http://127.0.0.1:11435"
-    ).strip()
-    if not is_loopback_url(uxc_default_url):
-        uxc_default_url = "http://127.0.0.1:11435"
     uxc_group = parser.add_argument_group(
         "UX chatter (shared polish model, default on)",
         "Short HAM-style one-liners in the console. Chatter uses the same selected "
@@ -791,31 +778,6 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         help=(
             "Client-only UX chatter using the active polish llama.cpp model. "
             "Default: on. Use --no-ux-chatter to disable, or set VOXIUM_UX_CHATTER=0 to force off."
-        ),
-    )
-    uxc_group.add_argument(
-        "--ux-chatter-url",
-        default=uxc_default_url,
-        help="Deprecated compatibility option; UX chatter now uses --llama-cpp-url.",
-    )
-    uxc_group.add_argument(
-        "--ux-chatter-model",
-        default=str(uxc.get("model") or DEFAULT_TRUSTED_POLISH_MODEL_ID).strip()
-        or DEFAULT_TRUSTED_POLISH_MODEL_ID,
-        help="Deprecated compatibility option; UX chatter now uses --polish-model.",
-    )
-    uxc_group.add_argument(
-        "--ux-chatter-auto-start",
-        action=argparse.BooleanOptionalAction,
-        default=bool(uxc.get("auto_start", True)),
-        help="Deprecated compatibility option; shared llama.cpp startup is controlled by --llama-cpp-auto-start.",
-    )
-    uxc_group.add_argument(
-        "--ux-chatter-auto-pull",
-        action=argparse.BooleanOptionalAction,
-        default=bool(uxc.get("auto_pull", True)),
-        help=(
-            "Deprecated compatibility option; missing chatter/polish GGUFs are pulled through the polish model lane."
         ),
     )
 
@@ -925,15 +887,15 @@ def add_server_options(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--polish-keep-alive",
-        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "10m"),
-        help="llama.cpp idle unload window for /polish re-encode (default: 10m)",
+        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "-1"),
+        help="llama.cpp idle unload window for /polish re-encode (default: -1, keep loaded)",
     )
     parser.add_argument(
         "--polish-warmup-on-start",
         action=argparse.BooleanOptionalAction,
-        default=os.environ.get("VOXIUM_POLISH_WARMUP", "").lower()
-        in ("1", "true", "yes"),
-        help="Probe/warm the local llama.cpp re-encode runtime at startup (default: false)",
+        default=os.environ.get("VOXIUM_POLISH_WARMUP", "1").lower()
+        not in ("0", "false", "no", "off"),
+        help="Probe/warm the local llama.cpp re-encode runtime at startup (default: on)",
     )
     parser.add_argument(
         "--polish-max-concurrent",
@@ -983,6 +945,7 @@ Examples:
   voxium models                           Model manager summary for transcribe + re-encode
   voxium models transcribe installed      Show downloaded STT models under models/
   voxium models polish list               Shared polish/chatter GGUF ids and install state
+  voxium models polish pull               Provision default shared GGUF (and runtime where supported)
   voxium health --json                    Downlink: server health as JSON
   voxium server --help                    Foreground server (diagnostics; normal use: voxium run)
         """,
@@ -1055,24 +1018,6 @@ Examples:
         action="store_true",
         help="Print raw JSON instead of a formatted table",
     )
-    models_parser.add_argument(
-        "--polish",
-        action="store_true",
-        help="Alias for `voxium models polish list` (shared polish/chatter lane)",
-    )
-    models_parser.add_argument(
-        "--pull-polish",
-        action="store_true",
-        help=(
-            "Provision the repo-local llama.cpp polish/chatter stack "
-            "(Windows runtime plus default shared GGUF)"
-        ),
-    )
-    models_parser.add_argument(
-        "--pull-ux-chatter",
-        action="store_true",
-        help="Deprecated alias for pulling the shared Gemma polish/chatter GGUF into models/polish/.",
-    )
     return parser
 
 
@@ -1102,10 +1047,6 @@ def parse_args(argv: list[str] | None = None):
     if hasattr(args, "llama_cpp_url") and not is_loopback_url(args.llama_cpp_url):
         parser.error(
             "llama-cpp-url must be http loopback (127.0.0.1, localhost, or ::1)"
-        )
-    if hasattr(args, "ux_chatter_url") and not is_loopback_url(args.ux_chatter_url):
-        parser.error(
-            "ux-chatter-url must be http loopback (127.0.0.1, localhost, or ::1)"
         )
     return args
 
@@ -1283,8 +1224,8 @@ def start_local_server():
         or POLISH_DEFAULT_MODEL,
         polish_timeout=float(getattr(config, "polish_timeout", 25.0) or 25.0),
         polish_enabled_by_default=bool(getattr(config, "polish", True)),
-        polish_keep_alive=str(getattr(config, "polish_keep_alive", "10m") or "10m"),
-        polish_warmup_on_start=bool(getattr(config, "polish_warmup_on_start", False)),
+        polish_keep_alive=str(getattr(config, "polish_keep_alive", "-1") or "-1"),
+        polish_warmup_on_start=bool(getattr(config, "polish_warmup_on_start", True)),
         polish_max_concurrent=int(getattr(config, "polish_max_concurrent", 2) or 2),
     )
     cmd = [
@@ -3847,46 +3788,11 @@ def _print_polish_models_table(
     )
 
 
-def _pull_ux_chatter_model_to_repo_cache(
-    *, json_mode: bool = False
-) -> tuple[int, dict[str, Any] | None]:
-    code, payload = _pull_polish_models_to_repo_cache(
-        json_mode=json_mode,
-        model_id="gemma-2-2b-it-q5km",
-    )
-    if payload is not None:
-        payload["deprecated_alias"] = "--pull-ux-chatter"
-        payload["shared_lane"] = "polish"
-    if not json_mode:
-        print(
-            "`voxium models --pull-ux-chatter` now pulls the shared Gemma polish/chatter model."
-        )
-    return code, payload
-
-
 def run_models_command(args) -> int:
-    if getattr(args, "pull_ux_chatter", False):
-        code, payload = _pull_ux_chatter_model_to_repo_cache(
-            json_mode=bool(getattr(args, "json", False))
-        )
-        if getattr(args, "json", False) and payload is not None:
-            import json as _json
-
-            print(_json.dumps(payload, indent=2))
-        return code
     provisioned_payload: dict[str, Any] | None = None
     lane = (getattr(args, "lane", None) or "").strip().lower()
     action = (getattr(args, "action", None) or "").strip().lower()
     model_id = (getattr(args, "model_id", None) or "").strip()
-
-    if args.pull_polish:
-        lane = "polish"
-        action = "pull"
-        if not model_id:
-            model_id = POLISH_DEFAULT_MODEL
-    elif args.polish and not lane:
-        lane = "polish"
-        action = action or "list"
 
     if lane and lane not in {"transcribe", "polish"}:
         print(
@@ -4087,7 +3993,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
     # Prewarm the session STT model on the local stack (default ``small.en`` unless
     # ``--model`` / ``transcription.model`` says otherwise). Reusing a server that was
     # started with a different argv (e.g. ``tiny``) does not reload the process; /ensure-model
-    # loads the session model so the first PTT is not a cold load and metrics match.
+    # loads and first-inference warms the session model so the first PTT is ready.
     if is_loopback_url(config.server_url) and getattr(config, "model", None):
         ensure_model_on_loopback_server(
             config.server_url,

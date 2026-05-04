@@ -342,7 +342,7 @@ def test_run_slash_health_formats_server_readiness() -> None:
         "polish_enabled_default": False,
         "polish_default_model": "auto",
         "polish_timeout_seconds": 25,
-        "polish_keep_alive_default": "10m",
+        "polish_keep_alive_default": "-1",
         "polish_llama_cpp_reachable": True,
         "polish_loaded_model": DEFAULT_TRUSTED_POLISH_MODEL_ID,
         "polish_model_loaded": True,
@@ -563,6 +563,7 @@ def test_format_health_report_polish_and_faster_whisper() -> None:
         "model_repo": "r/w",
         "startup_model_repo": "r/w",
         "loaded_transcribe_models": ["m", "small.en"],
+        "warmed_transcribe_models": ["small.en"],
         "gpu_metrics_enabled": False,
         "gpu_metrics_unavailable_reason": "no cuda",
         "polish_backend_default": "llama.cpp",
@@ -572,7 +573,7 @@ def test_format_health_report_polish_and_faster_whisper() -> None:
         "polish_llama_cpp_reachable_reason": "sleeping",
         "polish_loaded_model": "L",
         "polish_timeout_seconds": 9.0,
-        "polish_keep_alive_default": "10m",
+        "polish_keep_alive_default": "-1",
         "faster_whisper": {"version": "1.2.3"},
     }
     t = format_health_report(h, session_model="small.en")
@@ -583,6 +584,7 @@ def test_format_health_report_polish_and_faster_whisper() -> None:
     assert "r/w" in t
     assert "server booted with m" in t
     assert "transcribe loaded: m, small.en" in t
+    assert "transcribe warmed: small.en" in t
     assert "transcribe this client: small.en" in t
 
 

@@ -135,8 +135,8 @@ def ensure_llama_cpp_daemon(
         else:
             msg = (
                 "Re-encode is enabled, but Voxium could not find `llama-server`. "
-                "Run `voxium models --polish --pull-polish` (or `scripts\\windows\\Setup-Voxium.cmd` on Windows) "
-                "to provision the repo-local runtime, or add `llama-server` to PATH; Voxium will paste raw STT until then."
+                "Run `voxium models polish pull` (shared stack) or `scripts\\windows\\Setup-Voxium.cmd` on Windows, "
+                "or add `llama-server` under `tools/llama.cpp/` or on PATH; Voxium will paste raw STT until then."
             )
         entries.append((msg, "warning"))
         return None, entries
@@ -144,12 +144,12 @@ def ensure_llama_cpp_daemon(
         if is_ux:
             msg = (
                 f"UX chatter model file is missing: {model_path}. "
-                "Run `voxium models --pull-ux-chatter` or add the GGUF under models/ux/, then retry, copy."
+                "Run `voxium models polish pull <id>` (or place the GGUF under models/polish/), then retry, copy."
             )
         else:
             msg = (
                 f"Re-encoder model file is missing: {model_path}. "
-                "Run `voxium models --polish --pull-polish` to provision the default GGUF model, then retry."
+                "Run `voxium models polish pull <id>` (or place the GGUF under models/polish/), then retry."
             )
         entries.append((msg, "warning"))
         return None, entries

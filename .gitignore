@@ -21,8 +21,13 @@ __pycache__/
 # Local tooling
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
 htmlcov/
+.hypothesis/
+.tox/
+.eggs/
 build/
 dist/
 .cache/
@@ -34,7 +39,7 @@ dist/
 .config/voxium/stats.*
 
 # Repo-local llama.cpp prebuild (llama-server, DLLs, etc. — provisioned by setup or
-# ``voxium models --polish --pull-polish``; platform-specific and large; same idea as models/)
+# ``voxium models polish pull``; platform-specific and large; same idea as models/)
 tools/llama.cpp/
 
 # IDE

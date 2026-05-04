@@ -21,7 +21,7 @@ Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows 
 - **Record-to-paste sequence** — hotkey through transcription to paste: [architecture.md#3-sequence-record--transcribe--paste](architecture.md#3-sequence-record--transcribe--paste)
 - **VOX (open mic)** — continuous capture, `vox_chunker`, green-panel cycles: [architecture.md#31-vox-open-mic-path](architecture.md#31-vox-open-mic-path)
 - **Polish path** — optional `/polish` and `/re-encode` (same lane), repo-local `llama-server`, raw fallback semantics: [architecture.md#3-sequence-record--transcribe--paste](architecture.md#3-sequence-record--transcribe--paste)
-- **Bootstrap provisioning** — `Setup-Voxium.cmd` / `voxium models --polish --pull-polish`: [architecture.md#32-bootstrap-and-local-polish-provisioning](architecture.md#32-bootstrap-and-local-polish-provisioning)
+- **Bootstrap provisioning** — `Setup-Voxium.cmd` / `voxium models polish pull`: [architecture.md#32-bootstrap-and-local-polish-provisioning](architecture.md#32-bootstrap-and-local-polish-provisioning)
 - **Packaging & files** — `src/voxium` layout (incl. session UI, standby, slash): [architecture.md#4-repository-layout](architecture.md#4-repository-layout)
 - **Coverage & test layers** — unit vs integration, `src/voxium` fail-under, `scripts/` out of gate: [testing.md#2-test-layers](testing.md#2-test-layers)
 - **Profiling** — preferred maintainer workflow (`py-spy` first, CPython, same-OS attach): [profiling.md](profiling.md)

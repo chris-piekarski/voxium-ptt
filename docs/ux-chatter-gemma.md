@@ -1,6 +1,6 @@
 # UX chatter — shared polish model lane
 
-**Status:** Implemented (default **on**; use `voxium run --no-ux-chatter`, `ux_chatter.enabled: false` in `~/.config/voxium/config.yaml`, or `VOXIUM_UX_CHATTER=0` to disable). **Model lane:** UX chatter uses the **same selected polish GGUF** as re-encode, served by the same local `llama-server` on `--llama-cpp-url` and stored under `models/polish/`. Select it with `/models polish use <id>` or `voxium run --polish-model <id>`. **Provision:** use `voxium models polish pull <id>`; `voxium models --pull-ux-chatter` is a deprecated alias for pulling the shared Gemma polish/chatter model.
+**Status:** Implemented (default **on**; use `voxium run --no-ux-chatter`, `ux_chatter.enabled: false` in `~/.config/voxium/config.yaml`, or `VOXIUM_UX_CHATTER=0` to disable). **Model lane:** UX chatter uses the **same selected polish GGUF** as re-encode, served by the same local `llama-server` on `--llama-cpp-url` and stored under `models/polish/`. Select it with `/models polish use <id>` or `voxium run --polish-model <id>`. **Provision:** use `voxium models polish pull <id>`.
 
 **Goal:** Add **optional, fun, on-brand** dynamic lines in the **console / Rich** experience, driven by the shared local GGUF and the latest **transcribed text**, without changing PTT/VOX/transcribe/paste behavior and without new regression risk. **`make test` and `make lint` must pass;** when the feature is off or the model is missing, fall back to static copy.
 
@@ -68,12 +68,13 @@ Implement **behind a flag**; wire **one** surface first, then expand.
 | `ux_chatter.enabled` (bool, default `True`) | Master switch for console-only chatter. |
 | `server.llama_cpp_url` | Shared polish/chatter `llama-server` base URL. |
 | `transcription.polish_model` | Shared model id for polish and UX chatter. |
+| `ux_chatter.base_url`, `ux_chatter.model` | Optional overrides for chatter HTTP only; when unset, `server.llama_cpp_url` and `transcription.polish_model` apply. |
 | `ux_chatter.timeout_s`, `ux_chatter.max_tokens` | Hard limits for chatter requests. |
 | Paths | Trusted GGUFs live under `models/polish/` and are listed by `/models polish list`. |
 
 **Env / CLI:** use `VOXIUM_UX_CHATTER=0` for CI or for operators who want zero chatter traffic. `voxium run --no-ux-chatter` disables the chatter surfaces while leaving the shared polish model lane available.
 
-**Provisioning:** `voxium models polish pull <id>` downloads a shared GGUF. `voxium models --pull-ux-chatter` is retained as a deprecated alias for Gemma.
+**Provisioning:** `voxium models polish pull <id>` downloads a shared GGUF.
 
 ---
 
@@ -101,7 +102,7 @@ Polish and UX chatter share the same `llama-server` instance and selected GGUF. 
 
 1. **One shared lane:** `/models polish use <id>` and `voxium run --polish-model <id>` switch the model used for both re-encode and UX chatter.
 
-2. **One shared runtime:** `server.llama_cpp_url` / `--llama-cpp-url` is the base URL for both paths. Deprecated `--ux-chatter-url` and `ux_chatter.base_url` values are compatibility shims only.
+2. **One shared runtime:** `server.llama_cpp_url` / `--llama-cpp-url` is the default base URL for both paths. Optional `ux_chatter.base_url` overrides the chatter HTTP client only when you need a different loopback endpoint than re-encode.
 
 3. **One active GGUF at a time:** when the selected polish model changes, Voxium rebinds chatter to the same loaded model. There is no separate active UX model or UX-only port.
 

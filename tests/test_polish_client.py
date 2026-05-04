@@ -31,7 +31,7 @@ def _set_config(**overrides):
         "polish_timeout": 5.0,
         "llama_cpp_auto_start": False,
         "llama_cpp_url": "http://127.0.0.1:11435",
-        "polish_keep_alive": "10m",
+        "polish_keep_alive": "-1",
         "llama_cpp_gpu_layers": "auto",
         "llama_cpp_ctx_size": 0,
         "llama_cpp_cmd": "",
@@ -143,6 +143,7 @@ def test_ensure_llama_cpp_for_polish_force_restarts_owned_daemon(
     assert app.managed_llama_cpp is None
     assert ensured and ensured[0]["base_url"] == "http://127.0.0.1:11435"
     assert ensured[0]["model_alias"] == DEFAULT_TRUSTED_POLISH_MODEL_ID
+    assert ensured[0]["sleep_idle_seconds"] == -1
 
 
 def test_ensure_llama_cpp_for_polish_skips_when_already_checked(monkeypatch) -> None:

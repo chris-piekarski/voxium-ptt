@@ -42,8 +42,8 @@ if (-not $env:VOXIUM_POLISH_ENABLED) {
 
 # Gemma UX chatter is **on** by default (`voxium run`). To disable: `voxium run --no-ux-chatter`, or
 #   ux_chatter: { enabled: false }  in  %USERPROFILE%\.config\voxium\config.yaml , or  VOXIUM_UX_CHATTER=0 .
-# First-time:  voxium models --pull-ux-chatter  and auto-start (or a llama-server on 127.0.0.1:11436 on the
-# *same* OS as this voxium — Windows vs WSL are different loopbacks).
+# First-time shared stack:  voxium models polish pull  (or Setup-Voxium). llama-server must be reachable on
+# `--llama-cpp-url` (default 127.0.0.1:11435) on the *same* OS as this voxium — Windows vs WSL are different loopbacks.
 
 $PyProject = Join-Path $RepoRoot "pyproject.toml"
 if (-not (Test-Path -LiteralPath $PyProject)) {

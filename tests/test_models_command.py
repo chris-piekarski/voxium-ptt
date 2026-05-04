@@ -18,9 +18,6 @@ def _args(**overrides) -> SimpleNamespace:
         "lane": None,
         "action": None,
         "model_id": None,
-        "pull_polish": False,
-        "pull_ux_chatter": False,
-        "polish": False,
         "json": False,
     }
     defaults.update(overrides)
@@ -73,7 +70,12 @@ def test_run_models_command_pull_polish_json_includes_provisioned_assets(
         ),
     )
 
-    assert app.run_models_command(_args(pull_polish=True, polish=True, json=True)) == 0
+    assert (
+        app.run_models_command(
+            _args(lane="polish", action="pull", model_id=trusted.model_id, json=True)
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["backend"] == "llama.cpp"
@@ -97,16 +99,24 @@ def test_run_models_command_pull_polish_json_reports_provision_failure(
         ),
     )
 
-    assert app.run_models_command(_args(pull_polish=True, polish=True, json=True)) == 1
+    assert (
+        app.run_models_command(
+            _args(
+                lane="polish",
+                action="pull",
+                model_id=DEFAULT_TRUSTED_POLISH_MODEL_ID,
+                json=True,
+            )
+        )
+        == 1
+    )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error"] == "download failed"
 
 
-def test_run_models_command_pull_ux_chatter_json_ok(
-    monkeypatch, tmp_path, capsys
-) -> None:
+def test_run_models_command_polish_pull_json_ok(monkeypatch, tmp_path, capsys) -> None:
     from pathlib import Path
 
     monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
@@ -131,10 +141,16 @@ def test_run_models_command_pull_ux_chatter_json_ok(
             model_filename=trusted.filename,
         ),
     )
-    assert app.run_models_command(_args(pull_ux_chatter=True, json=True)) == 0
+    assert (
+        app.run_models_command(
+            _args(
+                lane="polish", action="pull", model_id="gemma-2-2b-it-q5km", json=True
+            )
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["requested_model"] == "gemma-2-2b-it-q5km"
-    assert payload["deprecated_alias"] == "--pull-ux-chatter"
-    assert payload["shared_lane"] == "polish"
-    assert Path(payload["model_path"]).is_file()
+    assert payload["lane"] == "polish"
+    assert payload["provisioned"]["ok"] is True
+    assert payload["provisioned"]["requested_model"] == "gemma-2-2b-it-q5km"
+    assert Path(payload["provisioned"]["model_path"]).is_file()

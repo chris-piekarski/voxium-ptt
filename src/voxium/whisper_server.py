@@ -12,6 +12,7 @@ import tempfile
 import subprocess
 import threading
 import time
+import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
@@ -417,8 +418,8 @@ class ServerConfig:
     polish_timeout_seconds: float = 25.0
     polish_backend_default: str = "llama.cpp"
     polish_enabled_default: bool = True
-    polish_keep_alive_default: str = "10m"
-    polish_warmup_on_start: bool = False
+    polish_keep_alive_default: str = "-1"
+    polish_warmup_on_start: bool = True
     polish_max_concurrent: int = 2
 
 
@@ -839,6 +840,8 @@ def parse_capture_metadata(raw: str | None) -> dict | None:
 
 
 _models: Dict[Tuple[str, str, str], Any] = {}
+_warmed_model_keys: set[tuple[str, str, str]] = set()
+_warmed_model_keys_lock = threading.Lock()
 _whisper_model_class = None
 faster_whisper_distribution_info: dict | None = None
 
@@ -1021,6 +1024,65 @@ def get_model(
     return _models[key]
 
 
+def _write_stt_warmup_wav(path: str) -> None:
+    """Write a tiny 16 kHz mono WAV so faster-whisper performs its first inference."""
+    sample_count = 16000 // 4
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x00" * sample_count)
+
+
+def ensure_stt_model_ready(
+    name: str,
+    device: str,
+    compute: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+):
+    """
+    Load the selected STT model and force one small inference so the first real PTT
+    does not pay lazy decoder / native runtime setup costs.
+    """
+    model_name = validate_model_name(name)
+    key = (model_name, device, compute)
+    whisper = get_model(model_name, device, compute, progress=progress)
+    with _warmed_model_keys_lock:
+        if key in _warmed_model_keys:
+            return whisper
+    if progress:
+        progress(
+            "Running first-inference STT warmup — keeping this model ready for PTT, copy."
+        )
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        _write_stt_warmup_wav(tmp_path)
+        segments, _info = whisper.transcribe(
+            tmp_path,
+            language="en",
+            vad_filter=False,
+        )
+        list(segments)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    with _warmed_model_keys_lock:
+        _warmed_model_keys.add(key)
+    logger.info(
+        "Voxium: STT first-inference warmup complete for model=%r device=%s compute=%s",
+        model_name,
+        device,
+        compute,
+    )
+    return whisper
+
+
 def get_actual_device() -> dict:
 
     cuda_count = ctranslate2.get_cuda_device_count()
@@ -1098,7 +1160,12 @@ def _run_ensure_model_job(
                 _ensure_jobs[job_id][
                     "progress_line"
                 ] = "Starting Hugging Face fetch for this model, copy."
-        get_model(model_name, config.device, config.compute, progress=progress)
+        ensure_stt_model_ready(
+            model_name,
+            config.device,
+            config.compute,
+            progress=progress,
+        )
     except Exception as e:
         logger.error("Voxium: ensure-model job failed: %s", e, exc_info=True)
         with _ensure_jobs_lock:
@@ -1125,6 +1192,10 @@ def health():
 
     device_info = get_actual_device()
     loaded_transcribe_models = sorted({name for (name, _dev, _comp) in _models.keys()})
+    with _warmed_model_keys_lock:
+        warmed_transcribe_models = sorted(
+            {name for (name, _dev, _comp) in _warmed_model_keys}
+        )
     body: dict[str, Any] = {
         "status": "ok",
         "model": config.model,
@@ -1132,6 +1203,7 @@ def health():
         "model_repo": resolve_model_repo(config.model),
         "startup_model_repo": resolve_model_repo(config.model),
         "loaded_transcribe_models": loaded_transcribe_models,
+        "warmed_transcribe_models": warmed_transcribe_models,
         "device": device_info["device"],
         "compute": config.compute,
         "cuda_available": device_info["cuda_available"],
@@ -1179,11 +1251,13 @@ def ensure_model_start(body: EnsureModelBody):
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     key: tuple[str, str, str] = (m, config.device, config.compute)
-    if key in _models:
+    with _warmed_model_keys_lock:
+        ready = key in _models and key in _warmed_model_keys
+    if ready:
         return {
             "status": "ready",
             "model": m,
-            "message": f"Model {m!r} is already loaded on this /transcribe server, copy.",
+            "message": f"Model {m!r} is already loaded and warmed on this /transcribe server, copy.",
         }
     with _ensure_jobs_lock:
         if key in _active_ensure_by_key:
@@ -1684,11 +1758,7 @@ Examples:
     )
     parser.add_argument(
         "--llama-cpp-url",
-        default=(
-            os.getenv("VOXIUM_LLAMA_CPP_URL")
-            or os.getenv("VOXIUM_OLLAMA_URL")
-            or "http://127.0.0.1:11435"
-        ),
+        default=(os.getenv("VOXIUM_LLAMA_CPP_URL") or "http://127.0.0.1:11435"),
         help="Loopback URL for llama.cpp (default: http://127.0.0.1:11435)",
     )
     parser.add_argument(
@@ -1711,15 +1781,15 @@ Examples:
     )
     parser.add_argument(
         "--polish-keep-alive",
-        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "10m"),
-        help="Default llama.cpp idle unload window for /polish telemetry (default: 10m)",
+        default=os.environ.get("VOXIUM_POLISH_KEEP_ALIVE", "-1"),
+        help="Default llama.cpp idle unload window for /polish telemetry (default: -1, keep loaded)",
     )
     parser.add_argument(
         "--polish-warmup-on-start",
         action=argparse.BooleanOptionalAction,
-        default=os.environ.get("VOXIUM_POLISH_WARMUP", "").lower()
-        in ("1", "true", "yes"),
-        help="Minimal llama.cpp chat at startup to warm the polish model",
+        default=os.environ.get("VOXIUM_POLISH_WARMUP", "1").lower()
+        not in ("0", "false", "no", "off"),
+        help="Minimal llama.cpp chat at startup to warm the polish model (default: on)",
     )
     parser.add_argument(
         "--polish-max-concurrent",
@@ -1762,7 +1832,7 @@ Examples:
         polish_default_model=args.polish_default_model,
         polish_timeout_seconds=max(1.0, float(args.polish_timeout)),
         polish_enabled_default=bool(args.polish_enabled_by_default),
-        polish_keep_alive_default=str(args.polish_keep_alive or "10m"),
+        polish_keep_alive_default=str(args.polish_keep_alive or "-1"),
         polish_warmup_on_start=bool(args.polish_warmup_on_start),
         polish_max_concurrent=max(1, int(args.polish_max_concurrent)),
     )
@@ -1787,7 +1857,7 @@ Examples:
         logger.info(f"Voxium: GPU metrics unavailable: {gpu_probe.unavailable_reason}")
 
     try:
-        get_model(config.model, config.device, config.compute)
+        ensure_stt_model_ready(config.model, config.device, config.compute)
         if faster_whisper_distribution_info:
             logger.info(
                 "Voxium: faster-whisper package verified: "

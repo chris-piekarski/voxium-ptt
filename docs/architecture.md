@@ -6,7 +6,7 @@ This document describes how **Voxium 0.0.1** is structured: who uses it, which *
 
 ## 1. System context
 
-Voxium is **local-first** **PTT** voice: the user runs a **client**; when possible a **local HTTP** worker (faster-whisper / CTranslate2) on the same machine does **`/transcribe`** and, when enabled, **`/polish`** only on **loopback**. The optional polish path uses a repo-local **`llama-server`** runtime with **GGUF** models under the repository tree. Windows bootstrap and `voxium models --polish --pull-polish` provision that local runtime/model bundle.
+Voxium is **local-first** **PTT** voice: the user runs a **client**; when possible a **local HTTP** worker (faster-whisper / CTranslate2) on the same machine does **`/transcribe`** and, when enabled, **`/polish`** only on **loopback**. The optional polish path uses a repo-local **`llama-server`** runtime with **GGUF** models under the repository tree. Windows bootstrap and `voxium models polish pull` provision that local runtime/model bundle.
 
 ```mermaid
 flowchart TB
@@ -16,7 +16,7 @@ flowchart TB
     worker[Voxium server\n/transcribe · /polish · /health]
     polishrt[Repo-local llama-server\nGGUF polish runtime]
     repodata[(Repo data\nmodels/ · tools/ · logs/)]
-    setup[Bootstrap / provisioning\nSetup-Voxium.cmd · voxium models --polish --pull-polish]
+    setup[Bootstrap / provisioning\nSetup-Voxium.cmd · voxium models polish pull]
   end
   os[(OS and apps\nclipboard · audio · focus)]
   stt[(Trusted STT model download\nHugging Face)]
@@ -73,7 +73,7 @@ flowchart LR
   subgraph LocalPolish["Repo-local polish runtime"]
     LLM[llama-server]
     GGUF[GGUF inventory\nmodels/polish]
-    PROV[Provisioning\nSetup-Voxium.cmd · voxium models --polish --pull-polish]
+    PROV[Provisioning\nSetup-Voxium.cmd · voxium models polish pull]
     LLM --> GGUF
     PROV --> GGUF
     PROV --> LLM
@@ -187,7 +187,7 @@ flowchart LR
   setup["scripts/windows/Setup-Voxium.cmd"]
   venv["Create / repair .venv"]
   pip["Editable install + sounddevice probe"]
-  pull["voxium models --polish --pull-polish"]
+  pull["voxium models polish pull"]
   runtime["tools/llama.cpp/llama-server(.exe)"]
   model["models/polish/default.gguf"]
   ready["voxium run --polish"]
@@ -202,7 +202,9 @@ flowchart LR
   model --> ready
 ```
 
-**Platform note:** Windows setup provisions both runtime and default model. On other platforms, the same `voxium models --polish --pull-polish` command provisions the default GGUF model, but the operator still needs a local `llama-server` binary under `tools/llama.cpp` (or on `PATH`) today.
+**Platform note:** Windows setup provisions both runtime and default model. On other platforms, the same `voxium models polish pull` command provisions the default GGUF model, but the operator still needs a local `llama-server` binary under `tools/llama.cpp` (or on `PATH`) today.
+
+**Warm residency:** startup preflights the selected STT model through `/ensure-model`, including a tiny first-inference warmup, so the first real PTT does not pay model-load or lazy decoder setup. The shared polish / UX `llama-server` path also warms by default and uses `--polish-keep-alive -1` / `--sleep-idle-seconds -1` unless the operator configures an unload window.
 
 ---
 
@@ -272,6 +274,8 @@ Polish-specific config lives in the same flow:
 - `server.llama_cpp_cmd`
 - `server.llama_cpp_gpu_layers`
 - `server.llama_cpp_ctx_size`
+- `server.polish_keep_alive`
+- `server.polish_warmup_on_start`
 
 ---
 

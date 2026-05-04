@@ -144,6 +144,11 @@ def format_health_report(
         disp = ", ".join(str(x) for x in loaded_models if str(x).strip())
         if disp:
             lines.append(f"  • transcribe loaded: {disp}")
+    warmed_models = server_health.get("warmed_transcribe_models")
+    if isinstance(warmed_models, list) and warmed_models:
+        disp = ", ".join(str(x) for x in warmed_models if str(x).strip())
+        if disp:
+            lines.append(f"  • transcribe warmed: {disp}")
     if session_model:
         lines.append(f"  • transcribe this client: {session_model}")
 

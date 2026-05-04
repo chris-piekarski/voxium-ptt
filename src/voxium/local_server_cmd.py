@@ -21,8 +21,8 @@ class LocalServerLaunchConfig:
     polish_default_model: str | None = None
     polish_timeout: float = 25.0
     polish_enabled_by_default: bool = True
-    polish_keep_alive: str = "10m"
-    polish_warmup_on_start: bool = False
+    polish_keep_alive: str = "-1"
+    polish_warmup_on_start: bool = True
     polish_max_concurrent: int = 2
 
 

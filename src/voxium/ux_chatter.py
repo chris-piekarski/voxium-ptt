@@ -365,19 +365,19 @@ def ux_chatter_runtime_from_config(
     )
     base_url = (
         _resolved_ux_chatter_base_url
-        or str(
-            server_cfg.get("llama_cpp_url")
-            or server_cfg.get("ollama_url")
-            or _SHARED_LLAMA_CPP_URL_DEFAULT
-        ).strip()
+        or str(uxc.get("base_url") or "").strip()
+        or str(server_cfg.get("llama_cpp_url") or "").strip()
+        or _SHARED_LLAMA_CPP_URL_DEFAULT
     )
     base_url = base_url or _SHARED_LLAMA_CPP_URL_DEFAULT
     if _resolved_ux_chatter_model_id:
         model = _resolved_ux_chatter_model_id
     else:
-        model = str(
-            transcription_cfg.get("polish_model") or POLISH_DEFAULT_MODEL
-        ).strip()
+        model = str(uxc.get("model") or "").strip()
+        if not model:
+            model = str(
+                transcription_cfg.get("polish_model") or POLISH_DEFAULT_MODEL
+            ).strip()
         if not model or model == POLISH_DEFAULT_MODEL:
             model = DEFAULT_TRUSTED_POLISH_MODEL_ID
     return UxChatterRuntime(
