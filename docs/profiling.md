@@ -62,6 +62,14 @@ From the repository root:
 
 That installs the maintained developer tool set, including `py-spy`.
 
+To record a flame graph of the **Windows client** during PTT without fragile one-line pastes, from the repository root:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
+```
+
+Optional flags: `-Duration`, `-Rate`, `-Native`, `-ClientProcessId`, `-OutputPath`. Run `Get-Help .\scripts\windows\Profile-Voxium-PTT.ps1 -Full` after install for details.
+
 ## 3. Same-OS rule
 
 Run `py-spy` from the **same OS context** as the Voxium process you want to profile.
