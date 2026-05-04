@@ -1,4 +1,7 @@
 #Requires -Version 5.1
+# Windows-only: resolves PIDs via Win32_Process and invokes repo .venv\py-spy.exe.
+# OS guard runs immediately after param (param must be first non-comment statement).
+
 <#
 .SYNOPSIS
   Record a py-spy flame graph of the Voxium Windows client during PTT activity.
@@ -24,6 +27,9 @@
   %USERPROFILE%\Desktop, and %PUBLIC%\Desktop. If none exist, the script uses repo logs\py-spy\ (created
   if needed) so the path is always writable inside the clone.
 
+  Attach retries use a short probe duration on the first two strategies so a triple failure does not burn
+  three full Duration windows; the last strategy uses your full -Duration for a real PTT capture.
+
 .EXAMPLE
   pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Profile-Voxium-PTT.ps1
 
@@ -39,15 +45,25 @@
   (Prefer splitting arguments: -SpawnArguments run --server-device cuda --server-compute float16)
 #>
 param(
+    [ValidateRange(1, 3600)]
     [int] $Duration = 30,
+    [ValidateRange(1, 1000)]
     [int] $Rate = 200,
     [string] $OutputPath = "",
+    [ValidateRange(0, 2147483647)]
     [int] $ClientProcessId = 0,
     [switch] $Native,
     [switch] $Spawn,
     [string[]] $SpawnArguments = @("run"),
     [switch] $NoSubprocesses
 )
+
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+    if (-not $IsWindows) {
+        Write-Error "Profile-Voxium-PTT.ps1 must run on Windows (same OS as the Voxium client). See docs/profiling.md."
+        exit 2
+    }
+}
 
 # Exit code from py-spy (set in attach / spawn branches below).
 $code = 1
@@ -58,7 +74,7 @@ Set-Location $RepoRoot
 
 $PySpy = Join-Path $RepoRoot ".venv\Scripts\py-spy.exe"
 if (-not (Test-Path -LiteralPath $PySpy)) {
-    Write-Error "py-spy not found at $PySpy — run: pip install -e `".[dev]`" from the repo venv."
+    throw "py-spy not found at $PySpy — from repo root run: .\.venv\Scripts\python.exe -m pip install -e `".[dev]`""
 }
 
 function Get-VoxiumPySpyOutDirectory {
@@ -91,6 +107,11 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $outDir "voxium-ptt-$stamp.svg"
 }
 
+# Resolve relative -OutputPath against repo root so GetDirectoryName and py-spy see a full path.
+if (-not [string]::IsNullOrWhiteSpace($OutputPath) -and -not [System.IO.Path]::IsPathRooted($OutputPath)) {
+    $OutputPath = Join-Path $RepoRoot $OutputPath
+}
+
 # Avoid Split-Path -LiteralPath -Parent (parameter set issues on some pwsh builds).
 $outParent = [string]::Empty
 if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -110,16 +131,20 @@ elseif ($ClientProcessId -gt 0) {
 else {
     $candidates = Get-CimInstance Win32_Process |
         Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine -like "*.venv\Scripts\python.exe*voxium.exe*" -and
-            $_.CommandLine -notlike "*voxium server*"
+            $cl = $_.CommandLine
+            $cl -and
+            $cl -notlike "*voxium server*" -and
+            (
+                ($cl -like "*.venv\Scripts\python.exe*voxium.exe*") -or
+                ($cl -match "-m\s+voxium\s+run\b")
+            )
         } |
         Select-Object -First 1
 
     if (-not $candidates) {
-        Write-Error @"
-Could not find a Voxium client process (.venv\Scripts\python.exe ... voxium.exe, not 'voxium server').
-Start the client first, pass -ClientProcessId <id>, or use -Spawn to profile a fresh python -m voxium process.
+        throw @"
+Could not find a running Voxium client (python ... voxium.exe under .venv\Scripts, or python -m voxium run).
+Start the client first, pass -ClientProcessId, or use -Spawn.
 "@
     }
     $targetPid = [int]$candidates.ProcessId
@@ -142,7 +167,7 @@ Write-Host ""
 if ($Spawn) {
     $pythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $pythonExe)) {
-        Write-Error "Python not found at $pythonExe"
+        throw "Python not found at $pythonExe"
     }
     $spyArgs = @(
         "record",
@@ -178,19 +203,44 @@ else {
         $code = $LASTEXITCODE
     }
     else {
+        $probeSeconds = [Math]::Min(5, $Duration)
         $chain = @(
-            @{ Label = "attach (plain)"; Extra = @() },
-            @{ Label = "attach (--nonblocking)"; Extra = @("--nonblocking") }
+            @{ Label = "attach (plain)"; Extra = @(); ProbeOnly = $true },
+            @{ Label = "attach (--nonblocking)"; Extra = @("--nonblocking"); ProbeOnly = $true }
         )
         if (-not $NoSubprocesses) {
-            $chain += @{ Label = "attach (--subprocesses)"; Extra = @("--subprocesses") }
+            $chain += @{ Label = "attach (--subprocesses)"; Extra = @("--subprocesses"); ProbeOnly = $false }
+        }
+        else {
+            $chain += @{ Label = "attach (plain, full duration)"; Extra = @(); ProbeOnly = $false }
         }
         $code = 1
+        $attempt = 0
         foreach ($step in $chain) {
-            Write-Host "Trying $($step.Label) …" -ForegroundColor Cyan
-            $spyArgs = $baseArgs + $step.Extra
+            $attempt++
+            $useDur = if ($step.ProbeOnly) { $probeSeconds } else { $Duration }
+            Write-Host "Trying $($step.Label) for ${useDur}s (attempt $attempt/$($chain.Count))..." -ForegroundColor Cyan
+            $spyArgs = @(
+                "record",
+                "-o", $OutputPath,
+                "-p", "$targetPid",
+                "-d", "$useDur",
+                "-r", "$Rate"
+            ) + $step.Extra
             & $PySpy @spyArgs
             $code = $LASTEXITCODE
+            if ($code -eq 0 -and $step.ProbeOnly) {
+                Write-Host "Probe OK; capturing full ${Duration}s with the same flags for PTT..." -ForegroundColor Cyan
+                $spyArgs = @(
+                    "record",
+                    "-o", $OutputPath,
+                    "-p", "$targetPid",
+                    "-d", "$Duration",
+                    "-r", "$Rate"
+                ) + $step.Extra
+                & $PySpy @spyArgs
+                $code = $LASTEXITCODE
+            }
             if ($code -eq 0) {
                 break
             }
@@ -201,7 +251,12 @@ else {
 
 if ($code -ne 0) {
     Write-Host ""
-    Write-Host "py-spy exited with code $code (all attach strategies failed)." -ForegroundColor Red
+    if ($Spawn) {
+        Write-Host "py-spy exited with code $code (spawn mode)." -ForegroundColor Red
+    }
+    else {
+        Write-Host "py-spy exited with code $code (all attach strategies failed)." -ForegroundColor Red
+    }
     Write-Host "Next steps: Administrator PowerShell;  pip install -U py-spy;" -ForegroundColor Yellow
     Write-Host "  or -Spawn (close the main client first on Windows — single-instance mutex)." -ForegroundColor Yellow
     exit $code
