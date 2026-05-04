@@ -8,7 +8,9 @@ import pyperclip
 
 from rich.text import Text
 
+from voxium.constants import DEFAULT_HOTKEYS, HOTKEY_ORDER
 from voxium.disk_usage_report import format_repo_disk_usage_text
+from voxium.hotkey_rules import normalize_hotkey_name, sanitize_hotkey_config
 from voxium.metrics_table import format_gpu_metrics_plaintext
 from voxium.model_disk import is_trusted_model_on_disk
 from voxium.model_registry import (
@@ -40,6 +42,7 @@ class SlashDataNeeds:
 
     server_gpu: bool
     server_health: bool
+    server_stats: bool
     mic_capture: bool
 
 
@@ -52,6 +55,7 @@ class SlashLineResult:
     result_rich: Text | None = None
     polish_model: str | None = None
     polish_enabled: bool | None = None
+    hotkeys: dict[str, str] | None = None
 
 
 def slash_data_needs(line: str) -> SlashDataNeeds:
@@ -59,6 +63,7 @@ def slash_data_needs(line: str) -> SlashDataNeeds:
     return SlashDataNeeds(
         server_gpu=c in ("gpu", "g", "cuda"),
         server_health=c in ("health",),
+        server_stats=c in ("stats", "stat"),
         mic_capture=c in ("mic", "m", "microphone", "input", "audio"),
     )
 
@@ -188,6 +193,116 @@ def format_health_report(
     return "\n".join(lines)
 
 
+def _int_stat(stats: dict | None, key: str) -> int:
+    if not isinstance(stats, dict):
+        return 0
+    try:
+        return int(stats.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float_stat(stats: dict | None, key: str) -> float:
+    if not isinstance(stats, dict):
+        return 0.0
+    try:
+        return float(stats.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_int(value: int | float) -> str:
+    return f"{int(value):,}"
+
+
+def _fmt_seconds(value: float) -> str:
+    return f"{value:,.1f}s"
+
+
+def format_stats_report(
+    persistent_stats: dict | None,
+    *,
+    server_stats: dict | None = None,
+) -> str:
+    local = persistent_stats if isinstance(persistent_stats, dict) else {}
+    by_source = local.get("by_source") if isinstance(local, dict) else {}
+    if not isinstance(by_source, dict):
+        by_source = {}
+
+    lines: list[str] = [
+        "Inference stats:",
+        "  local persisted totals (survive client/server restarts):",
+        f"    • requests: {_fmt_int(_int_stat(local, 'inference_requests_total'))}",
+        (
+            "    • source split: "
+            f"PTT {_fmt_int(_int_stat(by_source, 'ptt'))} · "
+            f"VOX {_fmt_int(_int_stat(by_source, 'vox'))} · "
+            f"re-transmit {_fmt_int(_int_stat(by_source, 'retry'))}"
+        ),
+        f"    • audio processed: {_fmt_seconds(_float_stat(local, 'audio_seconds_total'))}",
+        f"    • input bytes: {_fmt_int(_int_stat(local, 'input_bytes_total'))}",
+        (
+            "    • timings: "
+            f"STT {_fmt_seconds(_float_stat(local, 'transcription_seconds_total'))} · "
+            f"request {_fmt_seconds(_float_stat(local, 'request_seconds_total'))}"
+        ),
+        (
+            "    • tokens: "
+            f"decoder {_fmt_int(_int_stat(local, 'decoder_tokens_total'))} · "
+            f"re-encode {_fmt_int(_int_stat(local, 'polish_tokens_total'))} "
+            f"({_fmt_int(_int_stat(local, 'polish_prompt_tokens_total'))} in / "
+            f"{_fmt_int(_int_stat(local, 'polish_completion_tokens_total'))} out)"
+        ),
+        (
+            "    • output: "
+            f"{_fmt_int(_int_stat(local, 'output_words_total'))} words · "
+            f"{_fmt_int(_int_stat(local, 'output_chars_total'))} chars"
+        ),
+    ]
+    if local.get("updated_at"):
+        lines.append(f"    • updated: {local['updated_at']}")
+
+    if isinstance(server_stats, dict) and server_stats:
+        model_metrics = server_stats.get("model_metrics")
+        if not isinstance(model_metrics, dict):
+            model_metrics = {}
+        lines.extend(
+            [
+                "",
+                "  server-process totals (reset when the /transcribe server restarts):",
+                f"    • requests: {_fmt_int(_int_stat(server_stats, 'request_count'))}",
+                f"    • audio processed: {_fmt_seconds(_float_stat(server_stats, 'total_audio_processed_seconds'))}",
+                f"    • input bytes: {_fmt_int(_int_stat(server_stats, 'input_bytes_processed'))}",
+                (
+                    "    • timings: "
+                    f"STT {_fmt_seconds(_float_stat(server_stats, 'total_transcription_seconds'))} · "
+                    f"request {_fmt_seconds(_float_stat(server_stats, 'total_request_seconds'))}"
+                ),
+                (
+                    "    • tokens: "
+                    f"decoder {_fmt_int(_int_stat(model_metrics, 'decoder_tokens_generated'))}"
+                ),
+                (
+                    "    • output: "
+                    f"{_fmt_int(_int_stat(model_metrics, 'output_words_generated'))} words · "
+                    f"{_fmt_int(_int_stat(server_stats, 'output_chars_generated'))} chars"
+                ),
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "  server-process totals: unavailable (server /stats did not answer).",
+            ]
+        )
+
+    lines.append(
+        "Note: local stats count audio requests that reached /transcribe; local no-speech filters do not count."
+    )
+    return "\n".join(lines)
+
+
 def _transcription_model_from_file_config(file_config: dict | None) -> str | None:
     """
     Return ``transcription.model`` from operator config (``~/.config/voxium/config.yaml``) when
@@ -305,9 +420,9 @@ def build_polish_models_catalog_rich(
     installed_only: bool = False,
 ) -> tuple[str, Text]:
     title = (
-        "Re-encoder models installed under models/polish (trusted ids + local GGUF)"
+        "Polish + UX chatter models installed under models/polish (trusted ids + local GGUF)"
         if installed_only
-        else "Re-encoder models (trusted ids for llama.cpp plus local GGUF under models/polish)"
+        else "Polish + UX chatter models (trusted ids for llama.cpp plus local GGUF under models/polish)"
     )
     installed_local = list_local_polish_models()
     installed_by_name = {model.name: model for model in installed_local}
@@ -360,14 +475,14 @@ def build_polish_models_catalog_rich(
     if not rows:
         rows.append(("  • none installed yet", "", "dim #ddd6fe"))
     footer_lines = [
-        f"Re-encode is {'on' if polish_enabled else 'off'} for this session (config flag: polish).",
+        f"Re-encode is {'on' if polish_enabled else 'off'} for this session (config flag: polish); UX chatter uses this same selected model.",
         f"`auto` resolves to the registry default {DEFAULT_TRUSTED_POLISH_MODEL_ID}.",
-        "Use /models polish use <id|auto|local:...> to select; missing trusted ids are downloaded automatically.",
+        "Use /models polish use <id|auto|local:...> to select the shared polish/chatter model; missing trusted ids are downloaded automatically.",
         "Toggle the pass with /models polish on or /models polish off (alias: /re-encode on|off).",
         (
-            "Show only downloaded re-encoder models: /models polish installed"
+            "Show only downloaded shared GGUFs: /models polish installed"
             if not installed_only
-            else "Show the full re-encoder registry: /models polish list"
+            else "Show the full shared model lane: /models polish list"
         ),
     ]
     return _render_catalog(title, rows, footer_lines=footer_lines)
@@ -394,10 +509,83 @@ def _format_models_status(
     return (
         "Models\n"
         + tr
-        + f"  Re-encode: {pe} · active {pmod} · default {DEFAULT_TRUSTED_POLISH_MODEL_ID} (config: polish)\n"
-        "  Backend: transcribe=faster-whisper · re-encode=llama.cpp\n"
+        + f"  Shared polish/chatter: re-encode {pe} · active {pmod} · default {DEFAULT_TRUSTED_POLISH_MODEL_ID} (config: polish)\n"
+        "  Backend: transcribe=faster-whisper · polish/chatter=llama.cpp\n"
         "  Views: /models transcribe list | /models transcribe installed | /models polish list | /models polish installed\n"
         "  Select: /models transcribe use <id> | /models polish use <id> | /models polish on|off"
+    )
+
+
+_HOTKEY_OPERATOR_ACTIONS: dict[str, str] = {
+    "ptt": "record",
+    "record": "record",
+    "transmit": "record",
+    "replay": "recovery",
+    "recovery": "recovery",
+}
+_HOTKEY_OPERATOR_LABELS: dict[str, str] = {
+    "record": "PTT",
+    "recovery": "replay",
+}
+
+
+def _current_hotkeys_from_context(current_hotkeys: dict | None) -> dict[str, str]:
+    if not isinstance(current_hotkeys, dict):
+        current_hotkeys = {}
+    merged = {**DEFAULT_HOTKEYS}
+    for action, value in current_hotkeys.items():
+        if action in DEFAULT_HOTKEYS:
+            merged[action] = normalize_hotkey_name(value)
+    return sanitize_hotkey_config(merged)
+
+
+def _format_hotkeys_status(current_hotkeys: dict | None) -> str:
+    keys = _current_hotkeys_from_context(current_hotkeys)
+    return (
+        "Hotkeys\n"
+        f"  PTT: {keys['record'].upper()}\n"
+        f"  Replay: {keys['recovery'].upper()}\n"
+        f"  Re-transmit: {keys['retry'].upper()}\n"
+        f"  PTT↔VOX mode: {keys['mode'].upper()}\n"
+        "Use /hotkeys ptt <f1..f12> or /hotkeys replay <f1..f12>, copy."
+    )
+
+
+def _run_hotkeys_line(
+    parts: list[str], *, current_hotkeys: dict | None = None
+) -> SlashLineResult:
+    keys = _current_hotkeys_from_context(current_hotkeys)
+    if len(parts) == 1:
+        return SlashLineResult(text=_format_hotkeys_status(keys))
+    if len(parts) != 3:
+        return SlashLineResult(
+            text="Use /hotkeys ptt <f1..f12> or /hotkeys replay <f1..f12>, copy."
+        )
+    action_raw = parts[1].lower()
+    action = _HOTKEY_OPERATOR_ACTIONS.get(action_raw)
+    if action is None:
+        return SlashLineResult(text="Hotkeys can set: ptt or replay, copy.")
+    wanted = normalize_hotkey_name(parts[2])
+    if wanted not in HOTKEY_ORDER:
+        return SlashLineResult(text="Hotkey must be F1 through F12, copy.")
+    for other_action, other_key in keys.items():
+        if other_action != action and other_key == wanted:
+            other_label = _HOTKEY_OPERATOR_LABELS.get(other_action, other_action)
+            return SlashLineResult(
+                text=(
+                    f"{wanted.upper()} is already assigned to {other_label}; "
+                    "choose a free F-key, copy."
+                )
+            )
+    clean = sanitize_hotkey_config({**keys, action: wanted})
+    if clean[action] != wanted:
+        return SlashLineResult(
+            text=f"{wanted.upper()} is not available for {_HOTKEY_OPERATOR_LABELS[action]}, copy."
+        )
+    label = _HOTKEY_OPERATOR_LABELS[action]
+    return SlashLineResult(
+        text=f"{label} hotkey set to {wanted.upper()} and saved to config.yaml, copy.",
+        hotkeys={action: wanted},
     )
 
 
@@ -506,8 +694,8 @@ def _run_models_line(
             return SlashLineResult(text=str(exc))
         return SlashLineResult(
             text=(
-                f"Re-encoder set: {tag!r} (this session). "
-                "Trusted ids download automatically if missing, copy."
+                f"Shared polish/chatter model set: {tag!r} (this session). "
+                "Re-encode uses it when enabled; trusted ids download automatically if missing, copy."
             ),
             polish_model=tag,
         )
@@ -573,8 +761,8 @@ def _run_polish_line(
         return SlashLineResult(text=str(exc))
     return SlashLineResult(
         text=(
-            f"Re-encoder set: {tag!r} (this session). "
-            "Trusted ids download automatically if missing, copy."
+            f"Shared polish/chatter model set: {tag!r} (this session). "
+            "Re-encode uses it when enabled; trusted ids download automatically if missing, copy."
         ),
         polish_model=tag,
     )
@@ -659,12 +847,15 @@ def run_slash_line(
     *,
     gpu: dict | None = None,
     server_health: dict | None = None,
+    server_stats: dict | None = None,
     mic_info: dict | None = None,
     session_model: str | None = None,
     polish_enabled: bool = False,
     polish_model: str | None = None,
+    current_hotkeys: dict | None = None,
     transcript_history: SessionTranscriptHistory | None = None,
     file_config: dict | None = None,
+    persistent_stats: dict | None = None,
 ) -> SlashLineResult:
     """
     Handle one full line the operator committed (``/...``). Return :class:`SlashLineResult`
@@ -687,6 +878,10 @@ def run_slash_line(
         )
     if first in ("gpu", "g", "cuda"):
         return SlashLineResult(text=format_gpu_metrics_plaintext(gpu))
+    if first in ("stats", "stat"):
+        return SlashLineResult(
+            text=format_stats_report(persistent_stats, server_stats=server_stats)
+        )
     if first in ("models", "model"):
         return _run_models_line(
             s,
@@ -702,6 +897,8 @@ def run_slash_line(
             polish_enabled=polish_enabled,
             polish_model=polish_model,
         )
+    if first in ("hotkeys", "hotkey", "keys"):
+        return _run_hotkeys_line(parts, current_hotkeys=current_hotkeys)
     if first in ("history", "hist", "transcripts"):
         return _run_history_line(parts, transcript_history=transcript_history)
     if first in ("disk", "du", "usage"):
@@ -713,14 +910,25 @@ def run_slash_line(
 
 def _help_text() -> str:
     return (
-        "Slashed commands (downlink / session log; PTT is key separate).\n"
-        "  • /help — this list\n"
-        "  • /health — loopback server readiness: transcribe path, GPU metrics, re-encode (llama.cpp) state\n"
-        "  • /mic — default input, PortAudio, device / host API (this machine)\n"
-        "  • /gpu — same GPU readout as the inference metrics box (local server /gpu)\n"
-        "  • /models — summary; /models transcribe list|installed|use <id>; /models polish … (re-encode lane, same as /re-encode), copy.\n"
-        "  • /re-encode or /polish — re-encode lane: list|installed|use <id>|on|off (same as /models polish), copy.\n"
-        "  • /history — PTT/VOX transcripts (RAM only); /history <n> full line; /history copy <n>; /history clear; /history search <text> — filter the list, copy.\n"
-        "  • /disk — same readout as make disk-usage: models/, logs/, and tools/llama.cpp/ under the repo. "
-        "``grep [stack=ux-chatter] logs/llama_cpp_ux.log`` — which local llama-server is for UX chatter, copy."
+        "Slash command downlink (local session; PTT/VOX keys keep working outside this box).\n"
+        "Type `/`, use Tab for completions, then Enter to run. Aliases are shown in parentheses.\n\n"
+        "Status and diagnostics\n"
+        "  • /help (/?, /h) — this list\n"
+        "  • /health — loopback server readiness: transcribe, GPU metrics, re-encode state\n"
+        "  • /mic — default input, PortAudio, device, host API\n"
+        "  • /gpu (/g) — same GPU readout as the inference metrics box\n"
+        "  • /stats — persisted inference totals plus current server-process counters\n"
+        "  • /disk (/du) — local data size: models/, logs/, tools/llama.cpp/\n\n"
+        "Models and local stack\n"
+        "  • /models — active transcribe + shared polish/chatter summary\n"
+        "  • /models transcribe list|installed|use <id> — inspect or switch STT model for this session\n"
+        "  • /models polish list|installed|use <id>|on|off — shared polish + UX chatter model lane (also controls re-encode)\n"
+        "  • /re-encode or /polish — shortcut for the same re-encode lane controls\n\n"
+        "Operator keys and history\n"
+        "  • /hotkeys — show bindings\n"
+        "  • /hotkeys ptt <f1..f12> — save the PTT transmit key to config.yaml\n"
+        "  • /hotkeys replay <f1..f12> — save the replay key to config.yaml\n"
+        "  • /history — RAM-only PTT/VOX transcripts for this run\n"
+        "  • /history <n> | /history copy <n> | /history search <text> | /history clear — inspect, copy, filter, or clear session copy\n\n"
+        "Examples: /hotkeys ptt f10 · /models polish off · /history copy 1"
     )

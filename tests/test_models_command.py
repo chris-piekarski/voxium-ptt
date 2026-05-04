@@ -110,20 +110,31 @@ def test_run_models_command_pull_ux_chatter_json_ok(
     from pathlib import Path
 
     monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
-
-    from voxium.ux_chatter_model_registry import DEFAULT_UX_CHATTER
-
-    def fake_ensure(*, progress=None, **kwargs):
-        p = tmp_path / "models" / "ux" / "gemma-3-1b-it-q4_0.gguf"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"gguf")
-        return (p, DEFAULT_UX_CHATTER)
+    trusted = trusted_polish_model("gemma-2-2b-it-q5km")
+    model_path = tmp_path / "models" / "polish" / trusted.filename
+    runtime_path = tmp_path / "tools" / "llama.cpp" / "llama-server.exe"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"gguf")
+    runtime_path.write_bytes(b"exe")
 
     monkeypatch.setattr(
-        "voxium.ux_chatter_provision.ensure_ux_chatter_gguf_available",
-        fake_ensure,
+        app,
+        "ensure_default_polish_assets",
+        lambda model_name=None, progress=None: ProvisionedPolishAssets(
+            runtime_dir=runtime_path.parent,
+            runtime_exe=runtime_path,
+            runtime_variant="cuda12",
+            runtime_tag="b1234",
+            model_path=model_path,
+            model_repo_id=trusted.repo_id,
+            model_filename=trusted.filename,
+        ),
     )
     assert app.run_models_command(_args(pull_ux_chatter=True, json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
+    assert payload["requested_model"] == "gemma-2-2b-it-q5km"
+    assert payload["deprecated_alias"] == "--pull-ux-chatter"
+    assert payload["shared_lane"] == "polish"
     assert Path(payload["model_path"]).is_file()

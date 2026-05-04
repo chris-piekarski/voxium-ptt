@@ -26,6 +26,8 @@ SLASH_COMMAND_ORDER: tuple[str, ...] = (
     "disk",
     "mic",
     "gpu",
+    "stats",
+    "hotkeys",
     "models",
     "re-encode",
     "polish",
@@ -51,6 +53,11 @@ SLASH_ALIASES: tuple[tuple[str, str], ...] = (
     ("gpu", "gpu"),
     ("g", "gpu"),
     ("cuda", "gpu"),
+    ("stats", "stats"),
+    ("stat", "stats"),
+    ("hotkeys", "hotkeys"),
+    ("hotkey", "hotkeys"),
+    ("keys", "hotkeys"),
     ("models", "models"),
     ("model", "models"),
     ("re-encode", "re-encode"),
@@ -63,6 +70,8 @@ _MODELS_SUBCOMMANDS: tuple[str, ...] = ("transcribe", "polish")
 _TRANSCRIBE_ACTIONS: tuple[str, ...] = ("list", "installed", "use")
 _MODELS_POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "on", "off")
 _POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "model", "on", "off")
+_HOTKEY_ACTIONS: tuple[str, ...] = ("ptt", "replay")
+_HOTKEY_NAMES: tuple[str, ...] = tuple(f"f{i}" for i in range(1, 13))
 
 
 def _polish_model_names() -> list[str]:
@@ -139,6 +148,8 @@ def _completion_matches_for_buffer(buffer: str) -> list[str]:
         return _models_completion_matches(args, trailing_space)
     if primary == "polish":
         return _polish_completion_matches(args, trailing_space)
+    if primary == "hotkeys":
+        return _hotkeys_completion_matches(args, trailing_space)
     return []
 
 
@@ -224,6 +235,21 @@ def _polish_completion_matches(args: list[str], trailing_space: bool) -> list[st
             ]
         return []
 
+    return []
+
+
+def _hotkeys_completion_matches(args: list[str], trailing_space: bool) -> list[str]:
+    if not args:
+        return [f"/hotkeys {opt}" for opt in _HOTKEY_ACTIONS] if trailing_space else []
+    action = args[0].lower()
+    if len(args) == 1 and not trailing_space:
+        return [f"/hotkeys {opt}" for opt in _match_options(action, _HOTKEY_ACTIONS)]
+    if len(args) == 1 and trailing_space and action in _HOTKEY_ACTIONS:
+        return [f"/hotkeys {action} {key}" for key in _HOTKEY_NAMES]
+    if len(args) == 2 and action in _HOTKEY_ACTIONS and not trailing_space:
+        return [
+            f"/hotkeys {action} {key}" for key in _match_options(args[1], _HOTKEY_NAMES)
+        ]
     return []
 
 

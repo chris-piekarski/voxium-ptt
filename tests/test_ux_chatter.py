@@ -1,4 +1,4 @@
-"""UX chatter (optional Gemma / second llama-server) — pure helpers and fallbacks."""
+"""UX chatter on the shared polish/chatter lane — pure helpers and fallbacks."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from voxium.ux_chatter import (
     ux_output_likely_parrots_any_ux_prompt,
     ux_output_too_generic_for_edge_inference,
 )
-from voxium.ux_chatter_model_registry import DEFAULT_UX_CHATTER_API_MODEL
+from voxium.polish_model_registry import DEFAULT_TRUSTED_POLISH_MODEL_ID
 from voxium.ux_chatter_prompt import (
     _transcript_vibe_cues,
     system_message_ux_chatter_copy,
@@ -44,8 +44,8 @@ from voxium.ux_chatter_prompt import (
 
 def test_ux_chatter_runtime_defaults() -> None:
     rt = ux_chatter_runtime_from_config({})
-    assert rt.base_url == "http://127.0.0.1:11436"
-    assert rt.model == DEFAULT_UX_CHATTER_API_MODEL
+    assert rt.base_url == "http://127.0.0.1:11435"
+    assert rt.model == DEFAULT_TRUSTED_POLISH_MODEL_ID
 
 
 def test_ux_chatter_runtime_uses_resolved_model_id() -> None:
@@ -315,6 +315,30 @@ def test_fetch_ux_shutdown_line_drops_prompt_scaffolding(
         return LlamaCppChatResult(
             ok=True,
             text="Sign off for this session: prefix Voxium: going clear, 73, copy.",
+            error=None,
+            seconds=0.02,
+            prompt_tokens=5,
+            completion_tokens=8,
+            total_tokens=13,
+            raw_status=200,
+        )
+
+    monkeypatch.setattr("voxium.ux_chatter.llama_cpp_chat_completions", fake_comp)
+    assert fetch_ux_shutdown_line({}, cli_enabled=True) is None
+
+
+def test_fetch_ux_shutdown_line_drops_ctrl_c_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "voxium.ux_chatter.llama_cpp_reachable",
+        lambda _b, timeout=1.0: (True, None),
+    )
+
+    def fake_comp(*_a: Any, **_k: Any) -> Any:
+        return LlamaCppChatResult(
+            ok=True,
+            text="Voxium: (Ctrl+C)",
             error=None,
             seconds=0.02,
             prompt_tokens=5,

@@ -1,5 +1,6 @@
 """
-Prompts for **optional** client-only UX chatter (Gemma on a separate local llama-server).
+Prompts for **optional** client-only UX chatter on the shared local polish/chatter
+``llama-server`` lane.
 
 Complements polish prompts: this path must never touch STT output. Keep compact for latency.
 Voice: ``docs/brand.md`` (PTT leads VOX; HAM/CB/10-code flavor; inclusive, professional).
@@ -286,7 +287,7 @@ _UX_SHUTDOWN_SYSTEM = (
     + "The operator just hit **Ctrl+C** to exit the Voxium client (local PTT/VOX → text, **loopback** only). "
     "You write one sharp sign-off in HAM/CB/shack idiom: going clear, 73, 10-7, clear, out. It must start with the exact "
     "characters `Voxium: ` (with the space). Keep it brief, clean, and satisfying, like a proper signoff rather than a joke. No second line, no markdown, no URLs, "
-    "no emojis. ~90 characters after the prefix. No callsigns or fake QSO claims."
+    "no emojis. Do not mention Ctrl+C. ~90 characters after the prefix. No callsigns or fake QSO claims."
 )
 
 

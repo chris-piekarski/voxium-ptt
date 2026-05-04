@@ -41,6 +41,13 @@ TRUSTED_POLISH_MODELS: dict[str, TrustedPolishModel] = {
         description="Default code-aware polish with stronger fidelity",
         size_text="2.44 GB",
     ),
+    "gemma-2-2b-it-q5km": TrustedPolishModel(
+        model_id="gemma-2-2b-it-q5km",
+        repo_id="google/gemma-2-2b-it-GGUF",
+        filename="gemma-2-2b-it-Q5_K_M.gguf",
+        description="Shared Gemma polish and UX chatter model with compact latency",
+        size_text="1.92 GB",
+    ),
     "qwen2.5-3b-q4km": TrustedPolishModel(
         model_id="qwen2.5-3b-q4km",
         repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",

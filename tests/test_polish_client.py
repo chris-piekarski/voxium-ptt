@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from voxium import app
 from voxium.llama_cpp_daemon import ManagedLlamaCpp
 from voxium.polish_model_registry import DEFAULT_TRUSTED_POLISH_MODEL_ID
@@ -34,6 +36,11 @@ def _set_config(**overrides):
         "llama_cpp_ctx_size": 0,
         "llama_cpp_cmd": "",
         "polish_max_concurrent": 2,
+        "hotkey": "f9",
+        "recovery_hotkey": "f8",
+        "retry_hotkey": "f6",
+        "mode_hotkey": "f7",
+        "file_config": {},
     }
     defaults.update(overrides)
     app.config = SimpleNamespace(**defaults)
@@ -242,6 +249,64 @@ def test_apply_slash_runtime_changes_model_change_forces_refresh(monkeypatch) ->
     assert app.config.polish_model == "qwen2.5-3b-q4km"
     assert ensured == [(True, False, "qwen2.5-3b-q4km")]
     assert flushed == [True]
+
+
+def test_apply_slash_runtime_changes_persists_hotkeys(monkeypatch, tmp_path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(
+        "transcription:\n  model: tiny\nhotkeys:\n  mode: f7\n",
+        encoding="utf-8",
+    )
+    _set_config(file_config={"hotkeys": {"mode": "f7"}}, minimal=True)
+    app.ptt_status_box = None
+    monkeypatch.setattr(app, "CONFIG_PATH", cfg)
+
+    app.apply_slash_runtime_changes(
+        SlashLineResult(text="ok", hotkeys={"record": "f10", "recovery": "f11"})
+    )
+
+    assert app.config.hotkey == "f10"
+    assert app.config.recovery_hotkey == "f11"
+    assert app.config.file_config["hotkeys"]["record"] == "f10"
+    assert app.config.file_config["hotkeys"]["recovery"] == "f11"
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert data["transcription"]["model"] == "tiny"
+    assert data["hotkeys"] == {"mode": "f7", "record": "f10", "recovery": "f11"}
+
+
+def test_transcribe_and_paste_records_persistent_stats_source(monkeypatch) -> None:
+    _set_config(minimal=True, ux_chatter=False)
+    app.state = app.State.IDLE
+    app.vox_pending_audio.clear()
+    metrics = {"audio_seconds": 1.5, "model": {"decoder_tokens": 10}}
+    recorded: list[tuple[dict | None, str]] = []
+
+    def fake_transcribe(_audio):
+        app.last_transcription_metrics = metrics
+        return "copy that"
+
+    monkeypatch.setattr(app, "transcribe", fake_transcribe)
+    monkeypatch.setattr(
+        app,
+        "_record_persistent_stats",
+        lambda got_metrics, *, source: recorded.append((got_metrics, source)),
+    )
+    monkeypatch.setattr(app, "is_client_shutting_down", lambda: False)
+    monkeypatch.setattr(app, "is_hallucination", lambda _text: False)
+    monkeypatch.setattr(app, "set_spectrum_from_mono_float", lambda *_args: None)
+    monkeypatch.setattr(app, "get_transcript_history", lambda: None)
+    monkeypatch.setattr(app, "paste_text", lambda _text: None)
+    monkeypatch.setattr(app, "beep_success", lambda: None)
+    monkeypatch.setattr(app, "set_terminal_title", lambda: None)
+    monkeypatch.setattr(app, "take_readback", lambda: "readback")
+    monkeypatch.setattr(app, "show_status", lambda *_args: None)
+    monkeypatch.setattr(app, "log_transcription_summary", lambda *_args: None)
+    monkeypatch.setattr(app.time, "sleep", lambda _seconds: None)
+
+    app.transcribe_and_paste(object(), source="vox")
+
+    assert recorded == [(metrics, "vox")]
 
 
 def test_maybe_polish_transcript_records_fallback_metrics_on_http_error(

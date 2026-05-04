@@ -19,12 +19,15 @@ if not exist "pyproject.toml" (
   pause
   exit /b 1
 )
+rem Child script should not Read-Host on error: this .cmd already pauses below.
+set "VOXIUM_SKIP_PS_PAUSE=1"
 where pwsh >nul 2>&1
 if not errorlevel 1 (
   pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0Voxium.ps1" %*
 ) else (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Voxium.ps1" %*
 )
+set "VOXIUM_SKIP_PS_PAUSE="
 set "VEXIT=%ERRORLEVEL%"
 if "%VEXIT%"=="" set "VEXIT=0"
 if not "%VEXIT%"=="0" if not "%VEXIT%"=="130" if not defined VOXIUM_NO_PAUSE (

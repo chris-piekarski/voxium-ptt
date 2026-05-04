@@ -65,6 +65,16 @@ def _head_style_for_status_title(head: str) -> str:
     return "bold #ecfccb"  # lime-tint, readable in green box
 
 
+def _standby_head_with_morse_hint(head: str, ctx: dict) -> str:
+    """Append the compact terminal ``M`` Morse indicator to the on-station head."""
+    if ctx.get("morse_audio_playing"):
+        return f"{head}  M 🔇"
+    transcript = str(ctx.get("last_transcript_text") or "").strip()
+    if transcript:
+        return f"{head}  M 🔊"
+    return head
+
+
 def _group_from_status_steps(steps: list[PttStatusStep]) -> RenderableType:
     if not steps:
         return Text("—", style="dim")
@@ -269,6 +279,10 @@ def downlink_subtitle_for_slash_line(line: str) -> str:
         return "mic / capture"
     if first in ("gpu", "g", "cuda"):
         return "GPU"
+    if first in ("stats", "stat"):
+        return "stats"
+    if first in ("hotkeys", "hotkey", "keys"):
+        return "hotkeys"
     if first in ("models", "model"):
         return "models"
     if first in ("polish", "p", "re-encode", "reencode"):
@@ -433,6 +447,7 @@ class PttSessionStatusBox:
         self._command_hints: str = ""
         self._ptt_hint: str = "F9"
         self._mode_hint: str = "F7"
+        self._morse_audio_playing: bool = False
         # "ptt" = push-to-talk at rest; "vox" = open-mic (footer text + tint).
         self._footer_input_mode: str = "ptt"
         # On-station line: :func:`voxium.standby_telemetry.build_standby_detail_line` + real metrics.
@@ -467,6 +482,12 @@ class PttSessionStatusBox:
         """E.g. ``F7`` for the PTT↔VOX hint in the idle footer."""
         with self._lock:
             self._mode_hint = (key_label or "F7").upper()
+            self._refresh_footer_only_unsafe()
+
+    def set_morse_audio_state(self, playing: bool) -> None:
+        """Show whether terminal-focused ``M`` playback is currently sending CW audio."""
+        with self._lock:
+            self._morse_audio_playing = bool(playing)
             self._refresh_footer_only_unsafe()
 
     def set_input_mode_for_footer(self, mode: str) -> None:
@@ -526,6 +547,7 @@ class PttSessionStatusBox:
             self._session_steps[-1].live_hud = content
             if self._main_live.is_started:
                 self._main_live.update(self._build_main_panel(), refresh=True)
+                self._refresh_footer_live_unsafe()
 
     def freeze_before_external_output(self) -> None:
         self._stop_standby_anim()
@@ -574,6 +596,7 @@ class PttSessionStatusBox:
             self._command_line_active = False
             self._command_text = ""
             self._command_hints = ""
+            self._morse_audio_playing = False
 
     def _box_width(self) -> int:
         return voxium_panel_width(self._console)
@@ -595,9 +618,17 @@ class PttSessionStatusBox:
         if self._standby_row_active_unsafe():
             last = self._session_steps[-1]
             ctx = self._standby_context_fn() if self._standby_context_fn else {}
-            detail = build_standby_detail_line(self._standby_tick, ctx)
+            detail = build_standby_detail_line(
+                self._standby_tick,
+                ctx,
+                content_width=max(0, w - 4),
+            )
             steps = list(self._session_steps)
-            steps[-1] = PttStatusStep(last.head, detail, last.live_hud)
+            steps[-1] = PttStatusStep(
+                _standby_head_with_morse_hint(last.head, ctx),
+                detail,
+                last.live_hud,
+            )
             return build_voxium_session_panel(steps, w)
         return build_voxium_session_panel(self._session_steps, w)
 
@@ -626,6 +657,7 @@ class PttSessionStatusBox:
                 if not self._standby_stop.is_set():
                     try:
                         self._main_live.update(self._build_main_panel(), refresh=True)
+                        self._refresh_footer_live_unsafe()
                     except Exception:
                         break
 
@@ -670,6 +702,8 @@ class PttSessionStatusBox:
                     + Text("▎", style="dim #38bdf8")
                 )
         else:
+            morse_state = "on" if self._morse_audio_playing else "off"
+            morse_style = "dim #fbbf24" if self._morse_audio_playing else "dim #64748b"
             if self._footer_input_mode == "vox":
                 body = (
                     Text("  🎤  ", style="bold #a78bfa")
@@ -683,6 +717,8 @@ class PttSessionStatusBox:
                     + Text("·  ", style="dim #334155")
                     + Text("  /  ", style="dim #94a3b8")
                     + Text("command  ", style="dim #64748b")
+                    + Text("·  ", style="dim #334155")
+                    + Text(f"M Morse {morse_state}  ", style=morse_style)
                 )
             else:
                 body = (
@@ -696,6 +732,8 @@ class PttSessionStatusBox:
                     + Text("  ·  ", style="dim #334155")
                     + Text("  /  ", style="dim #94a3b8")
                     + Text("command  ", style="dim #64748b")
+                    + Text("·  ", style="dim #334155")
+                    + Text(f"M Morse {morse_state}  ", style=morse_style)
                 )
         return Panel(
             body,
@@ -735,6 +773,10 @@ class PttSessionStatusBox:
         elif self._main_running and not self._suspended:
             self._rerender_unsafe()
         # else: full render will run on next set_status
+
+    def _refresh_footer_live_unsafe(self) -> None:
+        if self._footer_live is not None and self._footer_live.is_started:
+            self._footer_live.update(self._build_footer(), refresh=True)
 
     def _rerender_unsafe(self) -> None:
         main = self._build_main_panel()
