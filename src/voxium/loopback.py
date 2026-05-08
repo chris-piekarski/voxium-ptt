@@ -34,6 +34,31 @@ def is_loopback_url(url: object) -> bool:
         return False
 
 
+def normalize_loopback_url(url: str | None) -> str:
+    """
+    Rewrite ``http://localhost…`` to ``http://127.0.0.1…`` so client connections
+    skip the IPv6→IPv4 fallback stall on dual-stack hosts (Windows + WSL2 in
+    particular). Non-loopback or already-IPv4 URLs are returned unchanged.
+
+    Voxium is IPv4-loopback by design — every server in the stack binds to
+    ``127.0.0.1`` via :func:`get_server_listen_args`, so a hostname URL adds a
+    ~1-2s ``getaddrinfo`` stall per request without buying anything.
+    """
+    if not isinstance(url, str) or not url:
+        return url or ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    host = parsed.hostname
+    if not host or host.lower() != "localhost":
+        return url
+    port = f":{parsed.port}" if parsed.port else ""
+    rebuilt_netloc = f"127.0.0.1{port}"
+    # `parsed._replace` keeps path/query/fragment intact.
+    return parsed._replace(netloc=rebuilt_netloc).geturl()
+
+
 def get_server_endpoint_url(server_url: str, endpoint: str) -> str:
     parsed = urlparse(server_url)
     return f"{parsed.scheme}://{parsed.netloc}/{endpoint.lstrip('/')}"
