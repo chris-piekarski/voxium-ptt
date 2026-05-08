@@ -8,6 +8,7 @@ from voxium.loopback import (
     is_loopback_host,
     is_loopback_url,
     normalize_loopback_host,
+    normalize_loopback_url,
 )
 
 
@@ -65,3 +66,36 @@ def test_get_server_listen_args_default_port():
     h, p = get_server_listen_args("http://127.0.0.1")
     assert h == "127.0.0.1"
     assert p == "8002"
+
+
+def test_normalize_loopback_url_rewrites_localhost_to_ipv4():
+    assert (
+        normalize_loopback_url("http://localhost:8002/transcribe")
+        == "http://127.0.0.1:8002/transcribe"
+    )
+    assert (
+        normalize_loopback_url("http://LOCALHOST:11435/") == "http://127.0.0.1:11435/"
+    )
+
+
+def test_normalize_loopback_url_preserves_path_and_query():
+    assert (
+        normalize_loopback_url("http://localhost:8002/v1/models?x=1")
+        == "http://127.0.0.1:8002/v1/models?x=1"
+    )
+
+
+def test_normalize_loopback_url_passes_through_ipv4_and_ipv6():
+    assert (
+        normalize_loopback_url("http://127.0.0.1:8002/x") == "http://127.0.0.1:8002/x"
+    )
+    assert normalize_loopback_url("http://[::1]:8002/x") == "http://[::1]:8002/x"
+
+
+def test_normalize_loopback_url_passes_through_non_loopback():
+    assert normalize_loopback_url("http://example.com/x") == "http://example.com/x"
+
+
+def test_normalize_loopback_url_handles_empty_and_none():
+    assert normalize_loopback_url("") == ""
+    assert normalize_loopback_url(None) == ""

@@ -85,6 +85,7 @@ from voxium.loopback import (
     is_loopback_host,
     is_loopback_url,
     normalize_loopback_host,
+    normalize_loopback_url,
 )
 from voxium.metrics_table import (
     build_ptt_log_metrics_layout,
@@ -1049,6 +1050,12 @@ def parse_args(argv: list[str] | None = None):
         parser.error(
             "llama-cpp-url must be http loopback (127.0.0.1, localhost, or ::1)"
         )
+    # Force IPv4 for loopback URLs so requests skip the IPv6→IPv4 fallback stall
+    # (~1-2s per request on Windows + WSL2). Voxium servers all bind 127.0.0.1.
+    if hasattr(args, "server_url"):
+        args.server_url = normalize_loopback_url(args.server_url)
+    if hasattr(args, "llama_cpp_url"):
+        args.llama_cpp_url = normalize_loopback_url(args.llama_cpp_url)
     return args
 
 
@@ -2777,7 +2784,7 @@ def transcribe_server(wav_buffer: io.BytesIO, capture_info: dict | None = None) 
 
     if not is_loopback_url(config.server_url):
         raise ValueError(
-            "Remote transcription URLs are not supported; use http://localhost:8002/transcribe"
+            "Remote transcription URLs are not supported; use http://127.0.0.1:8002/transcribe"
         )
 
     files = {"file": ("audio.wav", wav_buffer, "audio/wav")}
