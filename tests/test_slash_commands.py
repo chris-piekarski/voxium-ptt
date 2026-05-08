@@ -163,6 +163,59 @@ def test_run_slash_stats_formats_persistent_and_server_totals() -> None:
     assert "reset when the /transcribe server restarts" in out.text
 
 
+def test_run_slash_profile_empty_window_message() -> None:
+    from voxium import polish_profile
+
+    polish_profile.reset()
+    try:
+        out = run_slash_line("/profile")
+        assert "no /transcribe or llama-server calls" in out.text
+    finally:
+        polish_profile.reset()
+
+
+def test_run_slash_profile_renders_recorded_samples() -> None:
+    from voxium import polish_profile
+    from voxium.llama_cpp_client import LlamaCppChatResult
+
+    polish_profile.reset()
+    try:
+        polish_profile.record(
+            "polish",
+            model="qwen.gguf",
+            result=LlamaCppChatResult(
+                ok=True,
+                text="hi",
+                error=None,
+                seconds=0.42,
+                prompt_tokens=120,
+                completion_tokens=30,
+                total_tokens=150,
+                raw_status=200,
+                prompt_n=120,
+                prompt_ms=240.0,
+                predicted_n=30,
+                predicted_ms=300.0,
+                cache_n=0,
+            ),
+        )
+        out = run_slash_line("/profile")
+        assert "polish" in out.text
+        assert "prefill:" in out.text
+        assert "decode:" in out.text
+        assert "qwen.gguf" in out.text
+
+        cleared = run_slash_line("/profile reset")
+        assert "Runtime profile cleared" in cleared.text
+        again = run_slash_line("/profile")
+        assert "no /transcribe or llama-server calls" in again.text
+
+        bad = run_slash_line("/profile reset now")
+        assert "nothing after the subcommand" in bad.text
+    finally:
+        polish_profile.reset()
+
+
 def test_run_slash_models_status_includes_lanes() -> None:
     out = run_slash_line("/models")
     assert "Transcribe:" in out.text

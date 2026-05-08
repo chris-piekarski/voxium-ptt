@@ -119,7 +119,7 @@ def _print_pynvml() -> None:
 
 def main() -> int:
     print(
-        "Voxium — GPU / accelerator readout (Apollo stack: humans + silicon + robot math)"
+        "Voxium — GPU / accelerator readout (moon-and-back stack: humans + silicon + coding agents)"
     )
     print()
     try:

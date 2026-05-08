@@ -27,6 +27,7 @@ SLASH_COMMAND_ORDER: tuple[str, ...] = (
     "mic",
     "gpu",
     "stats",
+    "profile",
     "hotkeys",
     "models",
     "re-encode",
@@ -55,6 +56,8 @@ SLASH_ALIASES: tuple[tuple[str, str], ...] = (
     ("cuda", "gpu"),
     ("stats", "stats"),
     ("stat", "stats"),
+    ("profile", "profile"),
+    ("prof", "profile"),
     ("hotkeys", "hotkeys"),
     ("hotkey", "hotkeys"),
     ("keys", "hotkeys"),
@@ -71,6 +74,7 @@ _TRANSCRIBE_ACTIONS: tuple[str, ...] = ("list", "installed", "use")
 _MODELS_POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "on", "off")
 _POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "model", "on", "off")
 _HOTKEY_ACTIONS: tuple[str, ...] = ("ptt", "replay")
+_PROFILE_ACTIONS: tuple[str, ...] = ("reset",)
 _HOTKEY_NAMES: tuple[str, ...] = tuple(f"f{i}" for i in range(1, 13))
 
 
@@ -150,6 +154,8 @@ def _completion_matches_for_buffer(buffer: str) -> list[str]:
         return _polish_completion_matches(args, trailing_space)
     if primary == "hotkeys":
         return _hotkeys_completion_matches(args, trailing_space)
+    if primary == "profile":
+        return _profile_completion_matches(args, trailing_space)
     return []
 
 
@@ -235,6 +241,17 @@ def _polish_completion_matches(args: list[str], trailing_space: bool) -> list[st
             ]
         return []
 
+    return []
+
+
+def _profile_completion_matches(args: list[str], trailing_space: bool) -> list[str]:
+    if not args:
+        return [f"/profile {opt}" for opt in _PROFILE_ACTIONS] if trailing_space else []
+    if len(args) == 1 and not trailing_space:
+        return [
+            f"/profile {opt}"
+            for opt in _match_options(args[0].lower(), _PROFILE_ACTIONS)
+        ]
     return []
 
 

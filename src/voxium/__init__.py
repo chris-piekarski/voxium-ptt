@@ -1,4 +1,4 @@
-"""Voxium: PTT & VOX to text on loopback — HAM-style keying, Apollo-style local stack (see docs/brand.md)."""
+"""Voxium: PTT & VOX to text on loopback — HAM-style keying, moon-and-back coding-agent stack (see docs/brand.md)."""
 
 from __future__ import annotations
 

@@ -18,17 +18,23 @@ Voxium’s public voice rests on **two** complementary themes. Every **operator-
 
 ---
 
-## 2) Apollo: humans, hardware, software, and robot stacks
+## 2) The new space race: coding agents on a moon-and-back run for software engineering
 
-**Why:** Voxium is about doing something **unprecedented on your own machine**: wiring **electrical** (mics, GPUs), **mechanical** (keyboards, chassis), and **software** (client, model, server) with **automation** (the stack as “robot work”: inference engines, schedulers) to reach a new outcome—**typing through voice** on the loop, locally.
+**Why:** **Coding agents** are the new **space race** for software engineering — humans set the destination, agents fly the heavy lift from **intent to working code and back** with the result.
+
+Voxium puts the human at the key with a **voice channel** into that loop: PTT in, text out, agents and tools downstream.
+
+On your own machine you are also wiring **electrical** (mics, GPUs), **mechanical** (keyboards, chassis), and **software** (client, model, server) with **automation** (inference engines, schedulers, agents) to make that **moon-and-back** round trip routine, locally.
 
 **How to use it (examples, not a mandatory list):**
 
-- A **mission** or **run** can frame a user session; **uncharted** and **first-flight** are fair for docs when describing *your* local stack, not a guarantee about the industry.
-- **Stack**, **ground** (this machine you control), **on station / ready** for services; avoid confusing NASA role-play that obscures the actual client/server split.
-- **Rockets** and **spacecraft** are **metaphors** for *systems* that do heavy, automated work; they are not literal product claims.
+- A **mission**, **run**, or **moonshot** can frame a user session; **moon-and-back** and **first-flight** are fair for docs when describing the round trip from voice → code → working result on *your* local stack, not a guarantee about the industry.
+- **Stack**, **ground** (this machine you control), **on station / ready** for services; avoid NASA role-play that obscures the actual client/server split.
+- **Rockets**, **spacecraft**, and **coding agents** are **metaphors / actors** for *systems* that do heavy, automated work — heavy lifters in the agent loop, not literal product claims.
 
-**Emphasis:** humans **steer**; robots **execute** the heavy, repeatable work (inference, mixing, I/O) within the path you set.
+**Emphasis:** humans **steer**; **agents and the inference path** **execute** the heavy, repeatable work (transcription, polish, downstream tooling) within the route you set.
+
+**Vocabulary:** see [radio-chatter-context.md §17](radio-chatter-context.md#17-coding-agents--moon-and-back-vocabulary) for the compact word list (mission, run, moonshot, on station, downlink, agent loop, RTB, …) — companion to §16's radio vocabulary.
 
 ---
 
@@ -54,6 +60,6 @@ Diagrams should still read **visually** on-theme where easy: e.g. label the user
 
 ## 5) Enforcement
 
-Changes that **only** affect internals may ignore this document. Any change to **user-visible** copy, dev-facing `make help` line, or doc meant for **operators** should be checked against [§1](#1-radio-ham-cb-ptt-and-vox) and [§2](#2-apollo-humans-hardware-software-and-robot-stacks) (see [AGENTS.md](../AGENTS.md) for the same rule in contributor policy).
+Changes that **only** affect internals may ignore this document. Any change to **user-visible** copy, dev-facing `make help` line, or doc meant for **operators** should be checked against [§1](#1-radio-ham-cb-ptt-and-vox) and [§2](#2-the-new-space-race-coding-agents-on-a-moon-and-back-run-for-software-engineering) (see [AGENTS.md](../AGENTS.md) for the same rule in contributor policy).
 
 See also: [AGENTS.md](../AGENTS.md), [README.md](../README.md), and [architecture.md](architecture.md).

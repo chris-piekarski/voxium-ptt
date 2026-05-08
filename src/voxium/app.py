@@ -142,6 +142,7 @@ from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
 from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
 from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
+from voxium import polish_profile
 from voxium.terminal_focus import is_our_terminal_focused
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
@@ -785,7 +786,7 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     history_group.add_argument(
         "--history-limit",
         type=int,
-        default=hist.get("limit", 100),
+        default=hist.get("limit", 42),
         help="Maximum transcriptions to keep in this process (RAM; session-only)",
     )
     history_group.add_argument(
@@ -933,7 +934,7 @@ def build_parser(file_config: dict) -> argparse.ArgumentParser:
         usage="voxium [command] [options]",
         description=(
             "Voxium — PTT (push-to-talk) voice in, text out, over local loopback. "
-            "Radio: *VOX* at the mic. Stack: an Apollo-style first flight of *your* hardware+software+model path."
+            "Radio: *VOX* at the mic. Stack: a moon-and-back run of *your* hardware+software+model+coding-agent path."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -2829,7 +2830,37 @@ def transcribe(audio: np.ndarray) -> str:
 
     wav_buffer.seek(0)
 
-    text = transcribe_server(wav_buffer, last_audio_capture_info)
+    _stt_t0 = time.perf_counter()
+    _stt_err: str | None = None
+    _stt_ok = False
+    try:
+        text = transcribe_server(wav_buffer, last_audio_capture_info)
+        _stt_ok = True
+    except Exception as exc:
+        _stt_err = str(exc)[:200]
+        raise
+    finally:
+        _stt_wall = time.perf_counter() - _stt_t0
+        _stt_metrics = (
+            last_transcription_metrics
+            if isinstance(last_transcription_metrics, dict)
+            else None
+        )
+        _stt_model_name = ""
+        if isinstance(_stt_metrics, dict):
+            mblk = _stt_metrics.get("model")
+            if isinstance(mblk, dict):
+                _stt_model_name = str(mblk.get("name") or "")
+        if not _stt_model_name:
+            _stt_model_name = str(getattr(config, "model", "") or "")
+        polish_profile.record_stt(
+            model=_stt_model_name,
+            client_wall_seconds=_stt_wall,
+            metrics=_stt_metrics,
+            ok=_stt_ok,
+            error=_stt_err,
+        )
+
     if last_transcription_metrics is None:
         last_transcription_metrics = {}
     if text and config and getattr(config, "polish", True):

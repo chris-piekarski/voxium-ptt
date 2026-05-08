@@ -100,6 +100,7 @@ from voxium.llama_cpp_client import (
     llama_cpp_reachable,
 )
 from voxium.loopback import is_loopback_host, is_loopback_url, normalize_loopback_host
+from voxium import polish_profile
 from voxium.polish_models import DEFAULT_POLISH_MODEL, validate_polish_model_tag
 from voxium.polish_provision import ensure_polish_model_downloaded
 from voxium.model_arg import trusted_model_arg
@@ -1433,6 +1434,7 @@ def polish_endpoint(body: PolishRequestBody):
             sem.release()
         except ValueError:
             pass
+    polish_profile.record("polish", model=resolved_model.name, result=res)
 
     handler_seconds = round(time.perf_counter() - t_handler0, 4)
     if res.ok and (res.text or "").strip():
@@ -1889,6 +1891,7 @@ Examples:
                     temperature=0.0,
                     max_tokens=1,
                 )
+                polish_profile.record("polish", model=warm_model, result=w)
                 if w.ok:
                     logger.info(
                         "Voxium: polish llama.cpp warmup copy — model primed, copy."

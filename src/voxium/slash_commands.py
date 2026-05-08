@@ -19,6 +19,7 @@ from voxium.model_registry import (
     validate_model_name,
 )
 from voxium.polish_models import validate_polish_model_tag
+from voxium import polish_profile
 from voxium.polish_model_registry import (
     DEFAULT_TRUSTED_POLISH_MODEL_ID,
     POLISH_DEFAULT_MODEL,
@@ -847,6 +848,23 @@ def _run_history_line(
     return SlashLineResult(text=f"#{n} (full text)\n\n{t}\n")
 
 
+def _run_profile_line(parts: list[str]) -> SlashLineResult:
+    """``/profile`` shows the runtime llama-server profile; ``/profile reset`` clears it."""
+    sub = (parts[1].lower() if len(parts) > 1 else "").strip()
+    if sub in ("reset", "clear", "wipe"):
+        if len(parts) > 2:
+            return SlashLineResult(
+                text="Use /profile reset alone — nothing after the subcommand, copy."
+            )
+        polish_profile.reset()
+        return SlashLineResult(
+            text="Runtime profile cleared, copy. Trigger more calls and run /profile again."
+        )
+    if sub and sub not in ("show", "view"):
+        return SlashLineResult(text="Use /profile (show) or /profile reset, copy.")
+    return SlashLineResult(text=polish_profile.format_profile_report())
+
+
 def run_slash_line(
     line: str,
     *,
@@ -887,6 +905,8 @@ def run_slash_line(
         return SlashLineResult(
             text=format_stats_report(persistent_stats, server_stats=server_stats)
         )
+    if first in ("profile", "prof"):
+        return _run_profile_line(parts)
     if first in ("models", "model"):
         return _run_models_line(
             s,
@@ -923,6 +943,7 @@ def _help_text() -> str:
         "  • /mic — default input, PortAudio, device, host API\n"
         "  • /gpu (/g) — same GPU readout as the inference metrics box\n"
         "  • /stats — persisted inference totals plus current server-process counters\n"
+        "  • /profile (/prof) — recent llama-server timings per slot (prefill vs decode); /profile reset clears\n"
         "  • /disk (/du) — local data size: models/, logs/, tools/llama.cpp/\n\n"
         "Models and local stack\n"
         "  • /models — active transcribe + shared polish/chatter summary\n"

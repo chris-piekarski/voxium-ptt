@@ -20,6 +20,14 @@ class LlamaCppChatResult:
     completion_tokens: int | None
     total_tokens: int | None
     raw_status: int | None
+    # llama-server `timings` block (only present when the server emits it; older
+    # builds and non-200 responses leave these None). Lets the runtime profiler
+    # split prefill cost (`prompt_ms`) from decode cost (`predicted_ms`).
+    prompt_n: int | None = None
+    prompt_ms: float | None = None
+    predicted_n: int | None = None
+    predicted_ms: float | None = None
+    cache_n: int | None = None  # llama-server timings key is `cache_n`, not `cached_n`
 
 
 def _base(base_url: str) -> str:
@@ -95,6 +103,12 @@ def llama_cpp_chat_completions(
         "stream": False,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # cache_prompt: keep the system+user prefix KV across calls so a fixed
+        # prompt re-runs prefill only on the changed suffix. The aggregate
+        # `timings` block (prompt_n/prompt_ms/predicted_n/predicted_ms/cache_n)
+        # is emitted unconditionally by llama-server on non-stream completions —
+        # no `timings_per_token` flag needed (that one only adds per-token arrays).
+        "cache_prompt": True,
     }
     try:
         r = requests.post(url, json=body, timeout=timeout)
@@ -143,6 +157,7 @@ def llama_cpp_chat_completions(
             if isinstance(msg, dict):
                 text = str(msg.get("content") or "").strip()
     usage = data.get("usage") if isinstance(data, dict) else None
+    timings = data.get("timings") if isinstance(data, dict) else None
     return LlamaCppChatResult(
         ok=True,
         text=text,
@@ -152,6 +167,11 @@ def llama_cpp_chat_completions(
         completion_tokens=_usage_int(usage, "completion_tokens"),
         total_tokens=_usage_int(usage, "total_tokens"),
         raw_status=r.status_code,
+        prompt_n=_timings_int(timings, "prompt_n"),
+        prompt_ms=_timings_float(timings, "prompt_ms"),
+        predicted_n=_timings_int(timings, "predicted_n"),
+        predicted_ms=_timings_float(timings, "predicted_ms"),
+        cache_n=_timings_int(timings, "cache_n"),
     )
 
 
@@ -187,6 +207,22 @@ def _usage_int(usage: Any, key: str) -> int | None:
         return None
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _timings_int(timings: Any, key: str) -> int | None:
+    return _usage_int(timings, key)
+
+
+def _timings_float(timings: Any, key: str) -> float | None:
+    if not isinstance(timings, dict):
+        return None
+    value = timings.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 

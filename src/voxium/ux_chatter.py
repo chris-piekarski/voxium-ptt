@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from voxium import polish_profile
 from voxium.llama_cpp_client import (
     LlamaCppChatResult,
     llama_cpp_chat_completions,
@@ -384,7 +385,7 @@ def ux_chatter_runtime_from_config(
         base_url=base_url,
         model=model,
         timeout_s=float(uxc.get("timeout_s") or 0.45),
-        max_tokens=int(uxc.get("max_tokens") or 48),
+        max_tokens=int(uxc.get("max_tokens") or 42),
         wit_max_chars=int(uxc.get("wit_max_chars") or 72),
         cooldown_s=float(uxc.get("cooldown_s") or 4.0),
         prompt_tail_chars=int(uxc.get("prompt_tail_chars") or 320),
@@ -433,6 +434,7 @@ def fetch_ux_startup_tagline(
         )
     except Exception:
         return None
+    polish_profile.record("banner", model=rt.model, result=res)
     if not res.ok or not (res.text or "").strip():
         return None
     s = _normalize_wit((res.text or "").strip(), max_chars=160)
@@ -475,6 +477,7 @@ def fetch_ux_rig_subtitle(
         )
     except Exception:
         return None
+    polish_profile.record("rig_subtitle", model=rt.model, result=res)
     if not res.ok or not (res.text or "").strip():
         return None
     s = _normalize_wit((res.text or "").strip(), max_chars=120)
@@ -526,6 +529,7 @@ def fetch_ux_log_subtitle(
         )
     except Exception:
         return None
+    polish_profile.record("log_subtitle", model=rt.model, result=res)
     if not res.ok or not (res.text or "").strip():
         return None
     s = _normalize_wit((res.text or "").strip(), max_chars=100)
@@ -601,6 +605,7 @@ def fetch_ux_shutdown_line(
         )
     except Exception:
         return None
+    polish_profile.record("shutdown", model=rt.model, result=res)
     if not res.ok or not (res.text or "").strip():
         return None
     s = _normalize_shutdown_line((res.text or "").strip())
@@ -684,6 +689,11 @@ def request_ux_chatter_line_full(
         temperature=0.55,
         max_tokens=max(8, int(runtime.max_tokens)),
     )
+    polish_profile.record(
+        "chatter_standby" if purpose == "standby" else "chatter_copy",
+        model=runtime.model,
+        result=res,
+    )
     if not res.ok or not (res.text or "").strip():
         if res.error and _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("ux chatter: no line (%s)", res.error[:120])
@@ -732,6 +742,7 @@ def request_ux_chatter_edge_line_full(
         temperature=0.55,
         max_tokens=max(8, int(runtime.max_tokens)),
     )
+    polish_profile.record("edge_inference", model=runtime.model, result=res)
     if not res.ok or not (res.text or "").strip():
         if res.error and _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("ux chatter edge: no line (%s)", res.error[:120])
