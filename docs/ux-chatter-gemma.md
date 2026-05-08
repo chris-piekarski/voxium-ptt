@@ -12,7 +12,7 @@
 
 | Aspect | Rule |
 |--------|------|
-| **Purpose** | “HAM/CB chatter” **flavor** in the **console log / status** area only: witty, short, **radio + Apollo** tone, responsive to **what the user just said** (transcript as context). |
+| **Purpose** | “HAM/CB chatter” **flavor** in the **console log / status** area only: witty, short, **radio + new-space-race / coding-agents** tone, responsive to **what the user just said** (transcript as context). |
 | **Not in scope** | Changing hotkeys, recording logic, **STT output**, **polish** semantics, API shapes, or paste targets. No new user **obligations** to download a model. |
 | **Default** | **On**; any error, opt-out, or missing asset → **static strings** (no blank in the panel). |
 | **Failure** | Any error, timeout, or missing asset → **fallback to existing hard-coded strings** (no blank, no stack trace in the panel). |

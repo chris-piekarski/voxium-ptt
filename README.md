@@ -24,7 +24,7 @@
 
 **PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path; model provisioning may download assets from Hugging Face.
 
-It is the same muscle memory as a **radio key**: short transmissions, then **copy** to the screen. Under the hood you are **stacking** mic, CPU/GPU, and model in a very **Apollo** way: humans at the key, **robot** work in the inference path, **uncharted** only in the sense of *your* machine’s first clean run. Press a hotkey, speak, press again: text is pasted where you are typing. Default path is **GPU (CUDA)**; use `--server-device cpu` if you have no working CUDA stack. **Brand story (radio + space-race tone):** [docs/brand.md](docs/brand.md).
+It is the same muscle memory as a **radio key**: short transmissions, then **copy** to the screen. Under the hood you are **stacking** mic, CPU/GPU, model, and — increasingly — **coding agents**: this is the **new space race for software engineering**, a **moon-and-back** run from voice to working code, with humans at the key and **automated** work in the inference and agent path. Press a hotkey, speak, press again: text is pasted where you are typing. Default path is **GPU (CUDA)**; use `--server-device cpu` if you have no working CUDA stack. **Brand story (radio + new-space-race / coding-agents tone):** [docs/brand.md](docs/brand.md).
 
 ## Live screenshot
 
@@ -121,7 +121,7 @@ hotkeys:
   retry: f6
   mode: f7
 history:
-  limit: 100
+  limit: 42
   max_total_chars: 512000
   pending_audio_max_mib: 32
 ui:

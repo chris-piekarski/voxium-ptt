@@ -1,16 +1,16 @@
 # Voxium documentation
 
-Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows **[brand.md](brand.md)** — **PTT & VOX** (radio heritage) and an **Apollo-style** story: people wiring **hardware + software + mech** with **automated** work (inference) for **local, first-stack** runs. These pages also cover **architecture**, **test and coverage policy**, and **Mermaid** (GitHub, VS Code, etc.).
+Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows **[brand.md](brand.md)** — **PTT & VOX** (radio heritage) plus the **new-space-race** story: people steering **coding agents** on a **moon-and-back** run for software engineering, wiring **hardware + software + mech** with **automated** work (inference, agents) for **local, first-stack** runs. These pages also cover **architecture**, **test and coverage policy**, and **Mermaid** (GitHub, VS Code, etc.).
 
 | Document | Description |
 |----------|-------------|
-| [brand.md](brand.md) | **Brand voice:** HAM/CB-tinged *PTT* & **VOX** plus Apollo / uncharted-local-stack tone; where to use it. |
+| [brand.md](brand.md) | **Brand voice:** HAM/CB-tinged *PTT* & **VOX** plus **new-space-race / coding-agents** local-stack tone; where to use it. |
 | [architecture.md](architecture.md) | System context, major components, PTT and **VOX (open mic)** request flows, and current layout (with diagrams). |
 | [testing.md](testing.md) | Unit-test strategy, coverage **fail-under** in `pyproject.toml`, markers, and how to run `pytest` / `make test-cov`. |
 | [profiling.md](profiling.md) | Preferred maintainer profiling workflow: **`py-spy` first** on CPython, same-OS attach rules for Windows vs WSL, flamegraph capture. |
 | [repository-stats.md](repository-stats.md) | **LOC snapshot** of the tree (by area and `voxium` subpackages), with Mermaid `pie` diagrams; run `make repo-stats` to refresh. |
 | [llm-polish-plan.md](llm-polish-plan.md) | Design and implementation notes for the optional local **LLM polish** pass: STT text goes through a repo-local **llama.cpp** runtime (`llama-server` + GGUF model) on the loopback stack; Windows setup/bootstrap now provisions the runtime and default model into the repo. |
-| [radio-chatter-context.md](radio-chatter-context.md) | Optional **CB / HAM** phrasing reference for brand-adjacent copy (not legal or protocol guidance). |
+| [radio-chatter-context.md](radio-chatter-context.md) | Optional **CB / HAM** phrasing reference for brand-adjacent copy, plus §17 **coding-agents / moon-and-back vocabulary** companion to brand.md §2 (not legal or protocol guidance). |
 | [ux-chatter-gemma.md](ux-chatter-gemma.md) | **Gemma**-friendly **console-only** UX (on by default; opt out with `--no-ux-chatter` or config), sharing the active polish GGUF and `llama-server`, guardrails. |
 
 ## Diagram index

@@ -12,7 +12,7 @@ This file summarizes how the **Voxium** repository is organized, how to develop 
 
 ## What this project is
 
-- **Voxium** is a **PTT (push-to-talk) voice-typing** application for the terminal: **VOX** in, text out, over a **local loopback** to a **Whisper**-based server (or local inference). Brand-wise, the repo treats the **HAM/CB radio** heritage (PTT, **VOX**, mic, copy) and the **Apollo-era** image of people flying **new combinations** of **hardware + software + mechanical** systems with **robotic** automation (inference stack, I/O) into **uncharted, local** territory—see [`docs/brand.md`](docs/brand.md).
+- **Voxium** is a **PTT (push-to-talk) voice-typing** application for the terminal: **VOX** in, text out, over a **local loopback** to a **Whisper**-based server (or local inference). Brand-wise, the repo treats the **HAM/CB radio** heritage (PTT, **VOX**, mic, copy) and the **new-space-race** image of people steering **coding agents** on a **moon-and-back** run for software engineering — wiring **hardware + software + mechanical** systems with **automated** work (inference stack, I/O, agents) into **uncharted, local** territory — see [`docs/brand.md`](docs/brand.md).
 - The installable package lives under **`src/voxium/`** (setuptools `package-dir` = `src`).
 - The console entry point is **`voxium`**, defined in `pyproject.toml` as `voxium.cli.main:main` (the CLI entry imports `voxium.app` for the interactive client).
 
@@ -59,7 +59,7 @@ The top-level **README** stays a concise entry point; **depth** belongs in `docs
 Voxium’s public tone is defined in **[`docs/brand.md`](docs/brand.md)**. In short:
 
 1. **Radio / PTT** — HAM and CB *culture* (not jargon overload): stress **PTT** and **VOX**, mic checks, “copy/standing by” where it stays readable. Never obscure errors or steps with slang.
-2. **Apollo / uncharted stacks** — Narrate the product as *humans steering* a **local** blend of **electrical + software + mechanical** *plus* **automated/robotic** work (inference, streaming) in **new, first-flight** conditions on **your** machine. Metaphor only: no false historical claims.
+2. **New space race / coding agents** — Narrate the product as *humans steering* a **local** blend of **electrical + software + mechanical** *plus* **automated** work (inference, streaming, **coding agents**) on a **moon-and-back** run from voice to working software on **your** machine. Metaphor only: no false historical claims and no overstated agent capability.
 
 **Enforcement for contributors and agents**
 
@@ -164,6 +164,6 @@ You may add a **scope** in parentheses when it helps, e.g. `fix(cli): normalize 
 - Prefer **small, pure functions** in `src/voxium/` and **tests** over growing `app.py` / `whisper_server.py` when the change is testable in isolation.
 - **Do not** add unsolicited **root-level** documentation files beyond what maintainers request. **Exception:** updates and additions under **`docs/`** are welcome when they follow the [Operator documentation](#operator-documentation) section (verbose, operator-focused, **Mermaid** where it helps) and, for operator copy, the [Brand voice](#brand-voice) / [`docs/brand.md`](docs/brand.md) rules. This file (`AGENTS.md`) remains the place for **repo-wide policy and structure** for agents and humans.
 - Match **existing** naming, imports, and ruff/mypy expectations; avoid drive-by refactors outside the task.
-- When you change **any** public-facing or operator-facing string, **re-check** [Brand voice](#brand-voice) and [`docs/brand.md`](docs/brand.md) (PTT & VOX + Apollo-style local “stack” story).
+- When you change **any** public-facing or operator-facing string, **re-check** [Brand voice](#brand-voice) and [`docs/brand.md`](docs/brand.md) (PTT & VOX + new-space-race / coding-agents local “stack” story).
 
 When in doubt, run **`make test`**, **`make lint`**, and keep the PR aligned with the **conventional** + **signed** commit policy above.

@@ -741,3 +741,36 @@ For Voxium PTT / voice terminal branding, the strongest words from this universe
 | Lima Charlie | Clear transcription |
 | Oscar Mike | Agent is running |
 | Charlie Mike | Continue task |
+
+## 17. Coding-agents / moon-and-back vocabulary
+
+Companion to §16 for the **new-space-race** half of the brand (see [brand.md §2](brand.md#2-the-new-space-race-coding-agents-on-a-moon-and-back-run-for-software-engineering)). Voxium frames **coding agents** as the **new space race for software engineering**: humans set the destination at the mic, and the **agents + inference path** fly the heavy lift from intent to working code and back. These words are intended for **operator-facing** copy (banners, panel titles, doc intros) — not for JSON keys, error tracebacks, or test output.
+
+| Word / phrase | Vibe in Voxium copy |
+|---|---|
+| Mission | A user session / end-to-end run |
+| Run | One PTT or VOX exchange (mic → text → downstream tool) |
+| Moonshot | An ambitious single run (long capture, polish, agent hand-off) |
+| Moon-and-back | The round trip: voice → code → working result, returned to the operator |
+| First flight | A first clean local run on this machine / this stack |
+| Mission control | The human at the keyboard / mic — *you* steer |
+| Ground | This machine you control (local-first stance) |
+| On station | Ready and listening (server up, client armed for PTT/VOX) |
+| Standing by | Idle but armed — same vibe as the radio side |
+| Uplink | Client → server transmit (audio out to `/transcribe`, `/polish`) |
+| Downlink | Server → client telemetry / health JSON / panel feed |
+| Telemetry | Runtime metrics (rFFT, inference timings, `/stats`) |
+| Stack | The local rig: mic + GPU/CPU + model + agents |
+| Inference path | The heavy-lift segment: Whisper → optional polish → paste |
+| Agent loop | The round trip a coding agent performs after Voxium hands it text |
+| Coding agent | Downstream executor (Claude Code, Codex, etc.) the operator is steering with voice |
+| Booster / lifter | A heavy automated step (model load, large-context inference) |
+| Capsule | A local process / runtime (e.g., `llama-server`) |
+| Splashdown | Successful return — text pasted, agent result back in the operator's editor |
+| RTB (return to base) | Clean shutdown / signing off the session |
+| Oscar Mike | Agent is executing — already in §16, doubly fitting here |
+| Charlie Mike | Continue mission / resume the run |
+| Lima Charlie | Clear transcription / clean copy back from the agent |
+| Bingo | Running out of headroom (context window, GPU memory, time budget) — use sparingly, only where it stays clear |
+
+Apply these the same way as §16: **actionability first**, flavor second. If a phrase obscures the fix in an error message or a literal hotkey list, drop the flavor and keep the literal. Metaphor only — Voxium does not literally fly anything.

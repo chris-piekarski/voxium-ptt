@@ -38,6 +38,7 @@ def test_list_empty_prefix_all_ordered() -> None:
         "mic",
         "gpu",
         "stats",
+        "profile",
         "hotkeys",
         "models",
         "re-encode",

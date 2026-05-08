@@ -264,3 +264,63 @@ def test_usage_int_invalid_value_returns_none() -> None:
     assert _usage_int({"prompt_tokens": "nope"}, "prompt_tokens") is None
     assert _usage_int(None, "x") is None
     assert _usage_int({"prompt_tokens": None}, "prompt_tokens") is None
+
+
+def test_chat_request_body_enables_cache_prompt(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_post(_url, json=None, timeout=None):
+        captured["body"] = json
+        return _DummyResponse(200, {"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("voxium.llama_cpp_client.requests.post", fake_post)
+    llama_cpp_chat("http://h:1/", "m", "hello", timeout=1.0)
+    body = captured["body"]
+    assert body["cache_prompt"] is True
+    # timings_per_token is intentionally NOT set: llama-server emits the aggregate
+    # `timings` block on non-stream responses by default; the flag would only add
+    # per-token arrays we never read.
+    assert "timings_per_token" not in body
+    assert body["stream"] is False
+
+
+def test_chat_parses_timings_block_into_result(monkeypatch) -> None:
+    payload = {
+        "choices": [{"message": {"content": "hi"}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        "timings": {
+            "prompt_n": 100,
+            "prompt_ms": 250.5,
+            "predicted_n": 20,
+            "predicted_ms": 200.0,
+            "cache_n": 7,
+        },
+    }
+    monkeypatch.setattr(
+        "voxium.llama_cpp_client.requests.post",
+        lambda *a, **k: _DummyResponse(200, payload),
+    )
+    out = llama_cpp_chat("http://h:1/", "m", "t", timeout=1.0)
+    assert out.ok
+    assert out.prompt_n == 100
+    assert out.prompt_ms == 250.5
+    assert out.predicted_n == 20
+    assert out.predicted_ms == 200.0
+    assert out.cache_n == 7
+
+
+def test_chat_without_timings_block_leaves_fields_none(monkeypatch) -> None:
+    payload = {
+        "choices": [{"message": {"content": "hi"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+    }
+    monkeypatch.setattr(
+        "voxium.llama_cpp_client.requests.post",
+        lambda *a, **k: _DummyResponse(200, payload),
+    )
+    out = llama_cpp_chat("http://h:1/", "m", "t", timeout=1.0)
+    assert out.ok
+    assert out.prompt_n is None
+    assert out.prompt_ms is None
+    assert out.predicted_n is None
+    assert out.predicted_ms is None

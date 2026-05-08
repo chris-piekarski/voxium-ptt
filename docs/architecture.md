@@ -1,6 +1,6 @@
 # Voxium architecture
 
-This document describes how **Voxium 0.0.1** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **VOX** flow becomes text, how the optional **polish** pass is inserted, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus **Apollo**-era “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **robot** automation (inference) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
+This document describes how **Voxium 0.0.1** is structured: who uses it, which **stack** parts exist, how a **PTT** (push-to-talk) **VOX** flow becomes text, how the optional **polish** pass is inserted, and how the **repository** maps to that path. The tone in diagram labels follows [brand.md](brand.md) — *radio* clarity plus the **new-space-race** “first local integration” of people, **hardware** (mic, GPU/CPU), **software** (client, model), and **automated coding-agent** work (inference, agents) on the loop. Written for **maintainers and contributors** (see [testing](testing.md) for tests and coverage).
 
 ---
 
