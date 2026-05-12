@@ -19,6 +19,7 @@ _PTT_STATUS_BORDER = "#16a34a"
 _PTT_BOX_NAME_STYLE = "bold #86efac"
 _HUD_METER_STYLE = "dim #86efac"
 _DETAIL_STYLE = "dim #cbd5e1"
+_LIVE_READBACK_STYLE = "italic dim #a7f3d0"  # green-200 dim italic — "in-flight" feel
 _PTT_BRAND = "Voxium"
 
 # Cap so a long session does not grow the live region without bound.
@@ -46,6 +47,10 @@ class PttStatusStep:
     detail: str | RenderableType = ""
     # None = two-line step; str = recording stats (plain); Rich = live PTT (e.g. stats + waveform).
     live_hud: str | RenderableType | None = None
+    # Optional 4th line: live transcribe readback (dim italic with chip).
+    # See ``docs/plans/live-transcribe-stream.md`` §3.5 — operator sees partial
+    # text appearing while keying the mic; clears at end of take.
+    live_readback: str | RenderableType | None = None
 
 
 def _head_style_for_status_title(head: str) -> str:
@@ -95,6 +100,11 @@ def _group_from_status_steps(steps: list[PttStatusStep]) -> RenderableType:
                 )
             else:
                 parts.append(st.live_hud)
+        if st.live_readback is not None:
+            if isinstance(st.live_readback, str):
+                parts.append(Text(st.live_readback, style=_LIVE_READBACK_STYLE))
+            else:
+                parts.append(st.live_readback)
     return Group(*parts)
 
 
@@ -547,6 +557,34 @@ class PttSessionStatusBox:
             if self._session_steps[-1].live_hud is None:
                 return
             self._session_steps[-1].live_hud = content
+            if self._main_live.is_started:
+                self._main_live.update(self._build_main_panel(), refresh=True)
+                if self._box_width() != self._footer_last_render_width:
+                    self._refresh_footer_live_unsafe()
+
+    def update_live_readback(self, content: str | RenderableType | None) -> None:
+        """
+        Set the live transcribe readback line on the most recent step.
+
+        Pass ``None`` to clear (e.g. at end of take). Caller should pass a Rich
+        :class:`rich.text.Text` (with the ``▸ wire`` chip pre-styled) when the
+        WS is connected, a plain string when streaming is disabled but a status
+        message is wanted, or ``None`` to remove the line entirely.
+        """
+        with self._lock:
+            if self._live_unavailable:
+                return
+            if (
+                self._suspended
+                or not self._main_running
+                or not self._main_live
+                or not self._session_steps
+            ):
+                return
+            current = self._session_steps[-1].live_readback
+            if current == content:
+                return
+            self._session_steps[-1].live_readback = content
             if self._main_live.is_started:
                 self._main_live.update(self._build_main_panel(), refresh=True)
                 if self._box_width() != self._footer_last_render_width:

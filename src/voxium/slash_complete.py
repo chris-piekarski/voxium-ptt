@@ -28,6 +28,7 @@ SLASH_COMMAND_ORDER: tuple[str, ...] = (
     "gpu",
     "stats",
     "profile",
+    "stream",
     "hotkeys",
     "models",
     "re-encode",
@@ -58,6 +59,8 @@ SLASH_ALIASES: tuple[tuple[str, str], ...] = (
     ("stat", "stats"),
     ("profile", "profile"),
     ("prof", "profile"),
+    ("stream", "stream"),
+    ("live", "stream"),
     ("hotkeys", "hotkeys"),
     ("hotkey", "hotkeys"),
     ("keys", "hotkeys"),
@@ -75,6 +78,7 @@ _MODELS_POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "on", "of
 _POLISH_ACTIONS: tuple[str, ...] = ("list", "installed", "use", "model", "on", "off")
 _HOTKEY_ACTIONS: tuple[str, ...] = ("ptt", "replay")
 _PROFILE_ACTIONS: tuple[str, ...] = ("reset",)
+_STREAM_ACTIONS: tuple[str, ...] = ("on", "off", "status")
 _HOTKEY_NAMES: tuple[str, ...] = tuple(f"f{i}" for i in range(1, 13))
 
 
@@ -156,6 +160,8 @@ def _completion_matches_for_buffer(buffer: str) -> list[str]:
         return _hotkeys_completion_matches(args, trailing_space)
     if primary == "profile":
         return _profile_completion_matches(args, trailing_space)
+    if primary == "stream":
+        return _stream_completion_matches(args, trailing_space)
     return []
 
 
@@ -251,6 +257,16 @@ def _profile_completion_matches(args: list[str], trailing_space: bool) -> list[s
         return [
             f"/profile {opt}"
             for opt in _match_options(args[0].lower(), _PROFILE_ACTIONS)
+        ]
+    return []
+
+
+def _stream_completion_matches(args: list[str], trailing_space: bool) -> list[str]:
+    if not args:
+        return [f"/stream {opt}" for opt in _STREAM_ACTIONS] if trailing_space else []
+    if len(args) == 1 and not trailing_space:
+        return [
+            f"/stream {opt}" for opt in _match_options(args[0].lower(), _STREAM_ACTIONS)
         ]
     return []
 

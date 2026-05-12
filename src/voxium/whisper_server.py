@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -80,14 +81,15 @@ def _setup_cuda_paths():
 _setup_cuda_paths()
 
 import ctranslate2
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
+import numpy as np
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request, WebSocket
 from fastapi.responses import JSONResponse
 import uvicorn
 from huggingface_hub import snapshot_download
 from pydantic import BaseModel
 from tqdm import tqdm
 
-from voxium.constants import env_polish_enabled_default
+from voxium.constants import SAMPLE_RATE, env_polish_enabled_default
 from voxium.model_registry import (
     DEFAULT_MODEL_NAME,
     TRUSTED_MODEL_HELP,
@@ -102,6 +104,11 @@ from voxium.llama_cpp_client import (
 from voxium.loopback import is_loopback_host, is_loopback_url, normalize_loopback_host
 from voxium import polish_profile
 from voxium.polish_models import DEFAULT_POLISH_MODEL, validate_polish_model_tag
+from voxium.transcribe_stream import (
+    PROTOCOL_VERSION,
+    SlidingWindowDecoder,
+    StreamingDecodeError,
+)
 from voxium.polish_provision import ensure_polish_model_downloaded
 from voxium.model_arg import trusted_model_arg
 from voxium.paths import ensure_runtime_dirs, models_dir
@@ -422,6 +429,8 @@ class ServerConfig:
     polish_keep_alive_default: str = "-1"
     polish_warmup_on_start: bool = True
     polish_max_concurrent: int = 2
+    streaming_endpoint_enabled: bool = True
+    streaming_max_concurrent: int = 4
 
 
 def _as_float(value) -> float | None:
@@ -846,6 +855,35 @@ _warmed_model_keys_lock = threading.Lock()
 _whisper_model_class = None
 faster_whisper_distribution_info: dict | None = None
 
+# Serialize every call into ``model.transcribe`` (batch + streaming + warmup) — the
+# ``WhisperModel`` instance is shared and not safely re-entrant. Holding the lock for
+# ~50–80 ms per re-decode is acceptable on loopback. See
+# ``docs/plans/live-transcribe-stream.md`` §3.2.1.
+_whisper_model_lock = threading.Lock()
+
+# Streaming session counters (see /transcribe-stream WS route below).
+_streaming_state_lock = threading.Lock()
+_streaming_open_sessions: int = 0
+_streaming_total_sessions: int = 0
+_streaming_total_decodes: int = 0
+_streaming_total_decode_ms: float = 0.0
+_streaming_frames_received: int = 0
+_streaming_fallback_events: int = 0
+
+
+def _stream_endpoint_env_disabled() -> bool:
+    """Server-side kill switch via ``VOXIUM_STREAM_ENDPOINT_ENABLED`` env."""
+    raw = (os.getenv("VOXIUM_STREAM_ENDPOINT_ENABLED") or "").strip().lower()
+    return raw in ("0", "false", "no", "off")
+
+
+def _streaming_enabled_for_request() -> bool:
+    """True when both the env kill switch and the ``ServerConfig`` flag allow streaming."""
+    if _stream_endpoint_env_disabled():
+        return False
+    cfg = config
+    return bool(getattr(cfg, "streaming_endpoint_enabled", True)) if cfg else False
+
 
 def verify_faster_whisper_distribution() -> dict:
 
@@ -1062,12 +1100,13 @@ def ensure_stt_model_ready(
     tmp.close()
     try:
         _write_stt_warmup_wav(tmp_path)
-        segments, _info = whisper.transcribe(
-            tmp_path,
-            language="en",
-            vad_filter=False,
-        )
-        list(segments)
+        with _whisper_model_lock:
+            segments, _info = whisper.transcribe(
+                tmp_path,
+                language="en",
+                vad_filter=False,
+            )
+            list(segments)
     finally:
         try:
             os.unlink(tmp_path)
@@ -1238,6 +1277,18 @@ def health():
             "polish_llama_cpp_reachable_reason": reason_llama,
             "polish_loaded_model": loaded_model,
             "polish_model_loaded": loaded_model is not None,
+        }
+    )
+    with _streaming_state_lock:
+        stream_open = _streaming_open_sessions
+    body.update(
+        {
+            "streaming_enabled": _streaming_enabled_for_request(),
+            "streaming_open_sessions": stream_open,
+            "streaming_max_concurrent": int(
+                getattr(config, "streaming_max_concurrent", 4)
+            ),
+            "streaming_protocol_version": PROTOCOL_VERSION,
         }
     )
     return body
@@ -1556,20 +1607,23 @@ async def transcribe(
         transcribe_start = time.perf_counter()
         gpu_metrics = None
         try:
-            if config.vad_enabled:
-                segments, info = whisper.transcribe(
-                    tmp.name,
-                    language=language,
-                    vad_filter=True,
-                    vad_parameters={
-                        "min_silence_duration_ms": 500,
-                        "speech_pad_ms": 200,
-                    },
-                )
-            else:
-                segments, info = whisper.transcribe(tmp.name, language=language)
-
-            segment_objs = list(segments)
+            with _whisper_model_lock:
+                if config.vad_enabled:
+                    segments, info = whisper.transcribe(
+                        tmp.name,
+                        language=language,
+                        vad_filter=True,
+                        vad_parameters={
+                            "min_silence_duration_ms": 500,
+                            "speech_pad_ms": 200,
+                        },
+                    )
+                else:
+                    segments, info = whisper.transcribe(tmp.name, language=language)
+                # Force materialization while the lock is held — segments is a
+                # generator and lazy iteration outside the lock would re-enter the
+                # model unsafely from a different request.
+                segment_objs = list(segments)
             segments_list = [
                 {
                     "start": s.start,
@@ -1681,6 +1735,337 @@ async def transcribe(
             os.unlink(tmp.name)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Streaming /transcribe-stream WebSocket route
+# ---------------------------------------------------------------------------
+#
+# Handlers are defined as plain functions and registered conditionally from
+# :func:`main` via :func:`_register_streaming_routes`. When the env kill switch
+# (``VOXIUM_STREAM_ENDPOINT_ENABLED=false``) or the config flag
+# (``streaming_endpoint_enabled=False``) is set, the routes are never added —
+# clients get a 404 from FastAPI rather than a runtime refusal. See
+# ``docs/plans/live-transcribe-stream.md`` §3.2.4.
+
+_STREAMING_KEEPALIVE_S: float = 5.0
+_STREAMING_IDLE_TIMEOUT_S: float = 60.0
+_STREAMING_MAX_SESSION_S: float = 300.0
+
+
+async def _handle_transcribe_stream(websocket: WebSocket) -> None:
+    """
+    WebSocket entry point for live partial transcription.
+
+    Lifecycle:
+        1. Loopback origin gate (close 1008 on non-loopback).
+        2. Concurrency gate (close 1013 if too many open sessions).
+        3. ``session_open`` JSON.
+        4. Loop: receive binary audio frames OR control text frames; emit ``partial``.
+           Emit ``keepalive`` every 5 s of inactivity. Close on idle timeout (60 s) or
+           max session length (300 s).
+        5. On client ``end`` or disconnect, finalize via decoder, emit final ``partial``,
+           close.
+
+    All ``model.transcribe`` work runs through ``asyncio.to_thread`` so the FastAPI
+    event loop is never blocked. The shared ``_whisper_model_lock`` serializes access
+    against batch ``/transcribe`` and other streaming sessions.
+    """
+    global _streaming_open_sessions, _streaming_total_sessions
+    global _streaming_total_decodes, _streaming_total_decode_ms
+    global _streaming_frames_received
+
+    # 1. Loopback gate — refuse before accepting the WS handshake.
+    client_host = websocket.client.host if websocket.client else None
+    if not is_loopback_host(client_host):
+        await websocket.close(code=1008)
+        return
+
+    # 2. Concurrency gate.
+    max_concurrent = int(getattr(config, "streaming_max_concurrent", 4))
+    with _streaming_state_lock:
+        if _streaming_open_sessions >= max_concurrent:
+            await websocket.accept()
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "max_sessions",
+                    "message": f"streaming session cap reached ({max_concurrent})",
+                }
+            )
+            await websocket.close(code=1013)
+            return
+        _streaming_open_sessions += 1
+        _streaming_total_sessions += 1
+        session_index = _streaming_total_sessions
+
+    session_id = f"stream-{session_index}-{uuid.uuid4().hex[:8]}"
+    session_start = time.monotonic()
+    last_activity = session_start
+    decoder: SlidingWindowDecoder | None = None
+    final_emitted = False
+
+    try:
+        await websocket.accept()
+
+        # Resolve model. If load fails, surface as a wire error and close.
+        try:
+            whisper = get_model(config.model, config.device, config.compute)
+        except Exception as exc:
+            logger.error("Voxium: streaming model load failed: %s", exc)
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "model_unavailable",
+                    "message": str(exc)[:200],
+                }
+            )
+            return
+
+        decoder = SlidingWindowDecoder(
+            whisper,
+            _whisper_model_lock,
+            language=getattr(config, "language", None),
+            vad_filter=True,
+            suppress_hallucinations=True,
+        )
+
+        await websocket.send_json(
+            {
+                "type": "session_open",
+                "version": PROTOCOL_VERSION,
+                "sample_rate": SAMPLE_RATE,
+                "channels": 1,
+                "dtype": "float32",
+                "byte_order": "little",
+                "window_seconds": decoder.window_seconds,
+                "max_chunk_ms": 1000,
+                "language": decoder.language,
+                "model": config.model,
+                "vad_filter": decoder.vad_filter,
+                "hallucination_filter": decoder.suppress_hallucinations,
+                "session_id": session_id,
+            }
+        )
+
+        while True:
+            now = time.monotonic()
+            if now - session_start > _STREAMING_MAX_SESSION_S:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "session_too_long",
+                        "message": f"session exceeded {_STREAMING_MAX_SESSION_S:.0f}s cap",
+                    }
+                )
+                await websocket.close(code=1011)
+                return
+
+            # Wait for a frame, with a short timeout so we can emit keepalive frames
+            # and detect idle timeout without blocking forever.
+            time_since_activity = now - last_activity
+            timeout = max(
+                0.1,
+                min(
+                    _STREAMING_KEEPALIVE_S,
+                    _STREAMING_IDLE_TIMEOUT_S - time_since_activity,
+                ),
+            )
+            try:
+                msg = await asyncio.wait_for(websocket.receive(), timeout=timeout)
+            except asyncio.TimeoutError:
+                if time.monotonic() - last_activity > _STREAMING_IDLE_TIMEOUT_S:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": "idle_timeout",
+                            "message": f"no frames received for {_STREAMING_IDLE_TIMEOUT_S:.0f}s",
+                        }
+                    )
+                    await websocket.close(code=1011)
+                    return
+                await websocket.send_json(
+                    {
+                        "type": "keepalive",
+                        "session_seconds": round(time.monotonic() - session_start, 3),
+                    }
+                )
+                continue
+
+            if msg.get("type") == "websocket.disconnect":
+                break
+
+            if "bytes" in msg and msg["bytes"]:
+                frame_bytes = msg["bytes"]
+                if len(frame_bytes) % 4 != 0:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": "invalid_frame",
+                            "message": "byte length is not a multiple of 4 (float32)",
+                        }
+                    )
+                    await websocket.close(code=1003)
+                    return
+                pcm = np.frombuffer(frame_bytes, dtype=np.float32)
+                try:
+                    partial = await asyncio.to_thread(decoder.push, pcm)
+                except StreamingDecodeError as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": "decode_failed",
+                            "message": str(exc)[:200],
+                        }
+                    )
+                    await websocket.close(code=1011)
+                    return
+                with _streaming_state_lock:
+                    _streaming_total_decodes += 1
+                    _streaming_total_decode_ms += partial.decode_ms
+                    _streaming_frames_received += 1
+                await websocket.send_json(_partial_to_json(partial))
+                last_activity = time.monotonic()
+                continue
+
+            text = msg.get("text")
+            if text:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "code": "invalid_json",
+                            "message": "client text frame was not valid JSON",
+                        }
+                    )
+                    await websocket.close(code=1003)
+                    return
+                kind = (payload.get("type") or "").strip().lower()
+                if kind == "end":
+                    try:
+                        final_partial = await asyncio.to_thread(decoder.finalize)
+                    except StreamingDecodeError as exc:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": "decode_failed",
+                                "message": str(exc)[:200],
+                            }
+                        )
+                        await websocket.close(code=1011)
+                        return
+                    final_partial = _force_final(final_partial)
+                    await websocket.send_json(_partial_to_json(final_partial))
+                    final_emitted = True
+                    break
+                if kind == "close":
+                    break
+                # Unknown control frame — be strict; the protocol is small.
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "unknown_message_type",
+                        "message": f"unsupported client message type: {kind!r}",
+                    }
+                )
+                await websocket.close(code=1003)
+                return
+    except Exception as exc:  # pragma: no cover - defensive; surface and close cleanly
+        logger.exception("Voxium: streaming session %s failed: %s", session_id, exc)
+        try:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "code": "internal_error",
+                    "message": str(exc)[:200],
+                }
+            )
+        except Exception:
+            pass
+    finally:
+        # Best-effort: emit a final partial if the client disconnected without ``end``.
+        if decoder is not None and not final_emitted:
+            try:
+                final_partial = await asyncio.to_thread(decoder.finalize)
+                final_partial = _force_final(final_partial)
+                await websocket.send_json(_partial_to_json(final_partial))
+            except Exception:
+                pass
+        with _streaming_state_lock:
+            _streaming_open_sessions = max(0, _streaming_open_sessions - 1)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+def _force_final(partial):
+    """Re-stamp a :class:`StreamPartial` as ``is_final=True`` regardless of source."""
+    from voxium.transcribe_stream import StreamPartial
+
+    return StreamPartial(
+        seq=partial.seq,
+        text=partial.text,
+        audio_seconds=partial.audio_seconds,
+        decode_ms=partial.decode_ms,
+        is_final=True,
+        suppressed=partial.suppressed,
+    )
+
+
+def _partial_to_json(partial) -> dict:
+    return {
+        "type": "partial",
+        "seq": partial.seq,
+        "text": partial.text,
+        "audio_seconds": round(partial.audio_seconds, 3),
+        "decode_ms": round(partial.decode_ms, 2),
+        "is_final": partial.is_final,
+        "suppressed": partial.suppressed,
+    }
+
+
+def _handle_stream_stats() -> dict:
+    """``GET /transcribe-stream/stats`` — running counters for the streaming lane."""
+    with _streaming_state_lock:
+        n_decodes = _streaming_total_decodes
+        total_ms = _streaming_total_decode_ms
+        return {
+            "open_sessions": _streaming_open_sessions,
+            "total_sessions": _streaming_total_sessions,
+            "total_decodes": n_decodes,
+            "total_decode_ms": round(total_ms, 2),
+            "avg_decode_ms": round(total_ms / n_decodes, 2) if n_decodes else None,
+            "frames_received": _streaming_frames_received,
+            "fallback_events": _streaming_fallback_events,
+            "max_concurrent": int(getattr(config, "streaming_max_concurrent", 4)),
+            "enabled": _streaming_enabled_for_request(),
+        }
+
+
+def _register_streaming_routes(app_obj: FastAPI) -> bool:
+    """
+    Register the streaming endpoints on ``app_obj`` if the kill switch allows.
+
+    Returns True when routes were added, False when the env or config disabled them.
+    Called from :func:`main` after :data:`config` has been constructed.
+    """
+    if not _streaming_enabled_for_request():
+        logger.info(
+            "Voxium: streaming endpoint /transcribe-stream NOT registered "
+            "(env=%s config_enabled=%s).",
+            "disabled" if _stream_endpoint_env_disabled() else "ok",
+            getattr(config, "streaming_endpoint_enabled", True) if config else None,
+        )
+        return False
+    app_obj.add_api_websocket_route("/transcribe-stream", _handle_transcribe_stream)
+    app_obj.add_api_route(
+        "/transcribe-stream/stats", _handle_stream_stats, methods=["GET"]
+    )
+    logger.info("Voxium: streaming endpoint /transcribe-stream registered")
+    return True
 
 
 def handle_shutdown(_signum, _frame):
@@ -1799,6 +2184,22 @@ Examples:
         default=int(os.environ.get("VOXIUM_POLISH_MAX_CONCURRENT", "2")),
         help="Max concurrent /polish requests (default: 2)",
     )
+    parser.add_argument(
+        "--streaming-endpoint",
+        action=argparse.BooleanOptionalAction,
+        default=(os.environ.get("VOXIUM_STREAM_ENDPOINT_ENABLED", "1").strip().lower())
+        not in ("0", "false", "no", "off"),
+        help=(
+            "Register the /transcribe-stream WebSocket endpoint at startup "
+            "(default: on; env override: VOXIUM_STREAM_ENDPOINT_ENABLED)"
+        ),
+    )
+    parser.add_argument(
+        "--streaming-max-concurrent",
+        type=int,
+        default=int(os.environ.get("VOXIUM_STREAM_MAX_CONCURRENT", "4")),
+        help="Max concurrent /transcribe-stream sessions (default: 4)",
+    )
     args = parser.parse_args(argv)
     try:
         args.model = validate_model_name(args.model)
@@ -1837,9 +2238,12 @@ Examples:
         polish_keep_alive_default=str(args.polish_keep_alive or "-1"),
         polish_warmup_on_start=bool(args.polish_warmup_on_start),
         polish_max_concurrent=max(1, int(args.polish_max_concurrent)),
+        streaming_endpoint_enabled=bool(args.streaming_endpoint),
+        streaming_max_concurrent=max(1, int(args.streaming_max_concurrent)),
     )
     _polish_semaphore = threading.BoundedSemaphore(config.polish_max_concurrent)
     gpu_probe = GpuProbe(config.gpu_metrics_enabled)
+    _register_streaming_routes(app)
 
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)

@@ -4,7 +4,7 @@
 
 **Goal:** Add **optional, fun, on-brand** dynamic lines in the **console / Rich** experience, driven by the shared local GGUF and the latest **transcribed text**, without changing PTT/VOX/transcribe/paste behavior and without new regression risk. **`make test` and `make lint` must pass;** when the feature is off or the model is missing, fall back to static copy.
 
-**References:** [brand.md](brand.md), [radio-chatter-context.md](radio-chatter-context.md), [architecture.md](architecture.md), [llm-polish-plan.md](llm-polish-plan.md).
+**References:** [brand.md](brand.md), [radio-chatter-context.md](radio-chatter-context.md), [architecture.md](architecture.md), [llm-polish-plan.md](plans/llm-polish-plan.md).
 
 ---
 
@@ -27,7 +27,7 @@
 
 ### 2.1 Reuse **llama.cpp** only (no third inference *framework*)
 
-Voxium uses **one** `llama-server` process for the shared **polish / re-encode / UX chatter** path via `voxium.llama_cpp_client` and `voxium.llama_cpp_daemon` (see [llm-polish-plan.md](llm-polish-plan.md)). A single `llama-server` serves one loaded GGUF at a time, so the product rule is simple: **chatter and polish always use the same selected model**.
+Voxium uses **one** `llama-server` process for the shared **polish / re-encode / UX chatter** path via `voxium.llama_cpp_client` and `voxium.llama_cpp_daemon` (see [llm-polish-plan.md](plans/llm-polish-plan.md)). A single `llama-server` serves one loaded GGUF at a time, so the product rule is simple: **chatter and polish always use the same selected model**.
 
 The UX path still has its own prompts, short timeouts, and fallbacks. It does **not** have its own model registry, model directory, or active port.
 

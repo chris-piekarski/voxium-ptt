@@ -144,6 +144,7 @@ from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
 from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
 from voxium import polish_profile
+from voxium import transcribe_stream_client
 from voxium.terminal_focus import is_our_terminal_focused
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
@@ -302,6 +303,20 @@ input_mode: str = "ptt"  # "ptt" | "vox"
 input_mode_lock = threading.Lock()
 vox_stream: sd.InputStream | None = None
 vox_chunker: UtteranceChunker | None = None
+
+# Live transcribe streaming runtime — non-None only while a PTT take is in flight
+# AND ``--stream-transcribe`` is enabled AND the WS handshake succeeded. See
+# ``docs/plans/live-transcribe-stream.md`` §3.4 for the lifecycle table.
+#
+# CRITICAL: WS open + close are NEVER done on the take's hot path. Both run in
+# background daemon threads so ``state_lock`` is never held during socket I/O.
+# ``_streaming_intent_active`` tracks whether the operator is currently in a take
+# that wants live partials; the open worker checks it before installing the
+# runtime, so a take that ends before the WS handshake completes won't leave an
+# orphaned session behind.
+_streaming_session: transcribe_stream_client.StreamingSessionRuntime | None = None
+_streaming_session_lock = threading.Lock()
+_streaming_intent_active = threading.Event()
 vox_hud_lock = threading.Lock()
 vox_ring: np.ndarray = np.empty(0, dtype=np.float32)
 # Each item: (mono audio, foreground window id at utterance time) — same idea as PTT's
@@ -780,6 +795,25 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         help=(
             "Client-only UX chatter using the active polish llama.cpp model. "
             "Default: on. Use --no-ux-chatter to disable, or set VOXIUM_UX_CHATTER=0 to force off."
+        ),
+    )
+
+    streaming_cfg = file_config.get("streaming") or {}
+    streaming_cfg = streaming_cfg if isinstance(streaming_cfg, dict) else {}
+    stream_group = parser.add_argument_group(
+        "Live transcribe streaming (PTT only, default off)",
+        "Type-out from the wire while keying the mic — partial text appears in the "
+        "green PTT strip via WebSocket /transcribe-stream. Polish + paste at key-up are "
+        "unchanged; live text is texture, never the source of truth.",
+    )
+    stream_group.add_argument(
+        "--stream-transcribe",
+        action=argparse.BooleanOptionalAction,
+        default=bool(streaming_cfg.get("enabled", False)),
+        help=(
+            "Open a WebSocket to /transcribe-stream during PTT and render live "
+            "partials in the green strip. Default: off until measured. "
+            "Use --no-stream-transcribe to disable explicitly."
         ),
     )
 
@@ -1637,6 +1671,12 @@ def apply_slash_runtime_changes(
         if out.polish_enabled:
             _llama_cpp_polish_ready_checked = False
             should_refresh_polish = True
+    if out.stream_enabled is not None:
+        config.stream_transcribe = bool(out.stream_enabled)
+        if not out.stream_enabled:
+            # Tear down any in-flight session immediately so the live readback
+            # disappears within the next render tick.
+            _close_streaming_session(graceful=False)
     if out.hotkeys:
         persist_hotkey_config(out.hotkeys)
         fc = getattr(config, "file_config", None)
@@ -1820,8 +1860,54 @@ def _recording_monitor_loop() -> None:
         else:
             d = format_recording_hud(sc, ssq, pk, nc, SAMPLE_RATE, rem)
         _write_recording_hud(d)
+        _refresh_live_readback_into_status_box()
         if recording_monitor_event.wait(RECORDING_HUD_INTERVAL_S):
             break
+
+
+def _refresh_live_readback_into_status_box() -> None:
+    """
+    Pull the latest live partial from the streaming session and push it into the
+    green PTT strip. No-op when streaming is disabled or no session is in flight.
+    """
+    if ptt_status_box is None or (config is not None and config.minimal):
+        return
+    sess = _streaming_session
+    if sess is None:
+        ptt_status_box.update_live_readback(None)
+        return
+    state_snap = transcribe_stream_client.get_live_state(sess)
+    if state_snap is None:
+        return
+    rendered = _render_live_readback_text(state_snap)
+    ptt_status_box.update_live_readback(rendered)
+
+
+def _render_live_readback_text(state_snap):
+    """Build the Rich Text shown on the live-readback line for ``state_snap``."""
+    from rich.text import Text as _RichText
+
+    committed = (getattr(state_snap, "committed_text", "") or "").strip()
+    tail = (state_snap.text or "").strip()
+    if state_snap.fallback or state_snap.error_code:
+        chip = _RichText("[no carrier]  ", style="italic dim #fca5a5")
+    elif not state_snap.connected and not state_snap.active:
+        chip = _RichText("▸ wire  ", style="dim #94a3b8")
+    else:
+        chip = _RichText("▸ wire  ", style="bold dim #86efac")
+    # Committed text (already slid off the server's window) renders slightly
+    # brighter so the operator can see the transcript building up; the volatile
+    # current-window tail stays in the dimmer style since it may still revise.
+    parts = [chip]
+    if committed:
+        parts.append(_RichText(committed, style="italic #a7f3d0"))
+        if tail:
+            parts.append(_RichText(" ", style="italic #a7f3d0"))
+    if tail:
+        parts.append(_RichText(tail, style="italic dim #a7f3d0"))
+    elif not committed:
+        parts.append(_RichText("…", style="italic dim #a7f3d0"))
+    return _RichText.assemble(*parts)
 
 
 def _get_input_mode() -> str:
@@ -2482,6 +2568,153 @@ def audio_callback(indata, _frames, _time_info, status):
         recording_sample_count += int(chunk.size)
         if p > recording_peak_abs:
             recording_peak_abs = p
+    # Audio tee for live streaming — non-blocking via put_nowait. Module-level
+    # _streaming_session is non-None only when --stream-transcribe is on and the
+    # WS opened successfully. Real-time-safe contract: never block this callback.
+    sess = _streaming_session
+    if sess is not None:
+        transcribe_stream_client.push_audio_frame(sess, chunk.ravel())
+
+
+def _streaming_enabled_now() -> bool:
+    """True when the operator opted in AND the runtime has a UI to render to."""
+    if config is None:
+        return False
+    if not bool(getattr(config, "stream_transcribe", False)):
+        return False
+    if bool(getattr(config, "minimal", False)) or bool(getattr(config, "quiet", False)):
+        return False
+    if ptt_status_box is None:
+        return False
+    return True
+
+
+_streaming_missing_dep_warned = False
+
+
+def _maybe_open_streaming_session() -> None:
+    """
+    Mark intent and spawn a background WS open. **Never blocks the take.**
+
+    The WS handshake (TCP connect + ``session_open`` recv) takes up to ~4s in the
+    worst case. Doing it inline here would hold ``state_lock`` (because
+    :func:`start_recording` is invoked inside ``state_lock`` from the PTT press
+    handler) and stall the release handler. Instead we set an intent flag and
+    let a daemon thread complete the handshake; the audio callback's tee just
+    sees ``_streaming_session is None`` and skips frames until the runtime is
+    installed. Frames during the handshake gap are not streamed — that's a
+    deliberate UX trade for never blocking PTT.
+
+    If ``websocket-client`` is missing (operator's venv was installed before the
+    Phase 2 dep promotion), surface a one-shot Downlink note so the silent
+    failure mode doesn't repeat.
+    """
+    global _streaming_missing_dep_warned
+    if not _streaming_enabled_now():
+        return
+    if not transcribe_stream_client.websocket_dependency_available():
+        if not _streaming_missing_dep_warned:
+            _streaming_missing_dep_warned = True
+            try:
+                if config and not config.minimal and not config.quiet:
+                    print_agent_telemetry_panel(
+                        console,
+                        [
+                            (
+                                "Streaming: websocket-client not installed in this venv "
+                                "— live readback disabled this session. Reinstall with "
+                                "`pip install -e .` from the repo root, then restart "
+                                "voxium run, copy.",
+                                "warning",
+                            )
+                        ],
+                        downlink_subtitle="streaming",
+                    )
+            except Exception:
+                pass
+        return
+    server_url = str(getattr(config, "server_url", "") or "")
+    if not server_url:
+        return
+    _streaming_intent_active.set()
+    threading.Thread(
+        target=_streaming_open_worker,
+        args=(server_url,),
+        daemon=True,
+        name="VoxiumStreamOpen",
+    ).start()
+
+
+def _streaming_open_worker(server_url: str) -> None:
+    """Daemon-thread worker: connect WS, install runtime if intent still active."""
+    global _streaming_session
+    try:
+        runtime = transcribe_stream_client.start_session(server_url)
+    except Exception:  # pragma: no cover - defensive; never break PTT
+        return
+    if runtime is None:
+        return
+    install = False
+    with _streaming_session_lock:
+        if _streaming_intent_active.is_set() and _streaming_session is None:
+            _streaming_session = runtime
+            install = True
+    if not install:
+        # Take ended before the handshake completed, OR a previous open already
+        # installed a runtime — tear this one down silently.
+        try:
+            transcribe_stream_client.close_session(runtime)
+        except Exception:
+            pass
+
+
+def _close_streaming_session(*, graceful: bool) -> None:
+    """
+    Clear streaming intent and spawn a background WS close. **Never blocks PTT.**
+
+    The graceful path waits up to ~1.2s for the server's final partial plus the
+    close handshake; doing it on the keyboard-listener thread would freeze PTT
+    for that whole window. We swap the runtime out under the lock, clear the
+    live readback (operator-visible, kept on the calling thread), and hand the
+    actual teardown + ``/profile`` recording to a daemon thread.
+    """
+    global _streaming_session
+    _streaming_intent_active.clear()
+    with _streaming_session_lock:
+        sess = _streaming_session
+        _streaming_session = None
+    # Drop the live-readback line so the brief gap before the polished paste
+    # doesn't show stale partial text on screen.
+    if ptt_status_box is not None:
+        try:
+            ptt_status_box.update_live_readback(None)
+        except Exception:
+            pass
+    if sess is None:
+        return
+    threading.Thread(
+        target=_streaming_close_worker,
+        args=(sess, graceful),
+        daemon=True,
+        name="VoxiumStreamClose",
+    ).start()
+
+
+def _streaming_close_worker(
+    sess: transcribe_stream_client.StreamingSessionRuntime, graceful: bool
+) -> None:
+    """Daemon-thread worker: tear down WS, record per-session stats."""
+    try:
+        if graceful:
+            transcribe_stream_client.end_session(sess)
+        else:
+            transcribe_stream_client.close_session(sess)
+    except Exception:
+        pass
+    try:
+        polish_profile.record_stream(transcribe_stream_client.get_session_stats(sess))
+    except Exception:
+        pass
 
 
 def start_recording():
@@ -2498,6 +2731,7 @@ def start_recording():
     audio_capture_statuses = []
     target_window = get_active_window()
     recording_started_at = time.perf_counter()
+    _maybe_open_streaming_session()
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback
     )
@@ -2536,6 +2770,10 @@ def stop_recording() -> np.ndarray:
         except Exception:
             pass
         stream = None
+    # Close the streaming WS now that audio capture has ended. The graceful path
+    # sends ``end`` and waits briefly for the final partial; the existing batch
+    # /transcribe POST is unaffected and still runs in transcribe_and_paste.
+    _close_streaming_session(graceful=True)
     tmon = recording_monitor_thread
     if tmon and tmon.is_alive():
         tmon.join(timeout=RECORDING_HUD_THREAD_JOIN_S)
@@ -2607,6 +2845,16 @@ def cleanup_client_runtime():
             stream = None
     except Exception:
         stream = None
+    # Tear down any streaming WS so an in-flight session doesn't keep daemon
+    # threads sitting on a half-open socket through interpreter shutdown. Both
+    # the call and the worker it spawns are non-blocking; the WS close uses a
+    # bounded handshake timeout (see _shutdown in transcribe_stream_client).
+    # Also clears _streaming_intent_active so any open worker still mid-handshake
+    # tears down its runtime instead of orphaning it.
+    try:
+        _close_streaming_session(graceful=False)
+    except Exception:
+        pass
     with state_lock:
         state = State.IDLE
     try:
@@ -4160,6 +4408,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
                     current_hotkeys=_current_hotkeys_for_slash(),
                     transcript_history=get_transcript_history(),
                     file_config=getattr(config, "file_config", None) or {},
+                    stream_enabled=bool(getattr(config, "stream_transcribe", False)),
                     **sk,
                 )
                 combined_polish = bool(

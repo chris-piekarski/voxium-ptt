@@ -5,7 +5,7 @@
 
 > Current runtime note: the shipped polish path now uses a repo-local **`llama.cpp`** runtime (`llama-server`) plus **GGUF** models under `models/polish`. On Windows, **`scripts\windows\Setup-Voxium.cmd`** and **`voxium models polish pull`** provision the repo-local runtime under `tools/llama.cpp` and the default GGUF model under `models/polish`. Older references to **Ollama** in this draft are historical and should be treated as migration notes, not the active runtime contract.
 
-**Brand note (for future user-facing copy):** Frame this as a **second pass on the local stack** — *humans* key the mic, **robot** work does STT then a short *local* rewrite, still on **your** machine (see [brand.md](brand.md)). Avoid promising “perfect” English; prefer “smoother copy / clearer line” in UI and logs.
+**Brand note (for future user-facing copy):** Frame this as a **second pass on the local stack** — *humans* key the mic, **robot** work does STT then a short *local* rewrite, still on **your** machine (see [brand.md](../brand.md)). Avoid promising “perfect” English; prefer “smoother copy / clearer line” in UI and logs.
 
 ---
 
@@ -515,9 +515,9 @@ A PR implementing this feature is ready only when all are true:
 
 ## 15. References in repo
 
-- [README.md](../README.md) — Windows + loopback
-- [architecture.md](architecture.md) — high-level context
-- [testing.md](testing.md) — coverage and pytest patterns
-- [brand.md](brand.md) — user-visible/operator-facing voice
+- [README.md](../../README.md) — Windows + loopback
+- [architecture.md](../architecture.md) — high-level context
+- [testing.md](../testing.md) — coverage and pytest patterns
+- [brand.md](../brand.md) — user-visible/operator-facing voice
 
 This document is the **implementation checklist and operator reference** for the local polish path; tracking issue/PRs should reference this checklist and mark completed phases/items explicitly.

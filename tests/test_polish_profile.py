@@ -244,3 +244,73 @@ def test_reset_clears_stt_buffer_too() -> None:
     polish_profile.reset()
     assert polish_profile.snapshot_stt() == []
     assert polish_profile.aggregate_stt().n == 0
+
+
+def _stream_session_stats(
+    *,
+    n_decodes: int = 12,
+    avg_decode_ms: float = 55.0,
+    frames_dropped: int = 0,
+    fallback: bool = False,
+) -> dict:
+    return {
+        "model": "small.en",
+        "ok": not fallback,
+        "n_decodes": n_decodes,
+        "total_decode_ms": avg_decode_ms * n_decodes,
+        "avg_decode_ms": avg_decode_ms,
+        "max_decode_ms": avg_decode_ms * 2,
+        "frames_sent": n_decodes * 4,
+        "frames_dropped": frames_dropped,
+        "first_partial_ms": 320.0,
+        "fallback": fallback,
+        "session_seconds": 6.0,
+        "audio_seconds": 6.0,
+        "error": "drops" if fallback else None,
+    }
+
+
+def test_record_stream_appends_and_extracts_fields() -> None:
+    polish_profile.record_stream(_stream_session_stats())
+    samples = polish_profile.snapshot_stream()
+    assert len(samples) == 1
+    s = samples[0]
+    assert s.model == "small.en"
+    assert s.n_decodes == 12
+    assert s.frames_dropped == 0
+    assert s.ok is True
+    assert s.fell_back is False
+
+
+def test_aggregate_stream_summarizes_drops_and_decodes() -> None:
+    polish_profile.record_stream(_stream_session_stats(frames_dropped=2))
+    polish_profile.record_stream(_stream_session_stats(frames_dropped=4, fallback=True))
+    st = polish_profile.aggregate_stream()
+    assert st.n == 2
+    assert st.n_ok == 1
+    assert st.n_fallback == 1
+    assert st.avg_decode_ms == pytest.approx(55.0)
+    # 2 sessions × 12 decodes, 6 dropped total, total sent = 96 → drop rate = 6/(96+6).
+    assert st.drop_rate is not None
+    assert 0.0 < st.drop_rate < 0.1
+
+
+def test_format_report_includes_stream_section() -> None:
+    polish_profile.record_stream(_stream_session_stats())
+    out = polish_profile.format_profile_report()
+    assert "transcribe_stream" in out
+    assert "decodes/session avg" in out
+    assert "first-partial avg" in out
+
+
+def test_record_stream_ignores_non_dict() -> None:
+    polish_profile.record_stream(None)
+    polish_profile.record_stream("not a dict")  # type: ignore[arg-type]
+    assert polish_profile.snapshot_stream() == []
+
+
+def test_reset_clears_stream_buffer_too() -> None:
+    polish_profile.record_stream(_stream_session_stats())
+    polish_profile.reset()
+    assert polish_profile.snapshot_stream() == []
+    assert polish_profile.aggregate_stream().n == 0
