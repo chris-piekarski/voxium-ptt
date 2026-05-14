@@ -216,6 +216,43 @@ def test_run_slash_profile_renders_recorded_samples() -> None:
         polish_profile.reset()
 
 
+def test_run_slash_stream_status_when_off() -> None:
+    out = run_slash_line("/stream", stream_enabled=False)
+    assert "Streaming: off" in out.text
+    assert out.stream_enabled is None  # /stream alone is read-only
+
+
+def test_run_slash_stream_status_when_on() -> None:
+    out = run_slash_line("/stream", stream_enabled=True)
+    assert "Streaming: on" in out.text
+
+
+def test_run_slash_stream_on_off_flips() -> None:
+    on = run_slash_line("/stream on", stream_enabled=False)
+    assert on.stream_enabled is True
+    assert "Streaming: on" in on.text
+    off = run_slash_line("/stream off", stream_enabled=True)
+    assert off.stream_enabled is False
+    assert "Streaming: off" in off.text
+
+
+def test_run_slash_stream_alias_live() -> None:
+    out = run_slash_line("/live on", stream_enabled=False)
+    assert out.stream_enabled is True
+
+
+def test_run_slash_stream_rejects_trailing_garbage() -> None:
+    bad = run_slash_line("/stream on please", stream_enabled=False)
+    assert "Use /stream on or /stream off alone" in bad.text
+    assert bad.stream_enabled is None
+
+
+def test_run_slash_stream_rejects_unknown_subcommand() -> None:
+    bad = run_slash_line("/stream wat", stream_enabled=False)
+    assert "Use /stream" in bad.text
+    assert bad.stream_enabled is None
+
+
 def test_run_slash_models_status_includes_lanes() -> None:
     out = run_slash_line("/models")
     assert "Transcribe:" in out.text

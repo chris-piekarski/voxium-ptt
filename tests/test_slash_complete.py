@@ -39,6 +39,7 @@ def test_list_empty_prefix_all_ordered() -> None:
         "gpu",
         "stats",
         "profile",
+        "stream",
         "hotkeys",
         "models",
         "re-encode",
@@ -61,9 +62,9 @@ def test_list_prefix_du_matches_disk() -> None:
     assert m == ["disk"]
 
 
-def test_list_prefix_s_matches_stats() -> None:
+def test_list_prefix_s_matches_stats_and_stream() -> None:
     m = list_slash_command_matches("s")
-    assert m == ["stats"]
+    assert m == ["stats", "stream"]
 
 
 def test_list_alias_h_matches_help() -> None:
@@ -125,6 +126,19 @@ def test_hotkeys_completion() -> None:
 def test_stats_completion() -> None:
     out = apply_slash_tab("/sta", tab_cycle=0)
     assert out.new_buffer == "/stats"
+
+
+def test_stream_completion_subcommands() -> None:
+    actions = _completion_matches_for_buffer("/stream ")
+    assert "/stream on" in actions
+    assert "/stream off" in actions
+    assert "/stream status" in actions
+
+
+def test_stream_completion_via_alias() -> None:
+    # /li → completes through the alias table, which canonicalizes to /stream.
+    out = apply_slash_tab("/li", tab_cycle=0)
+    assert out.new_buffer == "/stream"
 
 
 def test_tab_one_match_completes() -> None:

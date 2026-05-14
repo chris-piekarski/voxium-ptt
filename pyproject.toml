@@ -35,6 +35,12 @@ dependencies = [
     "uvicorn>=0.22.0",
     "python-multipart>=0.0.6",
     "pyautogui>=0.9.53; sys_platform != 'linux'",
+    # Phase 2 client-side /transcribe-stream WebSocket sender + receiver
+    # (docs/plans/live-transcribe-stream.md). Required at runtime when
+    # ``--stream-transcribe`` is enabled; the client falls back to no-live-text
+    # if the import fails, but a missing dep is the most common cause of "I
+    # turned streaming on and saw no live readback" — keep it as a runtime dep.
+    "websocket-client>=1.7.0",
 ]
 
 [project.optional-dependencies]

@@ -57,6 +57,7 @@ class SlashLineResult:
     polish_model: str | None = None
     polish_enabled: bool | None = None
     hotkeys: dict[str, str] | None = None
+    stream_enabled: bool | None = None
 
 
 def slash_data_needs(line: str) -> SlashDataNeeds:
@@ -848,6 +849,42 @@ def _run_history_line(
     return SlashLineResult(text=f"#{n} (full text)\n\n{t}\n")
 
 
+def _run_stream_line(
+    parts: list[str], *, stream_enabled: bool | None
+) -> SlashLineResult:
+    """
+    ``/stream`` shows current state; ``/stream on|off|status`` flips for the session.
+
+    Effect is per-session: the client toggles ``config.stream_transcribe`` so the
+    NEXT take opens (or skips) a /transcribe-stream WebSocket. Active sessions are
+    closed on ``off`` via the runtime hook in :mod:`voxium.app`.
+    """
+    sub = (parts[1].lower() if len(parts) > 1 else "").strip()
+    enabled_now = bool(stream_enabled)
+    if sub in ("", "status", "show"):
+        if len(parts) > 2 and sub != "":
+            return SlashLineResult(
+                text="Use /stream alone — nothing after the subcommand, copy."
+            )
+        state = "on" if enabled_now else "off"
+        return SlashLineResult(
+            text=(
+                f"Streaming: {state} for this session. "
+                "Type-out from the wire while the carrier's keyed; "
+                "polish + paste at PTT release are unchanged. "
+                "Use /stream on or /stream off."
+            )
+        )
+    if sub in ("on", "off"):
+        if len(parts) > 2:
+            return SlashLineResult(text="Use /stream on or /stream off alone, copy.")
+        return SlashLineResult(
+            text=f"Streaming: {sub} (this session), copy.",
+            stream_enabled=(sub == "on"),
+        )
+    return SlashLineResult(text="Use /stream, /stream on, or /stream off, copy.")
+
+
 def _run_profile_line(parts: list[str]) -> SlashLineResult:
     """``/profile`` shows the runtime llama-server profile; ``/profile reset`` clears it."""
     sub = (parts[1].lower() if len(parts) > 1 else "").strip()
@@ -879,6 +916,7 @@ def run_slash_line(
     transcript_history: SessionTranscriptHistory | None = None,
     file_config: dict | None = None,
     persistent_stats: dict | None = None,
+    stream_enabled: bool | None = None,
 ) -> SlashLineResult:
     """
     Handle one full line the operator committed (``/...``). Return :class:`SlashLineResult`
@@ -907,6 +945,8 @@ def run_slash_line(
         )
     if first in ("profile", "prof"):
         return _run_profile_line(parts)
+    if first in ("stream", "live"):
+        return _run_stream_line(parts, stream_enabled=stream_enabled)
     if first in ("models", "model"):
         return _run_models_line(
             s,
@@ -944,6 +984,7 @@ def _help_text() -> str:
         "  • /gpu (/g) — same GPU readout as the inference metrics box\n"
         "  • /stats — persisted inference totals plus current server-process counters\n"
         "  • /profile (/prof) — recent llama-server timings per slot (prefill vs decode); /profile reset clears\n"
+        "  • /stream (/live) — flip live transcribe streaming on/off for this session\n"
         "  • /disk (/du) — local data size: models/, logs/, tools/llama.cpp/\n\n"
         "Models and local stack\n"
         "  • /models — active transcribe + shared polish/chatter summary\n"

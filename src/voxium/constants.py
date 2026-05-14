@@ -31,6 +31,23 @@ def env_polish_enabled_default() -> bool:
     return True
 
 
+# Live transcribe streaming — see docs/plans/live-transcribe-stream.md.
+# Defaults pinned in the plan; operator opt-in via --stream-transcribe.
+STREAMING_CHUNK_MS_DEFAULT = 250
+STREAMING_MAX_QUEUE_FRAMES_DEFAULT = 8
+STREAMING_FALLBACK_DROP_THRESHOLD_DEFAULT = 4
+STREAMING_FALLBACK_DECODE_RATIO_DEFAULT = 1.5
+STREAMING_CONNECT_TIMEOUT_S_DEFAULT = 2.0
+# Live readback accumulator — words that have slid off the server's decode
+# window are committed into a longer-lived prefix so the operator sees the
+# transcript build up instead of the front-of-line erasing every ~5s. Cap
+# the committed prefix so a long take doesn't blow up the green panel.
+STREAMING_COMMITTED_MAX_CHARS_DEFAULT = 600
+# Fraction of window_seconds at which we consider audio to be sliding off the
+# back. Below this, partials just replace the live tail (window not yet full).
+STREAMING_COMMIT_THRESHOLD_RATIO = 0.95
+
+
 HOTKEY_ORDER = tuple(f"f{i}" for i in range(1, 13))
 SUPPORTED_HOTKEYS: frozenset[str] = frozenset(HOTKEY_ORDER)
 CLI_COMMANDS: frozenset[str] = frozenset(["run", "server", "health", "stats", "models"])

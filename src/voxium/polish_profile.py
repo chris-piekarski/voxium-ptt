@@ -81,6 +81,28 @@ class STTSample:
 _stt_buffer: Deque[STTSample] = deque(maxlen=_WINDOW_PER_SLOT)
 
 
+@dataclass(frozen=True)
+class StreamSample:
+    """One ``/transcribe-stream`` session: per-take counters from the WS client."""
+
+    model: str
+    ok: bool
+    n_decodes: int
+    total_decode_ms: float
+    avg_decode_ms: float | None
+    max_decode_ms: float
+    audio_seconds: float
+    frames_sent: int
+    frames_dropped: int
+    session_seconds: float
+    first_partial_ms: float | None
+    fell_back: bool
+    error: str | None
+
+
+_stream_buffer: Deque[StreamSample] = deque(maxlen=_WINDOW_PER_SLOT)
+
+
 def record(slot: str, *, model: str, result: LlamaCppChatResult) -> None:
     """
     Append one ``llama-server`` call sample. Failures are recorded with ok=False.
@@ -114,10 +136,54 @@ def record(slot: str, *, model: str, result: LlamaCppChatResult) -> None:
 
 
 def reset() -> None:
-    """Clear every slot's buffer plus the STT buffer (used by ``/profile reset``)."""
+    """Clear every slot's buffer plus the STT and streaming buffers (used by ``/profile reset``)."""
     with _lock:
         _buffers.clear()
         _stt_buffer.clear()
+        _stream_buffer.clear()
+
+
+def record_stream(stats: dict | None) -> None:
+    """
+    Append one ``/transcribe-stream`` session sample from
+    :func:`voxium.transcribe_stream_client.get_session_stats`. Fire-and-forget.
+    """
+    if not isinstance(stats, dict):
+        return
+    try:
+        sample = StreamSample(
+            model=str(stats.get("model") or "—") or "—",
+            ok=bool(stats.get("ok", True)),
+            n_decodes=int(stats.get("n_decodes") or 0),
+            total_decode_ms=float(stats.get("total_decode_ms") or 0.0),
+            avg_decode_ms=(
+                float(stats["avg_decode_ms"])
+                if stats.get("avg_decode_ms") is not None
+                else None
+            ),
+            max_decode_ms=float(stats.get("max_decode_ms") or 0.0),
+            audio_seconds=float(stats.get("audio_seconds") or 0.0),
+            frames_sent=int(stats.get("frames_sent") or 0),
+            frames_dropped=int(stats.get("frames_dropped") or 0),
+            session_seconds=float(stats.get("session_seconds") or 0.0),
+            first_partial_ms=(
+                float(stats["first_partial_ms"])
+                if stats.get("first_partial_ms") is not None
+                else None
+            ),
+            fell_back=bool(stats.get("fallback")),
+            error=(str(stats["error"]) if stats.get("error") else None),
+        )
+        with _lock:
+            _stream_buffer.append(sample)
+    except Exception:  # pragma: no cover - defensive
+        _LOG.debug("polish_profile.record_stream failed", exc_info=True)
+
+
+def snapshot_stream() -> list[StreamSample]:
+    """Frozen copy of the streaming buffer."""
+    with _lock:
+        return list(_stream_buffer)
 
 
 def snapshot() -> dict[str, list[ProfileSample]]:
@@ -278,6 +344,54 @@ def aggregate_stt() -> STTStats:
     )
 
 
+@dataclass(frozen=True)
+class StreamStats:
+    n: int
+    n_ok: int
+    n_fallback: int
+    last_model: str
+    avg_decode_ms: float | None
+    avg_decodes_per_session: float | None
+    avg_audio_seconds: float | None
+    avg_first_partial_ms: float | None
+    avg_drops: float | None
+    drop_rate: float | None  # frames_dropped / (sent + dropped)
+
+
+def aggregate_stream() -> StreamStats:
+    """Summary stats over the streaming session window."""
+    samples = snapshot_stream()
+    n = len(samples)
+    if n == 0:
+        return StreamStats(0, 0, 0, "—", None, None, None, None, None, None)
+    ok_samples = [s for s in samples if s.ok]
+    fallback_samples = [s for s in samples if s.fell_back]
+    last_model = samples[-1].model
+    total_sent = sum(s.frames_sent for s in samples)
+    total_dropped = sum(s.frames_dropped for s in samples)
+    drop_rate = (
+        total_dropped / (total_sent + total_dropped)
+        if (total_sent + total_dropped) > 0
+        else None
+    )
+    return StreamStats(
+        n=n,
+        n_ok=len(ok_samples),
+        n_fallback=len(fallback_samples),
+        last_model=last_model,
+        avg_decode_ms=_mean(
+            s.avg_decode_ms for s in samples if s.avg_decode_ms is not None
+        ),
+        avg_decodes_per_session=_mean(float(s.n_decodes) for s in samples),
+        avg_audio_seconds=_mean(float(s.audio_seconds) for s in samples),
+        avg_first_partial_ms=_mean(
+            s.first_partial_ms for s in samples if s.first_partial_ms is not None
+        ),
+        avg_drops=_mean(float(s.frames_dropped) for s in samples),
+        drop_rate=drop_rate,
+    )
+
+
 def _aggregate_slot(slot: str, samples: list[ProfileSample]) -> SlotStats:
     n = len(samples)
     if n == 0:
@@ -384,7 +498,8 @@ def format_profile_report(*, recent_per_slot: int = 3) -> str:
     """Plain-text ``/profile`` readout: STT lane first, then per-slot LLM samples."""
     stats = aggregate()
     stt_stats = aggregate_stt()
-    if not stats and stt_stats.n == 0:
+    stream_stats = aggregate_stream()
+    if not stats and stt_stats.n == 0 and stream_stats.n == 0:
         return (
             "Runtime profile: no /transcribe or llama-server calls recorded yet, copy. "
             "Trigger a take or UX chatter line first, then run /profile again."
@@ -400,6 +515,14 @@ def format_profile_report(*, recent_per_slot: int = 3) -> str:
         lines.extend(
             _format_stt_section(
                 stt_stats, snapshot_stt(), recent_per_slot=recent_per_slot
+            )
+        )
+        lines.append("")
+
+    if stream_stats.n > 0:
+        lines.extend(
+            _format_stream_section(
+                stream_stats, snapshot_stream(), recent_per_slot=recent_per_slot
             )
         )
         lines.append("")
@@ -468,6 +591,42 @@ def _format_stt_section(
             f" · rtf {_fmt_rtf(s.realtime_factor)}"
         )
         err = f" · err {(s.error or '')[:60]}" if not s.ok else ""
+        lines.append(f"    last {mark}:{extra}{err}")
+    return lines
+
+
+def _format_stream_section(
+    st: StreamStats, samples: list[StreamSample], *, recent_per_slot: int
+) -> list[str]:
+    lines: list[str] = []
+    lines.append(
+        f"  transcribe_stream  ·  n={st.n} ({st.n_ok} ok / {st.n_fallback} fallback)"
+        f"  ·  model {st.last_model}"
+    )
+    drop_pct = f"{(st.drop_rate * 100):.1f}%" if st.drop_rate is not None else "—"
+    lines.append(
+        f"    decodes/session avg: {_fmt_tokens(st.avg_decodes_per_session)}"
+        f"  ·  decode {_fmt_ms(st.avg_decode_ms)} avg"
+        f"  ·  audio {_fmt_s(st.avg_audio_seconds)} avg"
+    )
+    lines.append(
+        f"    first-partial avg: {_fmt_ms(st.avg_first_partial_ms)}"
+        f"  ·  drops {_fmt_tokens(st.avg_drops)}/session ({drop_pct})"
+    )
+    n_recent = max(0, int(recent_per_slot))
+    recents = samples[-n_recent:] if n_recent else []
+    for s in recents:
+        mark = "ok" if s.ok else "FAIL"
+        if s.fell_back:
+            mark = "FALLBACK"
+        extra = (
+            f" decodes={s.n_decodes}"
+            f" avg={_fmt_ms(s.avg_decode_ms)}"
+            f" audio={_fmt_s(s.audio_seconds)}"
+            f" first={_fmt_ms(s.first_partial_ms)}"
+            f" sent={s.frames_sent}/dropped={s.frames_dropped}"
+        )
+        err = f" · err {(s.error or '')[:60]}" if s.error else ""
         lines.append(f"    last {mark}:{extra}{err}")
     return lines
 
