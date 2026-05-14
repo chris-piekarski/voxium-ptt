@@ -1,6 +1,6 @@
 # Voxium documentation
 
-Welcome to the **Voxium 0.0.1** technical documentation. The voice here follows **[brand.md](brand.md)** — **PTT & VOX** (radio heritage) plus the **new-space-race** story: people steering **coding agents** on a **moon-and-back** run for software engineering, wiring **hardware + software + mech** with **automated** work (inference, agents) for **local, first-stack** runs. These pages also cover **architecture**, **test and coverage policy**, and **Mermaid** (GitHub, VS Code, etc.).
+Welcome to the **Voxium 0.0.2** technical documentation. The voice here follows **[brand.md](brand.md)** — **PTT & VOX** (radio heritage) plus the **new-space-race** story: people steering **coding agents** on a **moon-and-back** run for software engineering, wiring **hardware + software + mech** with **automated** work (inference, agents) for **local, first-stack** runs. These pages also cover **architecture**, **test and coverage policy**, and **Mermaid** (GitHub, VS Code, etc.).
 
 | Document | Description |
 |----------|-------------|

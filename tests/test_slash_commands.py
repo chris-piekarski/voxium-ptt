@@ -225,6 +225,7 @@ def test_run_slash_stream_status_when_off() -> None:
 def test_run_slash_stream_status_when_on() -> None:
     out = run_slash_line("/stream", stream_enabled=True)
     assert "Streaming: on" in out.text
+    assert out.stream_enabled is None  # /stream alone is read-only
 
 
 def test_run_slash_stream_on_off_flips() -> None:

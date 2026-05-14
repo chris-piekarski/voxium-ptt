@@ -853,7 +853,8 @@ def _run_stream_line(
     parts: list[str], *, stream_enabled: bool | None
 ) -> SlashLineResult:
     """
-    ``/stream`` shows current state; ``/stream on|off|status`` flips for the session.
+    ``/stream`` (or ``/stream status``) shows current state; ``/stream on|off``
+    toggles for the session.
 
     Effect is per-session: the client toggles ``config.stream_transcribe`` so the
     NEXT take opens (or skips) a /transcribe-stream WebSocket. Active sessions are

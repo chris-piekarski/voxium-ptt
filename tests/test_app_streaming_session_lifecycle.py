@@ -28,6 +28,7 @@ def _isolate_streaming_state(monkeypatch):
     """Reset module-level streaming state between tests."""
     monkeypatch.setattr(app_mod, "_streaming_session", None, raising=False)
     monkeypatch.setattr(app_mod, "ptt_status_box", None, raising=False)
+    monkeypatch.setattr(app_mod, "_streaming_missing_dep_warned", False, raising=False)
     app_mod._streaming_intent_active.clear()
     yield
     app_mod._streaming_intent_active.clear()
