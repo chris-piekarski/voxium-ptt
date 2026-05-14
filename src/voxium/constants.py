@@ -5,7 +5,7 @@ from voxium.polish_model_registry import POLISH_DEFAULT_MODEL
 
 import os
 
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 SAMPLE_RATE = 16_000
 DEFAULT_SERVER_URL = "http://127.0.0.1:8002/transcribe"
 DEFAULT_SERVER_START_TIMEOUT = 180

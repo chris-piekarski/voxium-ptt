@@ -18,9 +18,9 @@
 ╰─ Rig on station at {hostname}  ·  PTT & VOX  ·  loopback  ·  1960s local copy ╯
 ```
 
-# Voxium 0.0.1
+# Voxium 0.0.2
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.1-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.1-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![Version](https://img.shields.io/badge/Version-0.0.2-555555)](./pyproject.toml) [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#what-you-need) [![Operator documentation](https://img.shields.io/badge/Operator%20docs-0.0.2-0A66C2?logo=markdown&logoColor=white)](./docs/README.md) [![Mermaid](https://img.shields.io/badge/Mermaid-diagrams-ff3670?logo=mermaid&logoColor=white)](./docs/README.md#diagram-index)
 
 **PTT (push-to-talk) voice typing for your terminal** — **VOX** in, text out, over a local loopback to [Systran faster-whisper](https://github.com/SYSTRAN/faster-whisper). No cloud in the product path; model provisioning may download assets from Hugging Face.
 

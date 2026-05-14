@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voxium"
-version = "0.0.1"
+version = "0.0.2"
 description = "Voxium — PTT vox-in local voice typing (radio + Apollo-stack tone; see docs/brand.md)"
 readme = "README.md"
 license = { file = "LICENSE" }

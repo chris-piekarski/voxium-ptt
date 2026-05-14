@@ -600,7 +600,7 @@ def _format_stream_section(
 ) -> list[str]:
     lines: list[str] = []
     lines.append(
-        f"  transcribe_stream  ·  n={st.n} ({st.n_ok} ok / {st.n_fallback} fallback)"
+        f"  transcribe_stream  ·  n={st.n} ({st.n_ok} ok, {st.n_fallback} fallback)"
         f"  ·  model {st.last_model}"
     )
     drop_pct = f"{(st.drop_rate * 100):.1f}%" if st.drop_rate is not None else "—"

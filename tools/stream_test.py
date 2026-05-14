@@ -76,7 +76,7 @@ def _parse(argv: list[str] | None = None) -> _Args:
     parser.add_argument(
         "--silence",
         action="store_true",
-        help="Force silence (default unless --tone > 0).",
+        help="Force silence even when --tone is specified.",
     )
     args = parser.parse_args(argv)
     return _Args(
