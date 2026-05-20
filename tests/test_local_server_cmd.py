@@ -78,3 +78,23 @@ def test_argv_polish_disable_and_warmup_and_default_model() -> None:
     assert "--no-polish-enabled-by-default" in out
     assert "--polish-warmup-on-start" in out
     assert "--no-polish-warmup-on-start" not in out
+
+
+def test_argv_no_polish_warmup_branch() -> None:
+    """polish_warmup_on_start=False emits --no-polish-warmup-on-start."""
+    cfg = LocalServerLaunchConfig(
+        server_url="http://127.0.0.1:1/",
+        server_timeout=1,
+        metrics_sample_interval=0.5,
+        model=None,
+        server_device="cuda",
+        server_compute="int8",
+        server_vad=True,
+        server_gpu_metrics=True,
+        polish_warmup_on_start=False,
+    )
+    out = argv_after_interpreter(
+        cfg, log_level="ERROR", default_device="cpu", default_compute="f16"
+    )
+    assert "--no-polish-warmup-on-start" in out
+    assert "--polish-warmup-on-start" not in out

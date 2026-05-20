@@ -60,3 +60,47 @@ def test_faceplate_width_clamps_to_usable_columns() -> None:
     assert _faceplate_width(40) == 38
     assert _faceplate_width(None) == _DEFAULT_RULE_DOTS
     assert _faceplate_width(120) == 118
+
+
+def test_get_startup_hostname_handles_oserror(monkeypatch) -> None:
+    """If socket.gethostname raises, default to 'localhost'."""
+    from voxium import startup_banner
+
+    def boom() -> str:
+        raise OSError("no socket")
+
+    monkeypatch.setattr(startup_banner.socket, "gethostname", boom)
+    assert startup_banner.get_startup_hostname() == "localhost"
+
+
+def test_get_startup_hostname_truncates_long_name(monkeypatch) -> None:
+    from voxium import startup_banner
+
+    monkeypatch.setattr(startup_banner.socket, "gethostname", lambda: "x" * 200)
+    out = startup_banner.get_startup_hostname()
+    assert out.endswith("…")
+    assert len(out) == 118
+
+
+def test_default_rig_subtitle_truncates_long_hostname() -> None:
+    """default_rig_subtitle clips hostnames longer than 56 chars."""
+    out = default_rig_subtitle("y" * 80)
+    assert "…" in out
+
+
+def test_fit_plain_empty_and_one_column() -> None:
+    """_fit_plain: width=0 → empty, width=1 → ellipsis if overflow."""
+    from voxium.startup_banner import _fit_plain
+
+    assert _fit_plain("anything", 0) == ""
+    assert _fit_plain("ab", 1) == "…"
+    assert _fit_plain("ab", 5) == "ab   "
+    assert _fit_plain("abcdef", 4) == "abc…"
+
+
+def test_build_faceplate_truncates_hostname_at_28_chars() -> None:
+    """Hostname >28 chars gets clipped with an ellipsis in the faceplate."""
+    from voxium.startup_banner import _build_faceplate
+
+    plate = _build_faceplate("z" * 60, content_width=80)
+    assert "…" in plate.plain

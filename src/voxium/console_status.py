@@ -447,6 +447,8 @@ class PttSessionStatusBox:
         self._console = console
         self._lock = threading.Lock()
         self._session_steps: list[PttStatusStep] = []
+        self._mic_gain_level: float = 5.0
+        self._mic_gain_auto: bool = True
         self._main_live: Live | None = None
         self._footer_live: Live | None = None
         self._main_running = False
@@ -501,6 +503,13 @@ class PttSessionStatusBox:
         with self._lock:
             self._morse_audio_playing = bool(playing)
             self._refresh_footer_only_unsafe()
+
+    def set_mic_gain_level(self, level: float, *, auto: bool = True) -> None:
+        """For cyan standby faceplate MIC GAIN bar (0-10 scale, radio style)."""
+        with self._lock:
+            self._mic_gain_level = max(0.0, min(10.0, float(level)))
+            self._mic_gain_auto = bool(auto)
+            self._refresh_footer_only_unsafe()  # or main panel if needed
 
     def set_input_mode_for_footer(self, mode: str) -> None:
         """``ptt`` or ``vox`` — colors the idle footer so VOX is visually distinct from PTT."""
@@ -582,8 +591,20 @@ class PttSessionStatusBox:
             ):
                 return
             current = self._session_steps[-1].live_readback
-            if current == content:
+            # Content-based check instead of object/Rich equality.
+            # Avoids expensive panel rebuild + Live.update on every HUD tick
+            # when the transcribed text has not actually changed (common on
+            # long takes with steady speech). This was the main source of
+            # occasional "slow down with a lot of audio text".
+            if current is content:
                 return
+            try:
+                old_plain = getattr(current, "plain", current)
+                new_plain = getattr(content, "plain", content)
+                if str(old_plain or "") == str(new_plain or ""):
+                    return
+            except Exception:
+                pass  # fall through to update on any comparison trouble
             self._session_steps[-1].live_readback = content
             if self._main_live.is_started:
                 self._main_live.update(self._build_main_panel(), refresh=True)
@@ -722,6 +743,27 @@ class PttSessionStatusBox:
         )
         self._standby_thread.start()
 
+    def _build_gain_chip(self) -> Text:
+        """Compact ``+/− GAIN ▓▓▓░░░ 5.0`` chip; brighter as level moves off the midpoint."""
+        level = max(0.0, min(10.0, float(self._mic_gain_level)))
+        filled = int(round(level))
+        gain_bar = "▓" * filled + "░" * (10 - filled)
+        mode_tag = "auto" if self._mic_gain_auto else "man"
+        # Color: green near midpoint, amber when boosted high, blue when cut low.
+        if level >= 7.5:
+            bar_style = "bold #fbbf24"
+        elif level <= 2.5:
+            bar_style = "bold #38bdf8"
+        else:
+            bar_style = "bold #86efac"
+        return (
+            Text("+/− ", style="dim #94a3b8")
+            + Text("GAIN ", style="dim #cbd5e1")
+            + Text(gain_bar, style=bar_style)
+            + Text(f" {level:4.1f} ", style="dim #cbd5e1")
+            + Text(f"({mode_tag})", style="dim #64748b")
+        )
+
     def _build_footer(self) -> Panel:
         w = self._box_width()
         inner = max(16, w - 6)
@@ -746,6 +788,7 @@ class PttSessionStatusBox:
         else:
             morse_state = "on" if self._morse_audio_playing else "off"
             morse_style = "dim #fbbf24" if self._morse_audio_playing else "dim #64748b"
+            gain_chip = self._build_gain_chip()
             if self._footer_input_mode == "vox":
                 body = (
                     Text("  🎤  ", style="bold #a78bfa")
@@ -761,6 +804,8 @@ class PttSessionStatusBox:
                     + Text("command  ", style="dim #64748b")
                     + Text("·  ", style="dim #334155")
                     + Text(f"M Morse {morse_state}  ", style=morse_style)
+                    + Text("·  ", style="dim #334155")
+                    + gain_chip
                 )
             else:
                 body = (
@@ -776,6 +821,8 @@ class PttSessionStatusBox:
                     + Text("command  ", style="dim #64748b")
                     + Text("·  ", style="dim #334155")
                     + Text(f"M Morse {morse_state}  ", style=morse_style)
+                    + Text("·  ", style="dim #334155")
+                    + gain_chip
                 )
         return Panel(
             body,

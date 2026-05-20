@@ -298,14 +298,24 @@ RECORDING_REMINDER_INTERVAL_S = 15.0
 VOX_HUD_RING_MAX = 96_000
 _ptt_key_tracker = PttKeyTracker()
 
+# Microphone gain (0-10 scale, radio-style). Default Auto mode.
+# Applied as multiplier to raw float32 buffers early in capture.
+_mic_gain_level: float = 5.0  # 0-10, default 50%
+_mic_gain_auto: bool = True
+_MIC_GAIN_MIN = 0.0
+_MIC_GAIN_MAX = 10.0
+_MIC_GAIN_STEP = 0.5  # 0.5 lands cleanly on 5.0 → operator can press back to auto without a reset key
+_MIC_GAIN_DEFAULT_MANUAL = 5.0
+_MIC_GAIN_AUTO_TARGET_PEAK = 0.75  # target peak for auto (0-1 range)
+
 # PTT (default) vs VOX (open-mic) — toggled with --mode-hotkey (F7)
 input_mode: str = "ptt"  # "ptt" | "vox"
 input_mode_lock = threading.Lock()
 vox_stream: sd.InputStream | None = None
 vox_chunker: UtteranceChunker | None = None
 
-# Live transcribe streaming runtime — non-None only while a PTT take is in flight
-# AND ``--stream-transcribe`` is enabled AND the WS handshake succeeded. See
+# Live transcribe streaming runtime — non-None only while a take (PTT or VOX) is in flight
+# AND streaming is enabled (default on) AND the WS handshake succeeded. See
 # ``docs/plans/live-transcribe-stream.md`` §3.4 for the lifecycle table.
 #
 # CRITICAL: WS open + close are NEVER done on the take's hot path. Both run in
@@ -801,18 +811,18 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
     streaming_cfg = file_config.get("streaming") or {}
     streaming_cfg = streaming_cfg if isinstance(streaming_cfg, dict) else {}
     stream_group = parser.add_argument_group(
-        "Live transcribe streaming (PTT only, default off)",
+        "Live transcribe streaming (on by default)",
         "Type-out from the wire while keying the mic — partial text appears in the "
-        "green PTT strip via WebSocket /transcribe-stream. Polish + paste at key-up are "
-        "unchanged; live text is texture, never the source of truth.",
+        "green panel via WebSocket /transcribe-stream while the take is live. "
+        "Polish + paste at key-up are unchanged; live text is texture, never the source of truth.",
     )
     stream_group.add_argument(
         "--stream-transcribe",
         action=argparse.BooleanOptionalAction,
-        default=bool(streaming_cfg.get("enabled", False)),
+        default=bool(streaming_cfg.get("enabled", True)),
         help=(
-            "Open a WebSocket to /transcribe-stream during PTT and render live "
-            "partials in the green strip. Default: off until measured. "
+            "Open a WebSocket to /transcribe-stream during PTT and VOX takes and render live "
+            "partials in the green strip. Default: on. "
             "Use --no-stream-transcribe to disable explicitly."
         ),
     )
@@ -1879,12 +1889,25 @@ def _refresh_live_readback_into_status_box() -> None:
     state_snap = transcribe_stream_client.get_live_state(sess)
     if state_snap is None:
         return
-    rendered = _render_live_readback_text(state_snap)
+
+    # Compute whether we received a fresh partial recently so the chip can pulse.
+    fresh = False
+    if state_snap.last_partial_received_at is not None:
+        age = time.monotonic() - state_snap.last_partial_received_at
+        if age < 1.8:  # short breathing window
+            fresh = True
+
+    rendered = _render_live_readback_text(state_snap, fresh=fresh)
     ptt_status_box.update_live_readback(rendered)
 
 
-def _render_live_readback_text(state_snap):
-    """Build the Rich Text shown on the live-readback line for ``state_snap``."""
+def _render_live_readback_text(state_snap, *, fresh: bool = False):
+    """Build the Rich Text shown on the live-readback line for ``state_snap``.
+
+    When ``fresh=True`` (a new partial arrived recently), the ``▸ wire`` chip
+    uses a brighter style so the operator can feel the rig actively receiving
+    data — a subtle "breathing" pulse effect.
+    """
     from rich.text import Text as _RichText
 
     committed = (getattr(state_snap, "committed_text", "") or "").strip()
@@ -1894,7 +1917,8 @@ def _render_live_readback_text(state_snap):
     elif not state_snap.connected and not state_snap.active:
         chip = _RichText("▸ wire  ", style="dim #94a3b8")
     else:
-        chip = _RichText("▸ wire  ", style="bold dim #86efac")
+        chip_style = "bold #a7f3d0" if fresh else "bold dim #86efac"
+        chip = _RichText("▸ wire  ", style=chip_style)
     # Committed text (already slid off the server's window) renders slightly
     # brighter so the operator can see the transcript building up; the volatile
     # current-window tail stays in the dimmer style since it may still revise.
@@ -1937,6 +1961,10 @@ def vox_audio_callback(indata, _frames, _time_info, status) -> None:
     if status and str(status):
         pass
     ch = indata.copy().ravel()
+    # Apply operator mic gain (0-10 scale)
+    gain_mult = _get_mic_gain_multiplier()
+    if gain_mult != 1.0 and ch.size:
+        np.multiply(ch, gain_mult, out=ch)
     if ch.size:
         _vox_ring_append(ch.astype(np.float32, copy=False))
     chc = vox_chunker
@@ -1991,6 +2019,7 @@ def _vox_monitor_loop() -> None:
         else:
             d = f"VOX  {st_lbl}  ·  {sc} smpl  ·  pk {pk:.3f}"
         _write_recording_hud(d)
+        _refresh_live_readback_into_status_box()
         if vox_monitor_event.wait(RECORDING_HUD_INTERVAL_S):
             break
 
@@ -2560,6 +2589,10 @@ def audio_callback(indata, _frames, _time_info, status):
             audio_capture_statuses.append(status_text)
             del audio_capture_statuses[:-5]
     chunk = indata.copy()
+    # Apply operator mic gain (0-10 scale) early — affects waveform, VOX, STT
+    gain_mult = _get_mic_gain_multiplier()
+    if gain_mult != 1.0:
+        np.multiply(chunk, gain_mult, out=chunk)
     t = float(np.sum(chunk * chunk))
     p = float(np.max(np.abs(chunk)))
     with recording_audio_lock:
@@ -3404,6 +3437,45 @@ def _toggle_morse_audio_for_last_transcript() -> bool:
         beep_error()
         _set_morse_audio_state(False)
     return True
+
+
+def _get_mic_gain_multiplier() -> float:
+    """Current gain as a multiplier applied to raw float32 audio."""
+    level = max(_MIC_GAIN_MIN, min(_MIC_GAIN_MAX, _mic_gain_level))
+    # Map 0-10 → 0.25x to 4.0x (safe, radio-like range)
+    return 0.25 + (level / 10.0) * 3.75
+
+
+def _adjust_mic_gain(delta: float) -> None:
+    """Adjust gain. The live footer chip is the primary indicator; minimal mode falls back to stderr."""
+    global _mic_gain_level, _mic_gain_auto
+    _mic_gain_level = max(_MIC_GAIN_MIN, min(_MIC_GAIN_MAX, _mic_gain_level + delta))
+    # Landing back on the midpoint counts as returning to auto — no separate reset key needed
+    # because the step (0.5) divides the 0..10 range evenly through 5.0.
+    _mic_gain_auto = abs(_mic_gain_level - _MIC_GAIN_DEFAULT_MANUAL) < 1e-6
+
+    if ptt_status_box is not None:
+        try:
+            ptt_status_box.set_mic_gain_level(_mic_gain_level, auto=_mic_gain_auto)
+        except Exception:
+            pass
+        return
+
+    # No rich UI (minimal / quiet): give an immediate stderr line so the operator sees something.
+    mult = _get_mic_gain_multiplier()
+    bar = _make_gain_bar(_mic_gain_level)
+    print(
+        f"🎤 MIC GAIN {_mic_gain_level:.1f}   {bar}  ({mult:.2f}x)",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _make_gain_bar(level: float, width: int = 10) -> str:
+    """Simple bar for the gain indicator."""
+    filled = int(round((level / _MIC_GAIN_MAX) * width))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
 
 
 def _finish_ptt_recording() -> None:
@@ -4347,6 +4419,60 @@ def run_client(args, _raw_argv: list[str]) -> int:
                 return c
         return None
 
+    def _pynput_gain_char(key: object) -> str | None:
+        """Robust detector for +, =, - even when pynput does not populate .char.
+
+        Symbols frequently arrive as KeyCode(vk=...) or with only a name/repr on
+        Linux/WSL and some Windows keyboard layouts (Shift+=, numpad, etc.). When
+        VOXIUM_GAIN_KEY_DEBUG is set, every keypress that looks plus/minus-ish but
+        fails to match gets logged to stderr so the operator can report the raw vk.
+        """
+        # Fast path that already works for letters (M) and sometimes symbols.
+        ch = pynput_typed_char(key)
+        if ch in ("+", "=", "-"):
+            return ch
+
+        vk = getattr(key, "vk", None)
+        name = getattr(key, "name", None)
+        s = str(key).lower()
+
+        candidate = None
+        if isinstance(vk, int):
+            if vk in (187, 0xBB, 107):  # =/+ , numpad +
+                candidate = "+"
+            elif vk in (189, 0xBD, 109):  # -, numpad -
+                candidate = "-"
+
+        if candidate is None:
+            if any(x in s for x in ("plus", "add", "kpplus", "+>")):
+                candidate = "+"
+            elif any(x in s for x in ("minus", "subtract", "kpminus", "−")):
+                candidate = "-"
+            elif "equal" in s:
+                candidate = "+"
+
+        if candidate is None and name:
+            nm = str(name).lower()
+            if nm in ("plus", "add"):
+                candidate = "+"
+            elif nm in ("minus", "subtract"):
+                candidate = "-"
+
+        # Opt-in stderr diagnostic so we can see exactly what pynput delivers when
+        # a keypress *looks* like +/- but our heuristic doesn't match it.
+        if candidate is None and os.environ.get("VOXIUM_GAIN_KEY_DEBUG"):
+            looks_relevant = any(
+                tok in s for tok in ("+", "-", "=", "plus", "minus", "equal")
+            ) or (isinstance(vk, int) and vk in (187, 189, 107, 109))
+            if looks_relevant:
+                print(
+                    f"[gain debug] raw={key!r}  vk={vk}  name={name}  s={s}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        return candidate
+
     def try_handle_slash_input(key: object) -> bool:
         """True when the key was consumed (slash line / cancel / submit)."""
         global state, _slash_buffer, _last_hotkey_time, _slash_tab_cycle
@@ -4489,10 +4615,32 @@ def run_client(args, _raw_argv: list[str]) -> int:
             return False
         return _toggle_morse_audio_for_last_transcript()
 
+    def try_handle_gain_key(key: object) -> bool:
+        """+/- or = adjust mic gain (0-10 scale). Uses tolerant detection for symbols."""
+        ch = _pynput_gain_char(key)
+        if ch is None:
+            return False
+
+        if not is_our_terminal_focused():
+            return False
+
+        with state_lock:
+            st = state
+        if st not in (State.IDLE, State.RECORDING, State.TRANSCRIBING):
+            return False
+
+        if ch in ("+", "="):
+            _adjust_mic_gain(+_MIC_GAIN_STEP)
+        else:
+            _adjust_mic_gain(-_MIC_GAIN_STEP)
+        return True
+
     def combined_handler(key: object) -> None:
         if try_handle_slash_input(key):
             return
         if try_handle_morse_audio_toggle(key):
+            return
+        if try_handle_gain_key(key):
             return
         mode_handler(key)
         record_press_handler(key)

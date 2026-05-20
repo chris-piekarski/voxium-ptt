@@ -132,6 +132,22 @@ def test_command_footer_cursor_sits_after_text() -> None:
     assert "/help ▎" not in text
 
 
+def test_idle_footer_shows_mic_gain_chip_and_updates_on_set_level() -> None:
+    c = Console(force_terminal=True, width=140, record=True, color_system="truecolor")
+    box = PttSessionStatusBox(c)
+    c.print(box._build_footer())
+    default_text = c.export_text(clear=True)
+    assert "GAIN" in default_text
+    assert "(auto)" in default_text
+
+    box.set_mic_gain_level(8.0, auto=False)
+    c.print(box._build_footer())
+    boosted = c.export_text(clear=True)
+    assert "GAIN" in boosted
+    assert "8.0" in boosted
+    assert "(man)" in boosted
+
+
 def test_idle_footer_shows_morse_audio_toggle_state() -> None:
     c = Console(force_terminal=True, width=120, record=True, color_system="truecolor")
     box = PttSessionStatusBox(c)

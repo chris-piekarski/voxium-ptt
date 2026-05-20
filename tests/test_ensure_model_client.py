@@ -406,3 +406,27 @@ def test_ensure_model_poll_timeout(monkeypatch) -> None:
     c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
     assert emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "m") is False
     assert not got
+
+
+def test_ensure_model_non_202_error_json_raises_falls_back_to_text(monkeypatch) -> None:
+    """When r.json() blows up, ensure_model must fall back to r.text — line 110-111."""
+
+    class Resp:
+        status_code = 400
+        text = "raw error body"
+
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(emc.requests, "post", lambda *a, **k: Resp())
+    panels: list[list] = []
+    monkeypatch.setattr(
+        emc, "print_agent_telemetry_panel", lambda *_a, **_k: panels.append(_a[1])
+    )
+    c = Console(record=True, width=100, force_terminal=True, color_system="truecolor")
+    assert (
+        emc.ensure_model_on_loopback_server("http://127.0.0.1:8002", c, "base") is False
+    )
+    # Telemetry panel should have received the raw text body since JSON failed.
+    flat = " ".join(str(m) for batch in panels for m in batch)
+    assert "raw error body" in flat

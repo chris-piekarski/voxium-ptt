@@ -127,3 +127,61 @@ def test_force_terminal_focus_check_reruns_impl(monkeypatch) -> None:
     two = tf.force_terminal_focus_check()
     assert one and two
     assert len(calls) == 2
+
+
+def test_dispatcher_windows_branch(monkeypatch) -> None:
+    monkeypatch.setattr(tf.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(tf, "_windows_foreground_looks_like_ours", lambda: True)
+    assert tf._is_our_terminal_focused_impl() is True
+
+
+def test_dispatcher_linux_branch(monkeypatch) -> None:
+    monkeypatch.setattr(tf.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(tf, "_linux_x11_window_matches_active", lambda: False)
+    assert tf._is_our_terminal_focused_impl() is False
+
+
+def test_dispatcher_unknown_system_returns_true(monkeypatch) -> None:
+    monkeypatch.setattr(tf.platform, "system", lambda: "Plan9")
+    assert tf._is_our_terminal_focused_impl() is True
+
+
+def test_linux_invalid_windowid_is_permissive(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(tf, "_is_wsl", lambda: False)
+    monkeypatch.setitem(os.environ, "DISPLAY", ":0")
+    monkeypatch.setitem(os.environ, "WINDOWID", "not-a-number")
+    assert tf._linux_x11_window_matches_active() is True
+
+
+def test_linux_no_xdotool_is_permissive(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(tf, "_is_wsl", lambda: False)
+    monkeypatch.setitem(os.environ, "DISPLAY", ":0")
+    monkeypatch.setitem(os.environ, "WINDOWID", "42")
+    monkeypatch.setattr(tf, "shutil", types.SimpleNamespace(which=lambda x: None))
+    assert tf._linux_x11_window_matches_active() is True
+
+
+def test_xdotool_nonzero_returncode_is_permissive(monkeypatch) -> None:
+    import os
+
+    monkeypatch.setattr(tf, "_is_wsl", lambda: False)
+    monkeypatch.setitem(os.environ, "DISPLAY", ":0")
+    monkeypatch.setitem(os.environ, "WINDOWID", "1")
+    monkeypatch.setattr(tf, "shutil", types.SimpleNamespace(which=lambda x: "/x"))
+    r = types.SimpleNamespace(returncode=1, stdout="", stderr="oops")
+    monkeypatch.setattr(tf.subprocess, "run", lambda *a, **k: r)
+    assert tf._linux_x11_window_matches_active() is True
+
+
+def test_is_wsl_detects_wsl_interop_env(monkeypatch) -> None:
+    import os
+
+    u = types.SimpleNamespace(release="5.15.0-linux-generic")
+    monkeypatch.setattr(tf.platform, "uname", lambda: u)
+    monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
+    monkeypatch.setitem(os.environ, "WSL_INTEROP", "/run/wsl/123_interop")
+    assert tf._is_wsl() is True
