@@ -364,14 +364,27 @@ def test_build_ptt_log_tiny_width_no_constrain() -> None:
 def test_format_polish_usage_suffix_bad_types_each_field() -> None:
     """Each token field independently coerces TypeError/ValueError to None."""
     # All-bad → empty suffix
-    assert format_polish_usage_suffix({"tokens_in": "x", "tokens_out": [], "total_tokens": {}}) == ""
+    assert (
+        format_polish_usage_suffix(
+            {"tokens_in": "x", "tokens_out": [], "total_tokens": {}}
+        )
+        == ""
+    )
     # Bad pin only → falls through to "tok out" branch
-    assert format_polish_usage_suffix({"tokens_in": object(), "tokens_out": 4}) == " · tok out 4"
+    assert (
+        format_polish_usage_suffix({"tokens_in": object(), "tokens_out": 4})
+        == " · tok out 4"
+    )
     # Bad pout only → falls through to "tok in" branch
-    assert format_polish_usage_suffix({"tokens_in": 8, "tokens_out": "nope"}) == " · tok in 8"
+    assert (
+        format_polish_usage_suffix({"tokens_in": 8, "tokens_out": "nope"})
+        == " · tok in 8"
+    )
     # Bad total only — still emits tok-pair
     assert (
-        format_polish_usage_suffix({"tokens_in": 2, "tokens_out": 3, "total_tokens": "huh"})
+        format_polish_usage_suffix(
+            {"tokens_in": 2, "tokens_out": 3, "total_tokens": "huh"}
+        )
         == " · tok 2→3"
     )
 
@@ -379,7 +392,9 @@ def test_format_polish_usage_suffix_bad_types_each_field() -> None:
 def test_format_polish_usage_suffix_handles_alt_keys_and_total_only() -> None:
     # prompt_tokens / completion_tokens fallback keys
     assert (
-        format_polish_usage_suffix({"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14})
+        format_polish_usage_suffix(
+            {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14}
+        )
         == " · tok 5→9 · tot 14"
     )
     # Only total — no tok line, just tot

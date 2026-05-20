@@ -10,6 +10,9 @@ from voxium.slash_complete import (
     list_slash_command_matches,
 )
 
+# Local short alias used by the targeted-branch tests below.
+_cmb = _completion_matches_for_buffer
+
 
 def _mock_polish_registry(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -252,9 +255,6 @@ def test_polish_subcommand_completions(monkeypatch) -> None:
 def test_apply_slash_tab_non_slash_unchanged() -> None:
     o = apply_slash_tab("hello", tab_cycle=0)
     assert o.new_buffer == "hello" and o.did_extend is False
-
-
-from voxium.slash_complete import _completion_matches_for_buffer as _cmb
 
 
 def test_completion_returns_empty_for_non_slash_buffer() -> None:

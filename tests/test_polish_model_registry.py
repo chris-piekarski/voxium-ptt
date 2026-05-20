@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from voxium.polish_model_registry import (
     DEFAULT_TRUSTED_POLISH_MODEL_ID,
+    LOCAL_POLISH_PREFIX,
+    LocalPolishModel,
     POLISH_DEFAULT_MODEL,
+    TrustedPolishModel,
+    is_trusted_polish_model_on_disk,
+    list_available_polish_models,
+    list_installed_custom_polish_models,
     list_installed_trusted_polish_models,
     list_local_polish_models,
     resolve_polish_model,
     trusted_polish_model,
+    trusted_polish_model_path,
     validate_polish_model_name,
 )
 
@@ -109,25 +118,14 @@ def test_resolve_polish_model_rejects_missing_model(tmp_path) -> None:
         resolve_polish_model("missing.gguf", tmp_path)
 
 
-from pathlib import Path
-
-from voxium.polish_model_registry import (
-    LOCAL_POLISH_PREFIX,
-    LocalPolishModel,
-    TrustedPolishModel,
-    is_trusted_polish_model_on_disk,
-    list_available_polish_models,
-    list_installed_custom_polish_models,
-    trusted_polish_model_path,
-)
-
-
 def test_local_model_size_gib_text_thresholds() -> None:
     """size_gib_text — three branches: ≥10 GiB, ≥1 GiB, MiB fallback."""
     big = LocalPolishModel(name="x", path=Path("/x"), size_bytes=12 * (1024**3))
     assert big.size_gib_text == "12 GiB"
 
-    med = LocalPolishModel(name="x", path=Path("/x"), size_bytes=2 * (1024**3) + (512 * 1024**2))
+    med = LocalPolishModel(
+        name="x", path=Path("/x"), size_bytes=2 * (1024**3) + (512 * 1024**2)
+    )
     assert med.size_gib_text.endswith(" GiB") and "." in med.size_gib_text
 
     small = LocalPolishModel(name="x", path=Path("/x"), size_bytes=300 * (1024**2))
@@ -145,7 +143,9 @@ def test_local_model_local_selector_only_for_custom() -> None:
     no_filename = LocalPolishModel(name="x", path=Path("/x"), size_bytes=10)
     assert no_filename.local_selector is None
 
-    custom = LocalPolishModel(name="x", path=Path("/x"), size_bytes=10, filename="custom/a.gguf")
+    custom = LocalPolishModel(
+        name="x", path=Path("/x"), size_bytes=10, filename="custom/a.gguf"
+    )
     assert custom.local_selector == f"{LOCAL_POLISH_PREFIX}custom/a.gguf"
 
 
@@ -156,7 +156,10 @@ def test_trusted_polish_model_rejects_unknown_id() -> None:
 
 def test_is_trusted_polish_model_on_disk_false_for_missing(tmp_path) -> None:
     # Models dir exists but file is not there
-    assert is_trusted_polish_model_on_disk(DEFAULT_TRUSTED_POLISH_MODEL_ID, tmp_path) is False
+    assert (
+        is_trusted_polish_model_on_disk(DEFAULT_TRUSTED_POLISH_MODEL_ID, tmp_path)
+        is False
+    )
 
 
 def test_trusted_polish_model_path_under_root(tmp_path) -> None:
@@ -179,7 +182,9 @@ def test_list_installed_custom_polish_models_returns_only_custom(tmp_path) -> No
 def test_list_available_polish_models_keys_match_registry_order() -> None:
     names = [m.model_id for m in list_available_polish_models()]
     assert DEFAULT_TRUSTED_POLISH_MODEL_ID in names
-    assert all(isinstance(m, TrustedPolishModel) for m in list_available_polish_models())
+    assert all(
+        isinstance(m, TrustedPolishModel) for m in list_available_polish_models()
+    )
 
 
 def test_resolve_polish_model_by_local_selector(tmp_path) -> None:

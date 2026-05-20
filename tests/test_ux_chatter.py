@@ -35,10 +35,14 @@ from voxium.ux_chatter import (
 from voxium.polish_model_registry import DEFAULT_TRUSTED_POLISH_MODEL_ID
 from voxium.ux_chatter_prompt import (
     _transcript_vibe_cues,
+    system_message_ux_chatter,
     system_message_ux_chatter_copy,
     system_message_ux_chatter_standby,
     system_message_ux_edge_inference,
     user_message_ux_chatter,
+    user_message_ux_chatter_copy,
+    user_message_ux_chatter_standby,
+    user_message_ux_log_subtitle,
 )
 
 
@@ -749,15 +753,11 @@ def test_llama_cpp_chat_completions_parses_choice(
 
 
 def test_transcript_vibe_cues_empty_returns_neutral() -> None:
-    from voxium.ux_chatter_prompt import _transcript_vibe_cues
-
     assert _transcript_vibe_cues("") == "neutral, on-station, no recent traffic"
     assert _transcript_vibe_cues("   ") == "neutral, on-station, no recent traffic"
 
 
 def test_transcript_vibe_cues_brief_upbeat_playful_tentative_personal() -> None:
-    from voxium.ux_chatter_prompt import _transcript_vibe_cues
-
     # Brief + upbeat
     cues = _transcript_vibe_cues("Great clean readback thanks!")
     low = cues.lower()
@@ -765,15 +765,15 @@ def test_transcript_vibe_cues_brief_upbeat_playful_tentative_personal() -> None:
     assert "brief" in low
 
     # Playful + tentative
-    cues2 = _transcript_vibe_cues("I think maybe it's just a joke seems funny weird wild")
+    cues2 = _transcript_vibe_cues(
+        "I think maybe it's just a joke seems funny weird wild"
+    )
     low2 = cues2.lower()
     assert "playful" in low2 or "tentative" in low2 or "personal" in low2
 
 
 def test_transcript_vibe_cues_dense_caps_at_four_and_dedupes() -> None:
     """Long input with many cues — keeps only first four and removes duplicates."""
-    from voxium.ux_chatter_prompt import _transcript_vibe_cues
-
     text = (
         "What why how the urgent broken build needs help now please "
         "we should check our deploy and ship the release because we love it"
@@ -785,39 +785,28 @@ def test_transcript_vibe_cues_dense_caps_at_four_and_dedupes() -> None:
 
 
 def test_user_message_ux_chatter_copy_empty_returns_no_recent_line() -> None:
-    from voxium.ux_chatter_prompt import user_message_ux_chatter_copy
-
     out = user_message_ux_chatter_copy("")
     assert "no recent line" in out.lower()
 
 
 def test_user_message_ux_chatter_standby_empty_and_long_capped() -> None:
-    from voxium.ux_chatter_prompt import user_message_ux_chatter_standby
-
     empty = user_message_ux_chatter_standby("")
     assert "standby" in empty.lower()
 
-    long = user_message_ux_chatter_standby("a " * 400)
-    assert "…" in long
+    long_msg = user_message_ux_chatter_standby("a " * 400)
+    assert "…" in long_msg
 
 
 def test_user_message_ux_log_subtitle_empty_and_long_capped() -> None:
-    from voxium.ux_chatter_prompt import user_message_ux_log_subtitle
-
     empty = user_message_ux_log_subtitle("")
     assert "no text" in empty.lower() or "shack" in empty.lower()
 
-    long = user_message_ux_log_subtitle("topic " * 200)
-    assert "…" in long
+    long_msg = user_message_ux_log_subtitle("topic " * 200)
+    assert "…" in long_msg
 
 
 def test_system_and_user_message_ux_chatter_compat_aliases() -> None:
-    from voxium.ux_chatter_prompt import (
-        system_message_ux_chatter,
-        system_message_ux_chatter_copy,
-        user_message_ux_chatter as user_alias,
-        user_message_ux_chatter_copy,
-    )
-
     assert system_message_ux_chatter() == system_message_ux_chatter_copy()
-    assert user_alias("hi there") == user_message_ux_chatter_copy("hi there")
+    assert user_message_ux_chatter("hi there") == user_message_ux_chatter_copy(
+        "hi there"
+    )

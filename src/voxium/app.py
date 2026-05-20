@@ -4438,9 +4438,9 @@ def run_client(args, _raw_argv: list[str]) -> int:
 
         candidate = None
         if isinstance(vk, int):
-            if vk in (187, 0xBB, 107):      # =/+ , numpad +
+            if vk in (187, 0xBB, 107):  # =/+ , numpad +
                 candidate = "+"
-            elif vk in (189, 0xBD, 109):    # -, numpad -
+            elif vk in (189, 0xBD, 109):  # -, numpad -
                 candidate = "-"
 
         if candidate is None:
@@ -4461,10 +4461,9 @@ def run_client(args, _raw_argv: list[str]) -> int:
         # Opt-in stderr diagnostic so we can see exactly what pynput delivers when
         # a keypress *looks* like +/- but our heuristic doesn't match it.
         if candidate is None and os.environ.get("VOXIUM_GAIN_KEY_DEBUG"):
-            looks_relevant = (
-                any(tok in s for tok in ("+", "-", "=", "plus", "minus", "equal"))
-                or (isinstance(vk, int) and vk in (187, 189, 107, 109))
-            )
+            looks_relevant = any(
+                tok in s for tok in ("+", "-", "=", "plus", "minus", "equal")
+            ) or (isinstance(vk, int) and vk in (187, 189, 107, 109))
             if looks_relevant:
                 print(
                     f"[gain debug] raw={key!r}  vk={vk}  name={name}  s={s}",

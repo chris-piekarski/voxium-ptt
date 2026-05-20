@@ -747,7 +747,7 @@ class PttSessionStatusBox:
         """Compact ``+/− GAIN ▓▓▓░░░ 5.0`` chip; brighter as level moves off the midpoint."""
         level = max(0.0, min(10.0, float(self._mic_gain_level)))
         filled = int(round(level))
-        bar = "▓" * filled + "░" * (10 - filled)
+        gain_bar = "▓" * filled + "░" * (10 - filled)
         mode_tag = "auto" if self._mic_gain_auto else "man"
         # Color: green near midpoint, amber when boosted high, blue when cut low.
         if level >= 7.5:
@@ -759,7 +759,7 @@ class PttSessionStatusBox:
         return (
             Text("+/− ", style="dim #94a3b8")
             + Text("GAIN ", style="dim #cbd5e1")
-            + Text(bar, style=bar_style)
+            + Text(gain_bar, style=bar_style)
             + Text(f" {level:4.1f} ", style="dim #cbd5e1")
             + Text(f"({mode_tag})", style="dim #64748b")
         )

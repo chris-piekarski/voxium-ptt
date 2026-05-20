@@ -37,7 +37,9 @@ def test_pause_uses_msvcrt_when_available(monkeypatch: pytest.MonkeyPatch) -> No
     getch.assert_called_once()
 
 
-def test_pause_falls_back_to_stdin_when_msvcrt_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pause_falls_back_to_stdin_when_msvcrt_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """If msvcrt.getch raises, we drop through to the stdin readline branch."""
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.delenv("VOXIUM_NO_PAUSE", raising=False)
