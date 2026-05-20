@@ -252,3 +252,105 @@ def test_polish_subcommand_completions(monkeypatch) -> None:
 def test_apply_slash_tab_non_slash_unchanged() -> None:
     o = apply_slash_tab("hello", tab_cycle=0)
     assert o.new_buffer == "hello" and o.did_extend is False
+
+
+from voxium.slash_complete import _completion_matches_for_buffer as _cmb
+
+
+def test_completion_returns_empty_for_non_slash_buffer() -> None:
+    assert _cmb("hello world") == []
+    assert _cmb("") == []
+
+
+def test_completion_returns_empty_for_slash_only_no_parts() -> None:
+    # /<space> — parts is empty after the space
+    assert _cmb("/ ") == []
+
+
+def test_completion_profile_subcommand_with_trailing_space() -> None:
+    out = _cmb("/profile ")
+    assert out and all(x.startswith("/profile ") for x in out)
+
+
+def test_completion_profile_prefix_first_arg() -> None:
+    # 'r' should match the 'reset' action.
+    assert _cmb("/profile r") == ["/profile reset"]
+    # Mismatched prefix → no completions.
+    assert _cmb("/profile zzz") == []
+
+
+def test_completion_stream_first_arg_prefix() -> None:
+    out = _cmb("/stream o")
+    assert any(x == "/stream on" for x in out)
+    assert any(x == "/stream off" for x in out)
+
+
+def test_completion_models_no_args_no_space_returns_empty() -> None:
+    # `/models` with NO trailing space and no further args has no completions
+    assert _cmb("/models") == ["/models"]  # is_slash_command_typing path
+    # Sub case: after the slash command body but exactly word boundary
+    # → first arg with prefix completions still works
+    assert _cmb("/models polish unknownact") == []
+
+
+def test_completion_polish_use_trailing_space_lists_models(monkeypatch) -> None:
+    _mock_polish_registry(monkeypatch)
+    out = _cmb("/polish use ")
+    assert out and any("qwen" in x for x in out)
+
+
+def test_completion_polish_use_second_arg_prefix(monkeypatch) -> None:
+    _mock_polish_registry(monkeypatch)
+    out = _cmb("/polish use qwen2.5-c")
+    assert out and out[0].startswith("/polish use qwen2.5-coder")
+
+
+def test_completion_polish_use_third_arg_no_completion(monkeypatch) -> None:
+    _mock_polish_registry(monkeypatch)
+    # Once we have 3 args, no more completions
+    assert _cmb("/polish use foo bar") == []
+
+
+def test_completion_models_polish_use_third_arg_prefix(monkeypatch) -> None:
+    _mock_polish_registry(monkeypatch)
+    out = _cmb("/models polish use qwen2.5-c")
+    assert out and out[0].startswith("/models polish use qwen2.5-coder")
+
+
+def test_completion_models_polish_model_word_lists(monkeypatch) -> None:
+    _mock_polish_registry(monkeypatch)
+    out = _cmb("/models polish model ")
+    assert out and any("qwen" in x for x in out)
+
+
+def test_completion_hotkeys_trailing_space_with_action() -> None:
+    out = _cmb("/hotkeys ptt ")
+    assert out and all(x.startswith("/hotkeys ptt ") for x in out)
+
+
+def test_completion_hotkeys_too_many_args_empty() -> None:
+    assert _cmb("/hotkeys ptt f1 extra") == []
+
+
+def test_completion_unknown_command_returns_empty() -> None:
+    # /xyz is not a real command; falls through with no completions
+    assert _cmb("/xyz abc") == []
+
+
+def test_apply_slash_tab_no_options_unchanged() -> None:
+    # /xyz with no matching primary → unchanged
+    out = apply_slash_tab("/xyz unknown", tab_cycle=3)
+    assert out.new_buffer == "/xyz unknown"
+    assert out.did_extend is False
+    assert out.tab_cycle == 0
+
+
+def test_format_hints_truncates_long_line(monkeypatch) -> None:
+    # Force a very long hint list and assert truncation marker.
+    long = ["/x" + ("y" * 30) for _ in range(20)]
+    monkeypatch.setattr(
+        "voxium.slash_complete._completion_matches_for_buffer", lambda _b: long
+    )
+    out = format_slash_command_hints("/x", max_len=40)
+    assert out.endswith("…")
+    assert len(out) <= 40

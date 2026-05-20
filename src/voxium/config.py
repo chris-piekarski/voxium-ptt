@@ -24,3 +24,5 @@ class VoxiumUserConfig(BaseModel):
     history: dict[str, Any] = Field(default_factory=dict)
     # Client-only “UX chatter” (Gemma; see ``docs/ux-chatter-gemma.md``). ``enabled: false`` opts out.
     ux_chatter: dict[str, Any] = Field(default_factory=dict)
+    # Microphone gain (0-10 scale, radio-style). Default auto mode with manual override via +/- keys.
+    audio: dict[str, Any] = Field(default_factory=dict)

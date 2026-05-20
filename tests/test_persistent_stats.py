@@ -1,7 +1,17 @@
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+import voxium.persistent_stats as ps_mod
 from voxium.persistent_stats import (
+    _float_value,
+    _int_value,
     accumulate_stats,
+    config_stats_path,
     default_stats,
     load_stats,
+    normalize_stats,
     record_stats,
     save_stats,
 )
@@ -90,3 +100,65 @@ def test_save_and_record_stats_round_trip(tmp_path) -> None:
     assert out["by_source"]["ptt"] == 2
     assert out["by_source"]["retry"] == 1
     assert load_stats(path)["polish_tokens_total"] == 9
+
+
+def test_int_value_handles_none_and_bad_types() -> None:
+    assert _int_value(None) == 0
+    assert _int_value("abc") == 0
+    assert _int_value([1, 2]) == 0
+    assert _int_value("17") == 17
+    assert _int_value(3.7) == 3
+
+
+def test_float_value_handles_none_and_bad_types() -> None:
+    assert _float_value(None) == 0.0
+    assert _float_value("nope") == 0.0
+    assert _float_value({}) == 0.0
+    assert _float_value("1.5") == 1.5
+
+
+def test_normalize_stats_non_dict_returns_default() -> None:
+    out = normalize_stats("not a dict")
+    assert out["inference_requests_total"] == 0
+    assert out["by_source"] == {"ptt": 0, "vox": 0, "retry": 0}
+
+
+def test_config_stats_path_under_home() -> None:
+    p = config_stats_path()
+    assert p.name == "stats.json"
+    assert "voxium" in p.parts
+
+
+def test_save_stats_cleans_up_temp_on_write_failure(tmp_path, monkeypatch) -> None:
+    """If the atomic replace fails, the .tmp scratch file must not linger."""
+    path = tmp_path / "stats.json"
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ps_mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        save_stats({"inference_requests_total": 1}, path)
+    # The tmp file created by mkstemp must have been cleaned up by the
+    # finally/except branch in save_stats.
+    assert not list(tmp_path.glob(".stats.*.tmp"))
+
+
+def test_save_stats_swallows_unlink_oserror(tmp_path, monkeypatch) -> None:
+    """save_stats must still raise the original error even if cleanup fails."""
+    path = tmp_path / "stats.json"
+
+    def replace_boom(*_args, **_kwargs):
+        raise OSError("replace failed")
+
+    real_unlink = Path.unlink
+
+    def unlink_boom(self, *args, **kwargs):
+        if self.name.startswith(".stats."):
+            raise OSError("unlink failed")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(ps_mod.os, "replace", replace_boom)
+    monkeypatch.setattr(Path, "unlink", unlink_boom)
+    with pytest.raises(OSError, match="replace failed"):
+        save_stats({"inference_requests_total": 1}, path)

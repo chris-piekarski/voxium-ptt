@@ -314,3 +314,69 @@ def test_reset_clears_stream_buffer_too() -> None:
     polish_profile.reset()
     assert polish_profile.snapshot_stream() == []
     assert polish_profile.aggregate_stream().n == 0
+
+
+def test_safe_float_returns_none_for_non_dict_and_bad_values() -> None:
+    from voxium.polish_profile import _safe_float
+
+    assert _safe_float("not a dict", "x") is None
+    assert _safe_float({"x": None}, "x") is None
+    assert _safe_float({"x": "abc"}, "x") is None
+    assert _safe_float({"x": "1.5"}, "x") == 1.5
+    assert _safe_float({"x": 2}, "x") == 2.0
+
+
+def test_safe_int_returns_none_for_non_dict_and_bad_values() -> None:
+    from voxium.polish_profile import _safe_int
+
+    assert _safe_int(None, "x") is None
+    assert _safe_int({"x": None}, "x") is None
+    assert _safe_int({"x": "abc"}, "x") is None
+    assert _safe_int({"x": "5"}, "x") == 5
+    assert _safe_int({"x": 7.9}, "x") == 7
+
+
+def test_aggregate_slot_empty_returns_zeroed_stats() -> None:
+    from voxium.polish_profile import _aggregate_slot
+
+    s = _aggregate_slot("polish", [])
+    assert s.slot == "polish"
+    assert s.n == 0
+    assert s.n_ok == 0
+    assert s.last_model == "—"
+
+
+def test_fmt_helpers_handle_none_and_thresholds() -> None:
+    from voxium.polish_profile import (
+        _fmt_ms,
+        _fmt_rate,
+        _fmt_rtf,
+        _fmt_s,
+        _fmt_s_or_ms,
+        _fmt_tokens,
+    )
+
+    # None paths
+    assert _fmt_ms(None) == "—"
+    assert _fmt_s(None) == "—"
+    assert _fmt_rate(None) == "—"
+    assert _fmt_tokens(None) == "—"
+    assert _fmt_s_or_ms(None) == "—"
+    assert _fmt_rtf(None) == "—"
+
+    # ms branches
+    assert _fmt_ms(7.4).endswith("ms")  # <10 → .1f
+    assert _fmt_ms(50).endswith("ms")  # >=10 → .0f
+    assert _fmt_s(1.234) == "1.23s"
+
+    # rate branches
+    assert _fmt_rate(50).endswith("t/s")  # <100 → .1f
+    assert _fmt_rate(500).endswith("t/s")  # >=100 → .0f
+
+    # tokens
+    assert _fmt_tokens(3.7) == "4"
+
+    # s_or_ms branches
+    assert _fmt_s_or_ms(0.1).endswith("ms")  # <0.5 → ms
+    assert _fmt_s_or_ms(1.5).endswith("s")  # >=0.5 → s
+    assert _fmt_rtf(1.234) == "1.23"

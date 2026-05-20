@@ -79,3 +79,11 @@ def test_line_for_path_exists(tmp_path) -> None:
     p.write_text("x")
     line = _line_for_path(p)
     assert "\t" in line and str(p) in line
+
+
+def test_line_for_path_absent_prefix(tmp_path) -> None:
+    """Missing paths render with the '  (absent)' marker prefix."""
+    missing = tmp_path / "no-such-dir"
+    line = _line_for_path(missing)
+    assert line.startswith("  (absent) ")
+    assert str(missing) in line
