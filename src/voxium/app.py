@@ -2067,10 +2067,23 @@ def _start_vox_listening() -> bool:
     _stop_morse_audio()
     vox_ring = np.empty(0, dtype=np.float32)
     vox_chunker = UtteranceChunker(SAMPLE_RATE)
-    vox_stream = sd.InputStream(
-        samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=vox_audio_callback
-    )
-    vox_stream.start()
+    try:
+        new_vox_stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=vox_audio_callback
+        )
+        new_vox_stream.start()
+    except sd.PortAudioError as exc:
+        # Same failure mode as PTT (no default input device or driver hiccup);
+        # caller handles False by reverting to PTT and surfacing a notice.
+        vox_stream = None
+        vox_chunker = None
+        cli_log(
+            f"Microphone unavailable — VOX could not open the input stream ({exc}).",
+            "error",
+        )
+        beep_error()
+        return False
+    vox_stream = new_vox_stream
     vox_monitor_event.clear()
     vox_monitor_thread = threading.Thread(
         target=_vox_monitor_loop, daemon=True, name="VoxiumVoxHUD"
@@ -2750,7 +2763,7 @@ def _streaming_close_worker(
         pass
 
 
-def start_recording():
+def start_recording() -> bool:
 
     global stream, audio_chunks, target_window, current_audio_capture_info
     global audio_capture_statuses, recording_started_at
@@ -2765,10 +2778,30 @@ def start_recording():
     target_window = get_active_window()
     recording_started_at = time.perf_counter()
     _maybe_open_streaming_session()
-    stream = sd.InputStream(
-        samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback
-    )
-    stream.start()
+    try:
+        new_stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=audio_callback
+        )
+        new_stream.start()
+    except sd.PortAudioError as exc:
+        # No usable default input device (PortAudio returns device index -1) or a
+        # transient driver failure. Let the keyboard listener survive and surface
+        # a clear status instead of letting the exception kill the thread.
+        recording_started_at = None
+        _close_streaming_session(graceful=False)
+        cli_log(
+            f"Microphone unavailable — PTT capture aborted ({exc}). "
+            "Check that an input device is connected and enabled.",
+            "error",
+        )
+        beep_error()
+        set_terminal_title()
+        show_status(
+            STATUS_NO_AUDIO,
+            "No input device — connect a microphone and press PTT again.",
+        )
+        return False
+    stream = new_stream
     current_audio_capture_info = build_audio_capture_info(stream)
     recording_monitor_event.clear()
     recording_monitor_thread = threading.Thread(
@@ -2785,6 +2818,7 @@ def start_recording():
             f"still-air reminder: 2 blips every {RECORDING_REMINDER_INTERVAL_S:.0f}s (not PTT)"
         ),
     )
+    return True
 
 
 def stop_recording() -> np.ndarray:
@@ -3515,7 +3549,8 @@ def create_record_hotkey_handlers(hotkey):
             with state_lock:
                 if state == State.IDLE:
                     state = State.RECORDING
-                    start_recording()
+                    if not start_recording():
+                        state = State.IDLE
         elif action == PTT_ACTION_STOP:
             _finish_ptt_recording()
 
