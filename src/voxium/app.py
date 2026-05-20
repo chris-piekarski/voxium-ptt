@@ -2069,7 +2069,10 @@ def _start_vox_listening() -> bool:
     vox_chunker = UtteranceChunker(SAMPLE_RATE)
     try:
         new_vox_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=vox_audio_callback
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            callback=vox_audio_callback,
         )
         new_vox_stream.start()
     except sd.PortAudioError as exc:
