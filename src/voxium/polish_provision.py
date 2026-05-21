@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import datetime
 import io
+import json
 import os
 import platform
+import subprocess
 import sys
 import re
 import shutil
@@ -30,6 +33,16 @@ from voxium.polish_model_registry import (
 )
 
 _GH_LATEST_RELEASE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+
+# Compute capabilities baked into current llama.cpp upstream Windows release zips.
+# CUDA 13 dropped pre-Turing (SM < 75); CUDA 12 keeps the long tail and adds Blackwell.
+_VARIANT_ARCHS: dict[str, frozenset[int]] = {
+    "cpu": frozenset(),
+    "cuda12": frozenset({50, 61, 70, 75, 80, 86, 89, 90, 100, 120}),
+    "cuda13": frozenset({75, 80, 86, 89, 90, 100, 120}),
+}
+
+_RUNTIME_MANIFEST_NAME = "voxium-runtime.json"
 
 # HF hub tqdm: mirror a single status line to this sink (Rich Live / TUI) instead of stderr.
 _polish_hf_line_sink: Callable[[str], None] | None = None
@@ -157,6 +170,55 @@ def polish_model_download_spec(model_name: str | None) -> PolishDownloadSpec:
     )
 
 
+def _query_nvidia_compute_caps(
+    base_env: dict[str, str] | None = None,
+) -> list[tuple[int, int]]:
+    """Return (major, minor) compute capability for every visible NVIDIA GPU.
+
+    Empty list means nvidia-smi is unavailable or could not satisfy the query.
+    """
+    env = dict(os.environ)
+    if base_env:
+        env.update(base_env)
+    exe = shutil.which("nvidia-smi", path=env.get("PATH"))
+    if not exe:
+        return []
+    try:
+        result = subprocess.run(
+            [exe, "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    caps: list[tuple[int, int]] = []
+    for line in result.stdout.splitlines():
+        token = line.strip()
+        if not token or "." not in token:
+            continue
+        major_s, _, minor_s = token.partition(".")
+        try:
+            caps.append((int(major_s), int(minor_s)))
+        except ValueError:
+            continue
+    return caps
+
+
+def _max_nvidia_compute_cap(
+    base_env: dict[str, str] | None = None,
+) -> tuple[int, int] | None:
+    caps = _query_nvidia_compute_caps(base_env)
+    return max(caps) if caps else None
+
+
+def _compute_cap_to_sm(cc: tuple[int, int]) -> int:
+    return cc[0] * 10 + cc[1]
+
+
 def detect_windows_llama_cpp_variant(base_env: dict[str, str] | None = None) -> str:
     env = dict(os.environ)
     if base_env:
@@ -165,9 +227,92 @@ def detect_windows_llama_cpp_variant(base_env: dict[str, str] | None = None) -> 
     if forced in {"cpu", "cuda12", "cuda13"}:
         return forced
     path = env.get("PATH")
-    if shutil.which("nvidia-smi", path=path):
+    if not shutil.which("nvidia-smi", path=path):
+        return "cpu"
+    max_cc = _max_nvidia_compute_cap(base_env)
+    if max_cc is None:
+        # nvidia-smi present but compute_cap query failed; keep the legacy default.
+        return "cuda12"
+    if max_cc >= (12, 0):
+        # Blackwell and beyond — only cuda13 builds bake native SM 120.
+        return "cuda13"
+    if max_cc >= (5, 0):
         return "cuda12"
     return "cpu"
+
+
+def _runtime_manifest_path(runtime_dir: Path) -> Path:
+    return runtime_dir / _RUNTIME_MANIFEST_NAME
+
+
+def _write_runtime_manifest(
+    runtime_dir: Path,
+    *,
+    tag: str,
+    variant: str,
+    asset_name: str,
+    archs: frozenset[int] | set[int] | None = None,
+) -> None:
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    resolved = archs if archs is not None else _VARIANT_ARCHS.get(variant, frozenset())
+    payload = {
+        "tag": tag,
+        "variant": variant,
+        "asset_name": asset_name,
+        "archs": sorted(int(a) for a in resolved),
+        "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+    _runtime_manifest_path(runtime_dir).write_text(json.dumps(payload, indent=2))
+
+
+def _read_runtime_manifest(runtime_dir: Path) -> dict | None:
+    path = _runtime_manifest_path(runtime_dir)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _cached_runtime_matches_host(
+    runtime_dir: Path,
+    *,
+    base_env: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """(ok, reason). ok=False means we should re-provision."""
+    max_cc = _max_nvidia_compute_cap(base_env)
+    if max_cc is None:
+        # No usable NVIDIA on this host; any binary will fall back to CPU on its own.
+        return True, "no NVIDIA GPU detected"
+    host_sm = _compute_cap_to_sm(max_cc)
+    manifest = _read_runtime_manifest(runtime_dir)
+    if manifest is None:
+        return False, "no runtime manifest (unknown provenance)"
+    archs_raw = manifest.get("archs")
+    if not isinstance(archs_raw, list) or not archs_raw:
+        return False, "runtime manifest is missing archs list"
+    try:
+        archs = {int(a) for a in archs_raw}
+    except (TypeError, ValueError):
+        return False, "runtime manifest archs are not integers"
+    if host_sm in archs:
+        return True, f"host SM {host_sm} covered by runtime archs {sorted(archs)}"
+    return False, (
+        f"host SM {host_sm} (compute cap {max_cc[0]}.{max_cc[1]}) "
+        f"is not covered by runtime archs {sorted(archs)}"
+    )
+
+
+def _purge_stale_runtime(runtime_dir: Path, runtime_exe: Path) -> None:
+    for candidate in (runtime_exe, _runtime_manifest_path(runtime_dir)):
+        if candidate.is_file():
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
 
 def resolve_windows_llama_cpp_release(
@@ -310,17 +455,25 @@ def ensure_windows_llama_cpp_runtime(
     runtime_dir = llama_cpp_dir()
     runtime_exe = runtime_dir / "llama-server.exe"
     if runtime_exe.is_file():
-        release = LlamaCppRuntimeRelease(
-            tag="installed",
-            asset_name=runtime_exe.name,
-            download_url="",
-            variant=detect_windows_llama_cpp_variant(base_env),
-        )
+        ok, reason = _cached_runtime_matches_host(runtime_dir, base_env=base_env)
+        if ok:
+            release = LlamaCppRuntimeRelease(
+                tag="installed",
+                asset_name=runtime_exe.name,
+                download_url="",
+                variant=detect_windows_llama_cpp_variant(base_env),
+            )
+            if progress:
+                progress(
+                    f"llama.cpp runtime already present: {runtime_exe} ({release.variant})"
+                )
+            return runtime_exe, release
         if progress:
             progress(
-                f"llama.cpp runtime already present: {runtime_exe} ({release.variant})"
+                f"llama.cpp runtime at {runtime_exe} does not match this host — "
+                f"{reason}. Re-provisioning."
             )
-        return runtime_exe, release
+        _purge_stale_runtime(runtime_dir, runtime_exe)
     release = resolve_windows_llama_cpp_release(
         base_env=base_env,
         requests_get=requests_get,
@@ -345,6 +498,12 @@ def ensure_windows_llama_cpp_runtime(
         raise RuntimeError(
             f"Downloaded llama.cpp archive did not produce {runtime_exe}."
         )
+    _write_runtime_manifest(
+        runtime_dir,
+        tag=release.tag,
+        variant=release.variant,
+        asset_name=release.asset_name,
+    )
     if progress:
         progress(f"llama.cpp runtime ready: {runtime_exe}")
     return runtime_exe, release
@@ -439,12 +598,8 @@ def ensure_default_polish_assets(
     runtime_variant: str | None = None
     runtime_tag: str | None = None
     repo_local_runtime = repo_local_llama_server_binary(system_now)
-    if repo_local_runtime.is_file():
-        runtime_exe = repo_local_runtime.resolve()
-        runtime_dir = runtime_exe.parent
-        if progress:
-            progress(f"llama.cpp runtime already present: {runtime_exe}")
-    elif system_now == "Windows":
+    if system_now == "Windows":
+        # ensure_windows_llama_cpp_runtime owns the verify-vs-host + re-provision logic.
         runtime_exe, release = ensure_windows_llama_cpp_runtime(
             base_env=base_env,
             progress=progress,
@@ -453,6 +608,11 @@ def ensure_default_polish_assets(
         runtime_dir = runtime_exe.parent
         runtime_variant = release.variant
         runtime_tag = release.tag
+    elif repo_local_runtime.is_file():
+        runtime_exe = repo_local_runtime.resolve()
+        runtime_dir = runtime_exe.parent
+        if progress:
+            progress(f"llama.cpp runtime already present: {runtime_exe}")
     else:
         if progress:
             progress(
