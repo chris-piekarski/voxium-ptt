@@ -212,7 +212,9 @@ def _max_nvidia_compute_cap(
     base_env: dict[str, str] | None = None,
 ) -> tuple[int, int] | None:
     caps = _query_nvidia_compute_caps(base_env)
-    return max(caps) if caps else None
+    if not caps:
+        return None
+    return max(caps)
 
 
 def _compute_cap_to_sm(cc: tuple[int, int]) -> int:
@@ -287,6 +289,7 @@ def _cached_runtime_matches_host(
     if max_cc is None:
         # No usable NVIDIA on this host; any binary will fall back to CPU on its own.
         return True, "no NVIDIA GPU detected"
+    cc_major, cc_minor = max_cc
     host_sm = _compute_cap_to_sm(max_cc)
     manifest = _read_runtime_manifest(runtime_dir)
     if manifest is None:
@@ -301,7 +304,7 @@ def _cached_runtime_matches_host(
     if host_sm in archs:
         return True, f"host SM {host_sm} covered by runtime archs {sorted(archs)}"
     return False, (
-        f"host SM {host_sm} (compute cap {max_cc[0]}.{max_cc[1]}) "
+        f"host SM {host_sm} (compute cap {cc_major}.{cc_minor}) "
         f"is not covered by runtime archs {sorted(archs)}"
     )
 
