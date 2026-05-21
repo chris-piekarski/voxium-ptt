@@ -221,6 +221,12 @@ def _compute_cap_to_sm(cc: tuple[int, int]) -> int:
     return cc[0] * 10 + cc[1]
 
 
+def _format_compute_cap(cc: tuple[int, int] | None) -> str:
+    if not isinstance(cc, tuple) or len(cc) != 2:
+        return "unknown"
+    return f"{cc[0]}.{cc[1]}"
+
+
 def detect_windows_llama_cpp_variant(base_env: dict[str, str] | None = None) -> str:
     env = dict(os.environ)
     if base_env:
@@ -289,7 +295,6 @@ def _cached_runtime_matches_host(
     if max_cc is None:
         # No usable NVIDIA on this host; any binary will fall back to CPU on its own.
         return True, "no NVIDIA GPU detected"
-    cc_major, cc_minor = max_cc
     host_sm = _compute_cap_to_sm(max_cc)
     manifest = _read_runtime_manifest(runtime_dir)
     if manifest is None:
@@ -304,7 +309,7 @@ def _cached_runtime_matches_host(
     if host_sm in archs:
         return True, f"host SM {host_sm} covered by runtime archs {sorted(archs)}"
     return False, (
-        f"host SM {host_sm} (compute cap {cc_major}.{cc_minor}) "
+        f"host SM {host_sm} (compute cap {_format_compute_cap(max_cc)}) "
         f"is not covered by runtime archs {sorted(archs)}"
     )
 
