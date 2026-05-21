@@ -136,8 +136,10 @@ def test_ensure_windows_llama_cpp_runtime_skips_network_when_runtime_exists(
     def _boom(*args, **kwargs):
         raise AssertionError("network should not be used when runtime already exists")
 
+    # PATH="" so nvidia-smi is not found; the host is treated as CPU-only and any
+    # existing runtime binary is reused without manifest verification.
     runtime_exe, release = pp.ensure_windows_llama_cpp_runtime(
-        base_env={"VOXIUM_POLISH_RUNTIME": "cpu"},
+        base_env={"VOXIUM_POLISH_RUNTIME": "cpu", "PATH": ""},
         requests_get=_boom,
     )
 
@@ -288,3 +290,155 @@ def test_wrap_hf_download_progress_passthrough_without_bar() -> None:
     push = pp.wrap_hf_download_progress(emitted.append)
     push("Fetching from hub…")
     assert emitted == ["Fetching from hub…"]
+
+
+def _stub_compute_caps(monkeypatch, caps: list[tuple[int, int]]) -> None:
+    monkeypatch.setattr(pp, "_query_nvidia_compute_caps", lambda *a, **k: list(caps))
+
+
+def test_detect_variant_routes_blackwell_to_cuda13(monkeypatch) -> None:
+    monkeypatch.setattr(pp.shutil, "which", lambda name, path=None: "/bin/nvidia-smi")
+    _stub_compute_caps(monkeypatch, [(12, 0)])
+    assert pp.detect_windows_llama_cpp_variant({"PATH": "/bin"}) == "cuda13"
+
+
+def test_detect_variant_routes_ada_to_cuda12(monkeypatch) -> None:
+    monkeypatch.setattr(pp.shutil, "which", lambda name, path=None: "/bin/nvidia-smi")
+    _stub_compute_caps(monkeypatch, [(8, 9)])
+    assert pp.detect_windows_llama_cpp_variant({"PATH": "/bin"}) == "cuda12"
+
+
+def test_detect_variant_picks_max_capability(monkeypatch) -> None:
+    monkeypatch.setattr(pp.shutil, "which", lambda name, path=None: "/bin/nvidia-smi")
+    # Mixed cards: drive the variant from the highest capability.
+    _stub_compute_caps(monkeypatch, [(7, 5), (12, 0), (8, 6)])
+    assert pp.detect_windows_llama_cpp_variant({"PATH": "/bin"}) == "cuda13"
+
+
+def test_detect_variant_falls_back_to_cuda12_when_query_fails(monkeypatch) -> None:
+    monkeypatch.setattr(pp.shutil, "which", lambda name, path=None: "/bin/nvidia-smi")
+    _stub_compute_caps(monkeypatch, [])
+    # nvidia-smi present but compute_cap query empty/unreadable: stay on the legacy default.
+    assert pp.detect_windows_llama_cpp_variant({"PATH": "/bin"}) == "cuda12"
+
+
+def test_runtime_manifest_round_trip(tmp_path) -> None:
+    runtime_dir = tmp_path / "rt"
+    pp._write_runtime_manifest(
+        runtime_dir,
+        tag="b1234",
+        variant="cuda13",
+        asset_name="llama-b1234-bin-win-cuda-13.0-x64.zip",
+    )
+    manifest = pp._read_runtime_manifest(runtime_dir)
+    assert manifest is not None
+    assert manifest["tag"] == "b1234"
+    assert manifest["variant"] == "cuda13"
+    assert 120 in manifest["archs"] and 75 in manifest["archs"]
+    assert "installed_at" in manifest
+
+
+def test_read_runtime_manifest_missing_returns_none(tmp_path) -> None:
+    assert pp._read_runtime_manifest(tmp_path / "nonexistent") is None
+
+
+def test_cached_runtime_matches_host_no_nvidia_passes(monkeypatch, tmp_path) -> None:
+    _stub_compute_caps(monkeypatch, [])
+    ok, reason = pp._cached_runtime_matches_host(tmp_path)
+    assert ok is True
+    assert "no NVIDIA" in reason
+
+
+def test_cached_runtime_matches_host_missing_manifest_fails(
+    monkeypatch, tmp_path
+) -> None:
+    _stub_compute_caps(monkeypatch, [(12, 0)])
+    ok, reason = pp._cached_runtime_matches_host(tmp_path)
+    assert ok is False
+    assert "no runtime manifest" in reason
+
+
+def test_cached_runtime_matches_host_archs_must_cover_host_sm(
+    monkeypatch, tmp_path
+) -> None:
+    _stub_compute_caps(monkeypatch, [(12, 0)])
+    # Stale manifest mirroring the broken in-the-wild binary: max arch is 89, host is 120.
+    pp._write_runtime_manifest(
+        tmp_path,
+        tag="bstale",
+        variant="cuda12",
+        asset_name="llama-bstale-bin-win-cuda-12.x-x64.zip",
+        archs={50, 61, 70, 75, 80, 86, 89},
+    )
+    ok, reason = pp._cached_runtime_matches_host(tmp_path)
+    assert ok is False
+    assert "120" in reason and "89" in reason
+
+
+def test_cached_runtime_matches_host_archs_cover_host_passes(
+    monkeypatch, tmp_path
+) -> None:
+    _stub_compute_caps(monkeypatch, [(12, 0)])
+    pp._write_runtime_manifest(
+        tmp_path,
+        tag="bnew",
+        variant="cuda13",
+        asset_name="llama-bnew-bin-win-cuda-13.0-x64.zip",
+    )
+    ok, _ = pp._cached_runtime_matches_host(tmp_path)
+    assert ok is True
+
+
+def test_ensure_windows_llama_cpp_runtime_reprovisions_when_archs_dont_match(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("VOXIUM_REPO_ROOT", str(tmp_path))
+    runtime_dir = tmp_path / "tools" / "llama.cpp"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    stale_exe = runtime_dir / "llama-server.exe"
+    stale_exe.write_bytes(b"stale")
+    pp._write_runtime_manifest(
+        runtime_dir,
+        tag="bstale",
+        variant="cuda12",
+        asset_name="llama-bstale-bin-win-cuda-12.x-x64.zip",
+        archs={50, 61, 70, 75, 80, 86, 89},
+    )
+    # Host is Blackwell; manifest's max arch is 89 → re-provision must run.
+    _stub_compute_caps(monkeypatch, [(12, 0)])
+
+    # Stub the download/extract path to drop a fresh binary in place.
+    def _fake_resolve(*, base_env, requests_get):
+        _ = (base_env, requests_get)
+        return pp.LlamaCppRuntimeRelease(
+            tag="bfresh",
+            asset_name="llama-bfresh-bin-win-cuda-13.0-x64.zip",
+            download_url="https://example.test/fresh.zip",
+            variant="cuda13",
+        )
+
+    def _fake_download(url, destination, *, progress=None, requests_get=None):
+        _ = (url, progress, requests_get)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"archive")
+
+    def _fake_extract(zip_path, target_dir):
+        _ = zip_path
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / "llama-server.exe").write_bytes(b"fresh")
+
+    monkeypatch.setattr(pp, "resolve_windows_llama_cpp_release", _fake_resolve)
+    monkeypatch.setattr(pp, "_download_stream", _fake_download)
+    monkeypatch.setattr(pp, "_extract_zip_flat", _fake_extract)
+
+    runtime_exe, release = pp.ensure_windows_llama_cpp_runtime(base_env={})
+
+    assert runtime_exe.read_bytes() == b"fresh"
+    assert release.tag == "bfresh"
+    assert release.variant == "cuda13"
+    # Manifest must have been rewritten to reflect the fresh provision.
+    manifest = pp._read_runtime_manifest(runtime_dir)
+    assert manifest is not None
+    assert manifest["tag"] == "bfresh"
+    assert manifest["variant"] == "cuda13"
+    assert 120 in manifest["archs"]

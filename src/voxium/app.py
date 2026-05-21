@@ -103,6 +103,7 @@ from voxium.model_registry import (
 from voxium.morse_audio import MorseAudioController
 from voxium.llama_cpp_daemon import (
     ManagedLlamaCpp,
+    default_llama_server_path,
     ensure_llama_cpp_daemon,
     llama_server_cli_path,
     stop_managed_llama_cpp,
@@ -1422,7 +1423,19 @@ def ensure_llama_cpp_for_polish(
             _emit(str(exc), "warning")
             sleep_idle_seconds = -1
 
-        if os.name == "nt" and not llama_server_cli_path(cli_cmd, base_env=os.environ):
+        # Always ensure the repo-local Windows runtime is healthy unless the operator
+        # explicitly pointed --llama-server-cli at an external binary. The provisioner
+        # short-circuits when the cached binary matches the host GPU; otherwise it
+        # re-downloads. This catches stale binaries baked without the host's SM.
+        repo_local_path = (
+            str(default_llama_server_path().resolve()) if os.name == "nt" else None
+        )
+        resolved_cli = llama_server_cli_path(cli_cmd, base_env=os.environ)
+        uses_repo_local = bool(
+            resolved_cli is None
+            or (repo_local_path and resolved_cli == repo_local_path)
+        )
+        if os.name == "nt" and uses_repo_local:
             try:
                 ensure_windows_llama_cpp_runtime(
                     base_env=dict(os.environ),
