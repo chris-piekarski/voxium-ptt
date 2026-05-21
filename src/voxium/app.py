@@ -108,6 +108,8 @@ from voxium.llama_cpp_daemon import (
     llama_server_cli_path,
     stop_managed_llama_cpp,
 )
+from voxium.inference_health import get_health as get_inference_health
+from voxium.inference_health_client import WhisperHealthPoller
 from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
 from voxium.paths import (
     default_server_log_path,
@@ -279,6 +281,7 @@ morse_audio_controller: MorseAudioController | None = None
 _llama_cpp_polish_ready_checked: bool = False
 _llama_cpp_ux_ready_checked: bool = False
 server_log_handle = None
+_whisper_health_poller: Any = None
 
 
 _last_hotkey_time: float = 0.0
@@ -1374,6 +1377,12 @@ def ensure_llama_cpp_for_polish(
     if not getattr(config, "llama_cpp_auto_start", True):
         ok, _reason = llama_cpp_reachable(base_url, timeout=1.0)
         _llama_cpp_polish_ready_checked = ok
+        if ok:
+            get_inference_health("polish").record_ok()
+        else:
+            get_inference_health("polish").record_error(
+                f"polish daemon unreachable: {_reason}"
+            )
         if not ok:
             feature = (
                 "UX chatter"
@@ -1466,6 +1475,12 @@ def ensure_llama_cpp_for_polish(
             managed_llama_cpp = managed
         ok, _reason = llama_cpp_reachable(base_url, timeout=1.0)
         _llama_cpp_polish_ready_checked = ok
+        if ok:
+            get_inference_health("polish").record_ok()
+        else:
+            get_inference_health("polish").record_error(
+                f"polish daemon unreachable after startup: {_reason}"
+            )
         for msg, level in entries:
             _emit(msg, level)
         return list(entries)
@@ -2906,7 +2921,7 @@ def is_client_shutting_down() -> bool:
 
 def cleanup_client_runtime():
 
-    global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, morse_audio_controller, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked
+    global stream, state, recording_monitor_thread, ptt_status_box, managed_llama_cpp, morse_audio_controller, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked, _whisper_health_poller
     _stop_morse_audio()
     morse_audio_controller = None
     _stop_vox_listening()
@@ -2949,6 +2964,11 @@ def cleanup_client_runtime():
             ptt_status_box.close()
         finally:
             ptt_status_box = None
+    if _whisper_health_poller is not None:
+        try:
+            _whisper_health_poller.stop()
+        finally:
+            _whisper_health_poller = None
     if managed_llama_cpp is not None:
         try:
             stop_managed_llama_cpp(managed_llama_cpp)
@@ -3017,6 +3037,7 @@ def maybe_polish_transcript(raw_text: str) -> str:
                 }
             },
         )
+        get_inference_health("polish").record_error(error)
 
     body["model"] = attempted_model
     try:
@@ -3080,6 +3101,24 @@ def maybe_polish_transcript(raw_text: str) -> str:
         polish=pl if isinstance(pl, dict) else None,
         extra_metrics=extra if isinstance(extra, dict) else None,
     )
+    # The whisper server may return 200 with applied=False when the underlying
+    # llama-server replied empty or errored; surface that as a polish error too.
+    polish_applied = True
+    if isinstance(pl, dict) and pl.get("applied") is False:
+        polish_applied = False
+    polish_err = (
+        str(pl.get("error") or "").strip()
+        if isinstance(pl, dict) and pl.get("error")
+        else ""
+    )
+    if polish_applied and not polish_err:
+        get_inference_health("polish").record_ok()
+    elif polish_err:
+        get_inference_health("polish").record_error(polish_err)
+    else:
+        get_inference_health("polish").record_error(
+            "polish did not apply (no text returned)"
+        )
     if not config.minimal:
         pol = pl if isinstance(pl, dict) else {}
         try:
@@ -4330,7 +4369,7 @@ def _pull_polish_models_to_repo_cache(
 
 def run_client(args, _raw_argv: list[str]) -> int:
 
-    global config, history, ptt_status_box, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked
+    global config, history, ptt_status_box, _llama_cpp_polish_ready_checked, _llama_cpp_ux_ready_checked, _whisper_health_poller
     client_shutdown_event.clear()
 
     ensure_runtime_dirs()
@@ -4347,6 +4386,9 @@ def run_client(args, _raw_argv: list[str]) -> int:
         if not config.minimal
         else None
     )
+    if not config.minimal:
+        _whisper_health_poller = WhisperHealthPoller(str(config.server_url or ""))
+        _whisper_health_poller.start()
     hotkeys_adjusted = apply_runtime_hotkey_safety(config) or getattr(
         config,
         "_config_hotkeys_adjusted",
