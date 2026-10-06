@@ -461,7 +461,7 @@ class FakeSessionPort:
 
     def paste_for_agent(self, text: str, window: Any) -> int:
         if window is None:
-            raise ValueError("no window")
+            return -1  # paste cannot proceed without a target
         self._paste_calls.append((text, window))
         return 0  # success
 

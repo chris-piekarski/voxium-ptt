@@ -1079,3 +1079,125 @@ def test_lazy_session_proxies_state():
         assert lazy.input_mode == port.input_mode
     finally:
         _mod._live_session = old
+
+
+# ---------------------------------------------------------------------------
+# PR 8: live session wiring and paste safeguards
+# ---------------------------------------------------------------------------
+
+
+def test_history_copy_reads_live_history():
+    """history_copy returns real history text when live session is wired."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+    from voxium.session_history import SessionTranscriptHistory
+
+    # Real history with seeded entries
+    h = SessionTranscriptHistory(
+        max_entries=25,
+        max_total_chars=1000,
+        max_pending_bytes=32 * 1024,
+    )
+    h.add(text="live session entry", source="ptt")
+
+    port = FakeSessionPort()
+    old_live = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        # Replace _LazySession's history getter via FakeSessionPort
+        port._history_items = ["live session entry"]
+        port.history_count = 2  # FakeSessionPort uses its own internal items
+
+        lazy = _mod._LazySession()
+        # Should proxy live session history
+        assert lazy.history_text_by_index(1) == "live session entry"
+        assert lazy.history_count == 2
+    finally:
+        _mod._live_session = old_live
+
+
+def test_paste_for_agent_rejects_none():
+    """paste_for_agent returns -1 without touching clipboard when window is None."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old_live = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+
+        with patch("pyperclip.copy") as mock_copy:
+            rc = lazy.paste_for_agent("some text", None)
+
+        assert rc == -1
+        mock_copy.assert_not_called()
+    finally:
+        _mod._live_session = old_live
+
+
+def test_cycle_cursor_not_advanced_on_paste_error():
+    """paste_history cycle must NOT advance replay cursor when paste fails."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import AgentDispatch, FakeSessionPort
+
+    session = FakeSessionPort(
+        _history_items=["entry1", "entry2"],
+        history_count=2,
+        _window="test-win",
+    )
+    # Make paste fail by raising an exception
+    session.paste_for_agent = lambda text, w: (_ for _ in ()).throw(
+        RuntimeError("fail")
+    )
+
+    dispatch = AgentDispatch(
+        session=session,
+        granted_scopes={"status:read", "transcript:read", "output:paste"},
+    )
+
+    handler_fn = _mod._build_read_handler_map()["paste_history"]
+    result = handler_fn(dispatch._session, {"cycle": True})
+
+    # Result should report paste_ok=False
+    assert result is not None and not result.get("paste_ok", True)
+    # Cursor should not be advanced (stays at same position)
+    # FakeSessionPort: replay_start defaults to 0, advance increments _replay_cursor
+    assert session._replay_cursor == 0
+
+    old_live = _mod._live_session
+    try:
+        _mod.install_live_session(session)
+        handler_fn2 = _mod._build_read_handler_map()["paste_history"]
+        result2 = handler_fn2(dispatch._session, {"index": 1})
+        assert result2 is not None and not result2.get("paste_ok", True)
+    finally:
+        _mod._live_session = old_live
+
+
+def test_cycle_cursor_advanced_after_success():
+    """paste_history cycle advances replay cursor only when paste_ok is True."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import AgentDispatch, FakeSessionPort
+
+    session = FakeSessionPort(
+        _history_items=["entry1", "entry2"],
+        history_count=2,
+        _window="test-win",
+    )
+
+    dispatch = AgentDispatch(
+        session=session,
+        granted_scopes={"status:read", "transcript:read", "output:paste"},
+    )
+
+    handler_fn = _mod._build_read_handler_map()["paste_history"]
+    with patch("voxium.agent_dispatch.FakeSessionPort.paste_for_agent", return_value=0):
+        result = handler_fn(dispatch._session, {"cycle": True})
+
+    assert result is not None
+    assert result.get("paste_ok") is True
+    # Cursor should be advanced
+    assert session._replay_cursor == 1

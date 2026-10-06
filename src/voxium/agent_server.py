@@ -731,16 +731,9 @@ def _build_read_handler_map() -> dict[str, Callable]:
                     "Replay cursor at end of history.",
                 )
             idx, text = res
-            if has_index and ri.get("index") is not None:
-                idx = ri["index"]
         target = _session.get_active_window()
         if target is None:
             return _tool_error("no_target_window", "No active window for paste.")
-        if has_cycle:
-            try:
-                _session.advance_replay_cursor()
-            except Exception:  # noqa: BLE001, S110
-                pass
         paste_ok = True
         try:
             rc = _session.paste_for_agent(text, target)
@@ -748,6 +741,13 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 paste_ok = False
         except Exception:  # noqa: BLE001
             paste_ok = False
+        # Advance replay cursor only after paste succeeds
+        # no_target_window / paste_failed must not advance the cursor
+        if has_cycle and paste_ok:
+            try:
+                _session.advance_replay_cursor()
+            except Exception:  # noqa: BLE001, S110
+                pass
         return {
             "index": idx,
             "chars": len(text),

@@ -183,10 +183,147 @@ class _PynputKeyboardProxy:
         return getattr(self._ensure(), name)
 
 
+class _LiveSessionProxy:
+    """SessionPort adapter that reads live client state from app.py globals.
+
+    Wired via ``install_live_session`` during ``run_client`` so that agent
+    tools get real state, history, and paste operations instead of stubs.
+    """
+
+    def __init__(self):
+        self._replay_cursor: int = 0
+
+    @property
+    def state(self):
+        return state
+
+    @property
+    def input_mode(self):
+        return input_mode
+
+    @property
+    def is_shutting_down(self):
+        return is_client_shutting_down()
+
+    @property
+    def inflight(self):
+        return set()
+
+    @property
+    def active_hotkey(self):
+        return None
+
+    @property
+    def paste_debounce_remaining_ms(self):
+        import time as _time
+
+        delta = _time.time() * 1000 - _last_paste_time
+        if delta < PASTE_DEBOUNCE_MS:
+            return PASTE_DEBOUNCE_MS - delta
+        return 0.0
+
+    @property
+    def has_pending_audio(self):
+        global vox_pending_audio
+        if vox_pending_audio is not None:
+            return len(vox_pending_audio) > 0
+        return False
+
+    @property
+    def agent_ptt_open(self):
+        return False
+
+    @property
+    def history_count(self):
+        h = get_transcript_history()
+        if h is None:
+            return 0
+        return h.total_entries()
+
+    def get_active_window(self):
+        return get_active_window()
+
+    def history_text_by_index(self, index: int):
+        h = get_transcript_history()
+        if h is None:
+            return None
+        entry = h.get_entry(index)
+        if entry is None:
+            return None
+        return entry.get("text")
+
+    def history_list_entries(self, limit: int = 25, query: str = ""):
+        h = get_transcript_history()
+        if h is None:
+            return []
+        return h.iter_entries(limit=limit, query=query)
+
+    def next_replay_cursor_index(self):
+        """
+        Peek at the next history entry for replay cursor (does not advance).
+
+        Returns ``(1-based_index, text)`` or ``None`` when history is empty.
+        """
+        h = get_transcript_history()
+        if h is None:
+            return None
+        with h._lock:
+            n = len(h._entries)
+        if n == 0:
+            return None
+        i = self._replay_cursor % n
+        text = h.text_by_display_index(i + 1)
+        if text is None:
+            return None
+        return (i + 1, text)
+
+    def advance_replay_cursor(self):
+        """Advance the replay cursor by one position."""
+        self._replay_cursor += 1
+
+    def paste_for_agent(self, text: str, window):
+        """
+        Paste ``text`` into ``window`` using the same key injection as paste_text.
+
+        Returns 0 on success, non-zero if window is None.
+        Must not hold locks across sleep or key injection.
+        """
+        if window is None:
+            return -1
+        import time as _t
+
+        # Write clipboard
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            return -1
+        _t.sleep(0.05)
+
+        # Focus target and inject paste keys
+        focus_window(window)
+        _t.sleep(0.05)
+
+        _is_terminal = is_terminal_window(window) if window else False
+        if SYSTEM == "Linux":
+            key = "ctrl+shift+v" if _is_terminal else "ctrl+v"
+            subprocess.run(
+                ["xdotool", "key", "--clearmodifiers", "--delay", "50", key],
+                stderr=subprocess.DEVNULL,
+            )
+        elif SYSTEM == "Windows":
+            import pyautogui
+
+            pyautogui.hotkey("ctrl", "v")
+        elif SYSTEM == "Darwin":
+            import pyautogui
+
+            pyautogui.hotkey("command", "v")
+
+        return 0
+
+
 sd: Any = _SoundDeviceProxy()
 keyboard: Any = _PynputKeyboardProxy()
-
-SYSTEM = platform.system()
 
 
 TERMINALS = {
@@ -4537,6 +4674,12 @@ def run_client(args, _raw_argv: list[str]) -> int:
     from voxium.session_history import _set_session_history
 
     _set_session_history(history)
+
+    # PR 7: wire live session adapter for agent MCP tools
+    # Install a SessionPort that reads real state, history, and paste ops
+    from voxium.agent_server import install_live_session
+
+    install_live_session(_LiveSessionProxy())
 
     if not config.quiet and not config.minimal:
         from voxium.startup_banner import get_startup_hostname, show_startup_banner
