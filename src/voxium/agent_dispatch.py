@@ -178,11 +178,6 @@ class AgentDispatch:
                 message=f"Unknown tool: {tool_name}",
             ).to_dict()
 
-        # --- Idempotent success: ptt_engage while RECORDING ---
-        # Must not call start-recording hook, not an error code.
-        if tool_name == "ptt_engage" and self._session.state == ClientState.RECORDING:
-            return ToolResult(data={"ok": True, "already_recording": True}).to_dict()
-
         # --- Scope gate ---
         if not tool_def.scopes.issubset(self._granted):
             return ToolError(
@@ -190,12 +185,19 @@ class AgentDispatch:
                 message=f"Insufficient scope for tool '{tool_name}'.",
             ).to_dict()
 
-        # --- Shutting down ---
+        # --- Shutting down (before idempotent success) ---
         if self._session.is_shutting_down:
             return ToolError(
                 code="shutting_down",
                 message="Client is shutting down.",
             ).to_dict()
+
+        # --- Idempotent success: ptt_engage while RECORDING ---
+        # After scope + shutting_down so an unscoped caller gets scope_denied
+        # even when already recording.  Before rate-limit/busy so no tokens
+        # are consumed and no start-recording hook fires.
+        if tool_name == "ptt_engage" and self._session.state == ClientState.RECORDING:
+            return ToolResult(data={"ok": True, "already_recording": True}).to_dict()
 
         # --- Validate input against schema ---
         schema_error = _validate_input(raw_input, tool_def.input_schema)

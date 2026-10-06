@@ -26,3 +26,5 @@ class VoxiumUserConfig(BaseModel):
     ux_chatter: dict[str, Any] = Field(default_factory=dict)
     # Microphone gain (0-10 scale, radio-style). Default auto mode with manual override via +/- keys.
     audio: dict[str, Any] = Field(default_factory=dict)
+    # Opt-in MCP control-plane listener. Bind to 127.0.0.1, bearer auth, scoped tools.
+    agent: dict[str, Any] = Field(default_factory=dict)
