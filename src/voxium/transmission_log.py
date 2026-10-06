@@ -153,7 +153,22 @@ class TransmissionLog:
     # ---- Internal ----
 
     def _evict_if_needed(self) -> None:
-        """Drop oldest records when the cap is exceeded."""
+        """
+        Drop oldest records when the cap is exceeded.
+
+        Evicted records are removed from ``_active_ids`` and the logic
+        prefers dropping **finished** records before active ones (so the
+        agent can still track ongoing transmissions).
+        """
         while len(self._records) > self._max_records:
-            oldest_tid = min(self._records.keys())
-            del self._records[oldest_tid]
+            # dict is insertion-ordered; keys are monotonic tids.
+            # Prefer finished records (state != "transcribing") first.
+            finished = [
+                tid for tid, rec in self._records.items() if rec.state != "transcribing"
+            ]
+            if finished:
+                to_drop = min(finished)  # oldest finished record
+            else:
+                to_drop = min(self._records.keys())  # fallback: oldest active
+            del self._records[to_drop]
+            self._active_ids.discard(to_drop)

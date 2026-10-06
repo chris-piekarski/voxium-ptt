@@ -208,3 +208,76 @@ def test_thread_safety_concurrent_begins():
     assert len(ids) == 20
     assert len(set(ids)) == 20  # all unique
     assert log.record_count() == 20
+
+
+# ---------------------------------------------------------------------------
+# Eviction must discard active_ids and prefer finished records
+# ---------------------------------------------------------------------------
+
+
+def test_eviction_discards_active_ids():
+    """
+    When a record is dropped by eviction, its id must be removed from
+    _active_ids. Eviction prefers dropping finished records. has_active
+    must not return True for evicted records.
+    """
+    log = TransmissionLog(max_records=3)
+    t1 = log.begin()
+    t2 = log.begin()
+    log.finish(t2, state="completed")  # t2 is finished
+    t3 = log.begin()
+    t4 = log.begin()  # triggers eviction (cap=3)
+
+    # t2 (finished) is evicted first — it's the only completed record
+    assert log.get(t2) is None
+    assert t2 not in log._active_ids  # active_ids cleaned up
+
+    # Active records survive eviction
+    assert log.get(t1) is not None
+    assert log.has_active(t1) is True
+    assert log.get(t3) is not None
+    assert log.get(t4) is not None
+
+
+def test_eviction_prefers_dropping_finished_records():
+    """
+    Eviction must prefer dropping finished records over active ones.
+    An active record should survive even if it is not the newest.
+    """
+    log = TransmissionLog(max_records=3)
+    t1 = log.begin()
+    log.finish(t1, state="completed")  # finished
+    t2 = log.begin()
+    log.finish(t2, state="completed")  # finished
+    t3 = log.begin()  # active
+    _ = log.begin()  # triggers eviction (cap=3)
+
+    # t3 is active — should survive
+    assert log.has_active(t3) is True
+    assert log.get(t3) is not None
+
+
+def test_active_set_matches_extant_records():
+    """
+    After heavy churn, the active-set must only contain ids for
+    records that still exist in _records.
+    """
+    log = TransmissionLog(max_records=4)
+    begins = []
+    for i in range(8):
+        tid = log.begin()
+        begins.append(tid)
+        # Finish every other record
+        if i % 2 == 0:
+            log.finish(tid, state="no_speech")
+
+    # Verify every active id has a corresponding record
+    for active_id in log._active_ids:
+        rec = log.get(active_id)
+        assert rec is not None, f"active id {active_id} has no record"
+
+    # Verify no non-active id falsely appears as active
+    all_ids = set(begins)
+    for tid in all_ids:
+        if tid not in log._active_ids:
+            assert log.has_active(tid) is False

@@ -11,6 +11,7 @@ from voxium.agent_dispatch import (
     InflightFlag,
     TokenBucket,
 )
+from voxium.agent_protocol import VALID_ERROR_CODES
 
 # ---------------------------------------------------------------------------
 # Helper: reset shared buckets before tests that depend on specific state
@@ -37,14 +38,18 @@ def test_fake_idle():
     assert fp.state == ClientState.IDLE
     assert fp.input_mode == "ptt"
     assert fp.inflight == set()
+    assert fp.agent_ptt_open is False
 
 
 def test_fake_recording_makes_dispatch_busy():
+    """ptt_engage while RECORDING returns idempotent success, not an error."""
+    _reset_mutable_bucket()
     fp = FakeSessionPort(state=ClientState.RECORDING)
     dispatch = AgentDispatch(fp, {"status:read", "input:ptt"})
     result = dispatch.dispatch("ptt_engage", {})
-    # ptt_engage while RECORDING = already_recording -> no session_busy
-    assert result["ok"] or result.get("error", {}).get("code") != "session_busy"
+    # Must be ok=True with already_recording flag — not session_busy, not internal
+    assert result["ok"] is True
+    assert result["data"]["already_recording"] is True
 
 
 @pytest.mark.linux
@@ -55,6 +60,7 @@ def test_fake_recording_refuses_vox():
     result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "state"
     assert result["error"]["details"]["state"] == "recording"
 
 
@@ -66,6 +72,8 @@ def test_fake_recording_refuses_paste():
     result = dispatch.dispatch("paste_history", {"index": 1})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "state"
+    assert result["error"]["details"]["state"] == "recording"
 
 
 @pytest.mark.linux
@@ -76,6 +84,8 @@ def test_fake_recording_refuses_retransmit():
     result = dispatch.dispatch("retransmit_last", {})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "state"
+    assert result["error"]["details"]["state"] == "recording"
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +104,7 @@ def test_inflight_retransmit_makes_busy():
     result = dispatch.dispatch("ptt_engage", {})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "retransmit"
 
 
 @pytest.mark.linux
@@ -107,6 +118,7 @@ def test_inflight_slash_apply_makes_busy():
     result = dispatch.dispatch("ptt_engage", {})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "slash_apply"
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +134,8 @@ def test_transcribing_makes_busy():
     result = dispatch.dispatch("ptt_engage", {})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "state"
+    assert result["error"]["details"]["state"] == "transcribing"
 
 
 @pytest.mark.linux
@@ -132,6 +146,8 @@ def test_command_input_makes_busy():
     result = dispatch.dispatch("ptt_engage", {})
     assert not result["ok"]
     assert result["error"]["code"] == "session_busy"
+    assert result["error"]["details"]["reason"] == "state"
+    assert result["error"]["details"]["state"] == "command_input"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +274,16 @@ def test_tool_list_filtered():
 
 
 # ---------------------------------------------------------------------------
+# Protocol contracts
+# ---------------------------------------------------------------------------
+
+
+def test_already_recording_not_in_error_codes():
+    """already_recording is a success flag, not an error code."""
+    assert "already_recording" not in VALID_ERROR_CODES
+
+
+# ---------------------------------------------------------------------------
 # TokenBucket refill
 # ---------------------------------------------------------------------------
 
@@ -272,3 +298,136 @@ def test_bucket_refill():
     # Wait for refill
     time.sleep(0.05)  # 50ms at 100/s -> ~5 tokens
     assert bucket.acquire()[0] is True
+
+
+# ---------------------------------------------------------------------------
+# paste_debounced only rejects paste_history, not ptt_release or ptt_engage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.linux
+def test_paste_debounced_rejects_paste_history():
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(paste_debounce_remaining_ms=250)
+    dispatch = AgentDispatch(fp, {"output:paste", "transcript:read"})
+    result = dispatch.dispatch("paste_history", {"index": 1})
+    assert not result["ok"]
+    assert result["error"]["code"] == "paste_debounced"
+
+
+@pytest.mark.linux
+def test_paste_debounced_allows_ptt_release():
+    """paste_debounced must not reject ptt_release."""
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(paste_debounce_remaining_ms=250)
+    dispatch = AgentDispatch(fp, {"input:ptt"})
+    result = dispatch.dispatch("ptt_release", {})
+    # ptt_release returns early from _check_session_busy -> never hits paste_debounce
+    assert result.get("error", {}).get("code") != "paste_debounced"
+
+
+# ---------------------------------------------------------------------------
+# hotkey_held rejects ptt_engage, paste_history, retransmit_last, input_mode_set
+# but NOT ptt_release
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.linux
+def test_hotkey_held_rejects_ptt_engage():
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(active_hotkey="f9")
+    dispatch = AgentDispatch(fp, {"input:ptt"})
+    result = dispatch.dispatch("ptt_engage", {})
+    assert not result["ok"]
+    assert result["error"]["code"] == "hotkey_held"
+
+
+@pytest.mark.linux
+def test_hotkey_held_rejects_paste_history():
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(active_hotkey="f9")
+    dispatch = AgentDispatch(fp, {"output:paste", "transcript:read"})
+    result = dispatch.dispatch("paste_history", {"index": 1})
+    assert not result["ok"]
+    assert result["error"]["code"] == "hotkey_held"
+
+
+@pytest.mark.linux
+def test_hotkey_held_rejects_retransmit_last():
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(active_hotkey="f9")
+    dispatch = AgentDispatch(fp, {"session:retransmit"})
+    result = dispatch.dispatch("retransmit_last", {})
+    assert not result["ok"]
+    assert result["error"]["code"] == "hotkey_held"
+
+
+@pytest.mark.linux
+def test_hotkey_held_rejects_input_mode_set():
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(active_hotkey="f9")
+    dispatch = AgentDispatch(fp, {"input:vox"})
+    result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
+    assert not result["ok"]
+    assert result["error"]["code"] == "hotkey_held"
+
+
+@pytest.mark.linux
+def test_hotkey_held_allows_ptt_release():
+    """hotkey_held must NOT reject ptt_release."""
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(active_hotkey="f9")
+    dispatch = AgentDispatch(fp, {"input:ptt"})
+    result = dispatch.dispatch("ptt_release", {})
+    # ptt_release returns early from _check_session_busy -> never hits hotkey check
+    assert result.get("error", {}).get("code") != "hotkey_held"
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit exemption: agent_ptt_open on session, disarm
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.linux
+def test_ptt_release_skips_rate_limit_when_ptt_open():
+    """ptt_release skips mutation bucket when agent_ptt_open is True."""
+    # Exhaust mutable bucket
+    AgentDispatch._mutable_bucket = TokenBucket(capacity=0, refill_per_second=0)
+    fp = FakeSessionPort(agent_ptt_open=True)
+    dispatch = AgentDispatch(fp, {"input:ptt"})
+    result = dispatch.dispatch("ptt_release", {})
+    # ptt_release should not be rate-limited (exempt via agent_ptt_open)
+    assert result.get("error", {}).get("code") != "rate_limited"
+
+
+@pytest.mark.linux
+def test_ptt_release_charged_when_not_ptt_open():
+    """ptt_release is charged from mutation bucket when agent_ptt_open is False."""
+    AgentDispatch._mutable_bucket = TokenBucket(capacity=0, refill_per_second=0)
+    fp = FakeSessionPort(agent_ptt_open=False)
+    dispatch = AgentDispatch(fp, {"input:ptt"})
+    result = dispatch.dispatch("ptt_release", {})
+    assert not result["ok"]
+    assert result["error"]["code"] == "rate_limited"
+
+
+@pytest.mark.linux
+def test_disarm_skips_rate_limit():
+    """input_mode_set to ptt while mode is vox (disarm) skips mutation bucket."""
+    AgentDispatch._mutable_bucket = TokenBucket(capacity=0, refill_per_second=0)
+    fp = FakeSessionPort(input_mode="vox")
+    dispatch = AgentDispatch(fp, {"input:vox"})
+    result = dispatch.dispatch("input_mode_set", {"mode": "ptt"})
+    # disarm is exempt from rate limit
+    assert result.get("error", {}).get("code") != "rate_limited"
+
+
+@pytest.mark.linux
+def test_other_mutations_still_charged_when_bucket_empty():
+    """clipboard_set and other non-exempt mutations are still rate-limited."""
+    AgentDispatch._mutable_bucket = TokenBucket(capacity=0, refill_per_second=0)
+    fp = FakeSessionPort(agent_ptt_open=True)
+    dispatch = AgentDispatch(fp, {"clipboard:write"})
+    result = dispatch.dispatch("clipboard_set", {"text": "hello"})
+    assert not result["ok"]
+    assert result["error"]["code"] == "rate_limited"

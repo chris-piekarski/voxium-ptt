@@ -10,7 +10,7 @@ import time
 from enum import Enum
 from typing import Any, Protocol
 
-from voxium.agent_protocol import ToolError
+from voxium.agent_protocol import ToolError, ToolResult
 from voxium.agent_tools import (
     TOOLS_BY_NAME,
     ToolDefinition,
@@ -63,6 +63,8 @@ class SessionPort(Protocol):
     def history_count(self) -> int: ...
     @property
     def is_shutting_down(self) -> bool: ...
+    @property
+    def agent_ptt_open(self) -> bool: ...  # ptt_engage was accepted; release is exempt
 
     def get_active_window(self) -> Any: ...
     def history_text_by_index(self, index: int) -> str | None: ...
@@ -113,15 +115,15 @@ class TokenBucket:
                 return True, 0
             # Estimate recovery time
             needed = 1.0 - self._tokens
-            ms = int((needed / self._refill) * 1000) + 1
+            if self._refill <= 0:
+                ms = 1000  # fallback when refill is disabled
+            else:
+                ms = int((needed / self._refill) * 1000) + 1
             return False, ms
 
 
-# Mutable exemption state — set by the dispatch layer when ptt_engage / disarm
-# puts the system into a state where release/disarm should not be charged.
-# These exist as module-level singletons because the test harness needs access.
-_agent_ptt_open = threading.local()
-_agent_ptt_open.value = False
+# Mutable exemption state is exposed via the session's agent_ptt_open
+# property; dispatch reads it from session to determine rate-exemptions.
 
 # ---------------------------------------------------------------------------
 # Dispatch
@@ -176,6 +178,11 @@ class AgentDispatch:
                 message=f"Unknown tool: {tool_name}",
             ).to_dict()
 
+        # --- Idempotent success: ptt_engage while RECORDING ---
+        # Must not call start-recording hook, not an error code.
+        if tool_name == "ptt_engage" and self._session.state == ClientState.RECORDING:
+            return ToolResult(data={"ok": True, "already_recording": True}).to_dict()
+
         # --- Scope gate ---
         if not tool_def.scopes.issubset(self._granted):
             return ToolError(
@@ -199,7 +206,7 @@ class AgentDispatch:
         is_mutation = not tool_def.idempotent
         is_read = tool_def.idempotent
 
-        if is_mutation and not _is_rate_exempt(tool_name):
+        if is_mutation and not _is_rate_exempt(tool_name, self._session, raw_input):
             ok, retry_ms = self._mutable_bucket.acquire()
             if not ok:
                 return ToolError(
@@ -224,16 +231,29 @@ class AgentDispatch:
             if busy:
                 return busy.to_dict()
 
-            # Hotkey held?
-            if self._session.active_hotkey is not None:
+            # Hotkey held? (applies to: ptt_engage, paste_history, retransmit_last,
+            # input_mode_set — ptt_release returns early from busy check)
+            if (
+                tool_name
+                in {
+                    "ptt_engage",
+                    "paste_history",
+                    "retransmit_last",
+                    "input_mode_set",
+                }
+                and self._session.active_hotkey is not None
+            ):
                 return ToolError(
                     code="hotkey_held",
                     message="A hotkey is currently held by the operator.",
                     retryable=True,
                 ).to_dict()
 
-            # Paste debounce
-            if self._session.paste_debounce_remaining_ms > 0:
+            # Paste debounce — only for paste_history
+            if (
+                tool_name == "paste_history"
+                and self._session.paste_debounce_remaining_ms > 0
+            ):
                 return ToolError(
                     code="paste_debounced",
                     message="Paste is debounced; try again shortly.",
@@ -279,42 +299,60 @@ class AgentDispatch:
         if an inflight flag is set.
 
         Special cases:
-        - ``ptt_engage`` while ``RECORDING`` → ``already_recording`` (a success flag).
+        - ``ptt_engage`` while ``RECORDING`` is handled earlier (early success).
         - ``ptt_release`` while not ``RECORDING`` → ``not_recording``.
         - Tools requiring ``output:paste``, ``input:vox``, ``session:retransmit``
           are refused while ``RECORDING`` (``details.state: recording``).
+
+        ``reason`` is one of: ``state``, ``retransmit``, ``slash_apply``.
+        When ``reason`` is ``state``, the actual state value is included.
+        ``reason: inflight`` is never used.
+
+        Inflight flags determine ``reason``:
+        - ``RETRANSMIT`` / ``RETRANSMIT_LAST`` → ``reason: retransmit``
+        - ``SLASH_APPLY`` → ``reason: slash_apply``
+        - anything else → ``reason: state``
         """
         idle_states = {ClientState.IDLE}
+
+        def _inflight_reason() -> str:
+            """Derive reason from inflight flags."""
+            for flag in self._session.inflight:
+                name = getattr(flag, "name", str(flag)).lower()
+                if "retransmit" in name:
+                    return "retransmit"
+                if "slash" in name:
+                    return "slash_apply"
+            return "state"
+
         if tool_name == "ptt_engage":
-            if self._session.state == ClientState.RECORDING:
-                # Idempotent engage: success with flag
-                return None
+            # Already handled earlier (RECORDING → early success).
             if self._session.state not in idle_states:
                 return ToolError(
                     code="session_busy",
                     message="Session is busy.",
                     retryable=True,
-                    details={"state": self._session.state.value},
+                    details={"reason": "state", "state": self._session.state.value},
                 )
             if self._session.inflight:
                 return ToolError(
                     code="session_busy",
-                    message="An inflight operation is in progress.",
+                    message="Session is busy.",
                     retryable=True,
-                    details={"reason": "inflight"},
+                    details={
+                        "reason": _inflight_reason(),
+                        "state": self._session.state.value,
+                    },
                 )
             return None
         if tool_name == "ptt_release":
             return None  # Release is handled in the tool handler, not here
-        if (
-            tool_name in ("input_mode_set", "paste_history", "retransmit_last")
-            and self._session.state == ClientState.RECORDING
-        ):
+        if self._session.state == ClientState.RECORDING:
             return ToolError(
                 code="session_busy",
                 message="Cannot perform action while recording.",
                 retryable=True,
-                details={"state": "recording"},
+                details={"reason": "state", "state": self._session.state.value},
             )
         # General idle/inflight check
         if self._session.state not in idle_states:
@@ -322,32 +360,38 @@ class AgentDispatch:
                 code="session_busy",
                 message="Session is busy.",
                 retryable=True,
-                details={"state": self._session.state.value},
+                details={"reason": "state", "state": self._session.state.value},
             )
         if self._session.inflight:
             return ToolError(
                 code="session_busy",
-                message="An inflight operation is in progress.",
+                message="Session is busy.",
                 retryable=True,
                 details={
-                    "reason": (
-                        next(iter(self._session.inflight))
-                        if self._session.inflight
-                        else "unknown"
-                    )
+                    "reason": _inflight_reason(),
+                    "state": self._session.state.value,
                 },
             )
         return None
 
 
-def _is_rate_exempt(tool_name: str) -> bool:
+def _is_rate_exempt(
+    tool_name: str,
+    session: SessionPort,
+    params: dict[str, Any],
+) -> bool:
     """
     Certain mutations are exempt from the rate limiter.
 
-    - ``ptt_release`` is free while ``agent_ptt_open`` is set.
-    - ``input_mode_set`` with ``mode: ptt`` is free while ``input_mode == vox``.
+    - ``ptt_release`` is free while ``session.agent_ptt_open`` is True.
+    - ``input_mode_set`` with ``mode: ptt`` is free while ``input_mode == vox``
+      (disarm sequence).
     """
-    return bool(tool_name == "ptt_release" and getattr(_agent_ptt_open, "value", False))
+    if tool_name == "ptt_release":
+        return bool(session.agent_ptt_open)
+    if tool_name == "input_mode_set":
+        return session.input_mode == "vox" and params.get("mode") == "ptt"
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +417,7 @@ class FakeSessionPort:
         self.has_pending_audio: bool = kwargs.get("has_pending_audio", False)
         self.history_count: int = kwargs.get("history_count", 0)
         self.is_shutting_down: bool = kwargs.get("is_shutting_down", False)
+        self.agent_ptt_open: bool = kwargs.get("agent_ptt_open", False)
         self._history_items: list[str] = kwargs.get("_history_items", [])
         self._window: Any = kwargs.get("_window", None)
         self._clipboard_writes: list[str] = []

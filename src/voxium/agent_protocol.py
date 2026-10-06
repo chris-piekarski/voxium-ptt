@@ -36,7 +36,6 @@ VALID_ERROR_CODES: frozenset[str] = frozenset(
         "rate_limited",
         "log_source_unknown",
         "internal",
-        "already_recording",  # success flag, listed for completeness
     }
 )
 

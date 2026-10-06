@@ -236,3 +236,40 @@ def test_windows_dacl_fail_simulation(tmp_path: Path) -> None:
 
     with pytest.raises(PermissionError, match="current user"):
         _windows_dacl_current_user(tmp_path / "agent.json", dacl_func=always_fail)
+
+
+def test_dacl_missing_pywin32_raises_permission_error(tmp_path: Path) -> None:
+    """
+    When pywin32 is unavailable (dacl_func raises ImportError), the call
+    must fail with PermissionError — the heuristic that returned True
+    for paths outside USERPROFILE must NOT exist.
+    """
+    from voxium.agent_auth import _windows_dacl_current_user
+
+    def simulates_missing_pywin32(_path):
+        raise ImportError("No module named 'win32api'")
+
+    with pytest.raises(PermissionError, match="restrict file to current user"):
+        _windows_dacl_current_user(
+            tmp_path / "agent.json", dacl_func=simulates_missing_pywin32
+        )
+
+
+def test_dacl_heuristic_deleted() -> None:
+    """
+    The _dacl_fallback_heuristic function must not exist — missing pywin32
+    is always a fail.
+    """
+    from voxium import agent_auth
+
+    assert not hasattr(agent_auth, "_dacl_fallback_heuristic")
+
+
+def test_compare_tokens_different_length_returns_false():
+    """compare_tokens must return False (not raise) when lengths differ."""
+    # Long token vs short token
+    assert compare_tokens("a" * 43, "short") is False
+    # Empty vs non-empty
+    assert compare_tokens("", "nonempty") is False
+    # Both empty
+    assert compare_tokens("", "") is True

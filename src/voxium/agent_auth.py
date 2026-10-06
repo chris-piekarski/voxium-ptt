@@ -41,7 +41,11 @@ def validate_token_length(token: str) -> bool:
 
 def compare_tokens(a: str, b: str) -> bool:
     """Compare two bearer tokens in constant time."""
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+    try:
+        return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+    except ValueError:
+        # hmac.compare_digest raises on length mismatch
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +210,18 @@ def _apply_current_user_dacl(path: Path) -> bool:
     Attempt to restrict *path* to the current user on Windows.
 
     Uses :mod:`pywintypes` / :mod:`win32api` / :mod:`win32security` if
-    available, otherwise falls back to a heuristic check that the file
-    is **not** under the user profile directory (which is group-readable
-    by default on many setups).
+    available.  Raises :exc:`PermissionError` if pywin32 cannot be
+    imported (missing pywin32 is a hard failure — no heuristic).
 
-    Returns ``True`` on success, ``False`` on inability to tighten.
+    Returns ``True`` on success, ``False`` is never returned; failure
+    raises :exc:`PermissionError`.
     """
-    # Avoid adding pywin32 to runtime deps. Try import, fail closed.
     try:
         import win32api
         import win32con
         import win32security
     except ImportError:
-        return _dacl_fallback_heuristic(path)
+        raise PermissionError("cannot apply current-user DACL: pywin32 not installed")
 
     try:
         user_name = win32api.GetUserName()
@@ -251,27 +254,23 @@ def _apply_current_user_dacl(path: Path) -> bool:
             str(path), win32security.DACL_SECURITY_INFORMATION, new_sd
         )
         return True
-    except Exception:  # noqa: BLE001 - catch-all for cleanup + fallback
-        return _dacl_fallback_heuristic(path)
-
-
-def _dacl_fallback_heuristic(path: Path) -> bool:
-    """
-    Minimal fallback: reject if the path sits under the user's profile
-    (shared checkouts often leave files group-readable there).
-    """
-    profile = Path(os.environ.get("USERPROFILE", Path.home().as_posix()))
-    try:
-        path.resolve().relative_to(profile.resolve())
-        # Path is under the user profile — can't guarantee user-only access
-        return False
-    except ValueError:
-        return True
+    except PermissionError:
+        raise
+    except Exception:  # noqa: BLE001 - catch-all for cleanup + failure
+        raise PermissionError(
+            "cannot apply current-user DACL: Windows ACL operation failed"
+        )
 
 
 def _windows_dacl_current_user(path: Path, *, dacl_func: Any = None) -> None:
     fn = dacl_func if dacl_func is not None else _apply_current_user_dacl
-    if not fn(path):
+    try:
+        result = fn(path)
+    except PermissionError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - fail-closed on any ACL error
+        raise PermissionError(f"cannot restrict file to current user on Windows: {exc}")
+    if not result:
         raise PermissionError("cannot restrict file to current user on Windows")
 
 
