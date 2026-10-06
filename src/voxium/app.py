@@ -220,7 +220,7 @@ class _LiveSessionProxy:
 
     @property
     def active_hotkey(self):
-        return None
+        return _ptt_key_tracker.is_down
 
     @property
     def paste_debounce_remaining_ms(self):
@@ -3773,24 +3773,48 @@ def _finish_agent_transmission(
     _fr(tlog, tid, transcript=transcript, state=state)  # type: ignore[arg-type]
 
 
-def _finish_ptt_recording() -> None:
+def _finish_ptt_recording() -> tuple[int | None, int]:
+    """Finish PTT recording: stop audio, begin transmission, spawn worker.
+
+    Returns (transmission_id, new_state) where:
+    - transmission_id is the id minted by tlog.begin(), or None if
+      the session was not in RECORDING state (nothing to stop).
+    - new_state is the state integer after the transition
+      (State.TRANSCRIBING on success, the unchanged state otherwise).
+
+    The hotkey handlers ignore the return value.
+    """
     global state
+
+    # Clear agent PTT flag so human hotkey path also resets it.
+    try:
+        from voxium.agent_server import _agent_ptt_open as _ao
+
+        _ao = False  # type: ignore[misc]
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    tid: int | None = None
     with state_lock:
-        if state != State.RECORDING:
-            return
-        state = State.TRANSCRIBING
-    audio = stop_recording()
-    # PR 5: begin transmission BEFORE the thread can race with reads
-    _tlog = _get_agent_transmission_log()
-    _tid: int | None = None
-    if _tlog is not None:
-        _tid = _tlog.begin()
-    threading.Thread(
-        target=transcribe_and_paste,
-        args=(audio,),
-        kwargs={"_tlog": _tlog, "_tid": _tid},
-        daemon=True,
-    ).start()
+        cur_state = state
+        if state == State.RECORDING:
+            state = State.TRANSCRIBING
+    if tid is None and cur_state != State.RECORDING:
+        return None, cur_state
+    if cur_state == State.RECORDING:
+        audio = stop_recording()
+        # PR 5: begin transmission BEFORE the thread can race with reads
+        _tlog = _get_agent_transmission_log()
+        if _tlog is not None:
+            tid = _tlog.begin()
+        threading.Thread(
+            target=transcribe_and_paste,
+            args=(audio,),
+            kwargs={"_tlog": _tlog, "_tid": tid},
+            daemon=True,
+        ).start()
+        return tid, State.TRANSCRIBING
+    return None, cur_state
 
 
 def create_record_hotkey_handlers(hotkey):

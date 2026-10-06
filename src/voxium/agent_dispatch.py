@@ -197,7 +197,7 @@ class AgentDispatch:
         # even when already recording.  Before rate-limit/busy so no tokens
         # are consumed and no start-recording hook fires.
         if tool_name == "ptt_engage" and self._session.state == ClientState.RECORDING:
-            return ToolResult(data={"ok": True, "already_recording": True}).to_dict()
+            return ToolResult(data={"already_recording": True}).to_dict()
 
         # --- Validate input against schema ---
         schema_error = _validate_input(raw_input, tool_def.input_schema)

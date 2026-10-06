@@ -196,11 +196,11 @@ def _agent_start_recording() -> bool:
     return start_recording()
 
 
-def _agent_finish_ptt_recording() -> None:
-    """Call app._finish_ptt_recording() to end the active recording."""
+def _agent_finish_ptt_recording() -> tuple[int | None, int]:
+    """Call app._finish_ptt_recording() and return (transmission_id, new_state)."""
     from voxium.app import _finish_ptt_recording
 
-    _finish_ptt_recording()
+    return _finish_ptt_recording()
 
 
 def install_state_callable(fn: Callable[[], dict[str, Any]]) -> None:
@@ -783,35 +783,40 @@ def _build_read_handler_map() -> dict[str, Callable]:
     # --------------- PTT tools (PR 9) ---------------------------------------
 
     def _handler_ptt_engage(_session, _ri):
-        """Engage PTT key: validate mode, start recording, toggle agent flag.
+        """Engage PTT key: validate mode, start recording.
 
-        Dispatch layer already guards: scope, shutting-down, idempotent
-        cancel, busy-state, inflight, hotkey-held.
+        Dispatch layer handles scope, busy-state, and idempotent checks.
+        This handler validates input mode and calls start_recording().
         """
         global _agent_ptt_open
 
-        # Input mode check (dispatch layer only checks scope)
+        from voxium.agent_dispatch import ClientState
+
         if _session.input_mode != "ptt":
             return _tool_error(
                 "wrong_input_mode",
                 "Engage requires PTT mode.",
             )
-        # Dispatch guarantees idle state here.  start_recording can still
-        # fail if the microphone is unplugged/unavailable.
+        if _session.state != ClientState.IDLE:
+            return _tool_error(
+                "not_idle",
+                "Session is not idle; cannot start PTT recording.",
+            )
+        # Uses _agent_start_recording for testability (mockable).
         rc = _agent_start_recording()
         if not rc:
             return _tool_error(
                 "microphone_unavailable",
                 "Microphone capture failed.",
             )
-        # Mark agent PTT open so release is rate-exempt
         _agent_ptt_open = True
         return {"ok": True, "recorded": True}
 
     def _handler_ptt_release(_session, _ri):
         """Release PTT key: finish recording, return transmission id.
 
-        Dispatch layer returns None from busy-check (bypasses it).
+        Dispatch layer handles scope and busy-state checks.
+        This handler validates recording state and calls finish recording.
         """
         global _agent_ptt_open
 
@@ -822,9 +827,7 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 "not_recording",
                 "Session is not recording.",
             )
-        _agent_finish_ptt_recording()
-        tlog = get_transmission_log()
-        tid = tlog.latest_id() if tlog is not None else None
+        tid, _ = _agent_finish_ptt_recording()
         # Clear agent PTT flag so future engages go through rate-limit
         _agent_ptt_open = False
         return {
