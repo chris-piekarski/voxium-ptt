@@ -1238,14 +1238,23 @@ def ptt_server(ptt_session):
 
 
 def test_ptt_engage_success(ptt_server, ptt_session):
-    """ptt_engage transitions IDLE → RECORDING and calls start_recording."""
+    """ptt_engage sets app.state = RECORDING before start_recording, then returns."""
     import voxium.agent_server as _mod
+    import voxium.app as _app
+
+    saw_state = []
+
+    def _fake_start():
+        with _app.state_lock:
+            saw_state.append(_app.state)
+        return True
 
     handler = _tool_fn(ptt_server, "ptt_engage")
-    with patch.object(_mod, "_agent_start_recording", return_value=True):
+    with patch.object(_mod, "_agent_start_recording", side_effect=_fake_start):
         result = handler()
     assert result is not None
-    assert result.get("ok") is True and result.get("recorded") is True
+    assert saw_state == [_app.State.RECORDING], f"expected RECORDING during start_recording, got {saw_state}"
+    assert result.get("state") == "recording"
 
 
 def test_ptt_engage_already_recording(ptt_server, ptt_session):
@@ -1256,31 +1265,51 @@ def test_ptt_engage_already_recording(ptt_server, ptt_session):
     handler = _tool_fn(ptt_server, "ptt_engage")
     result = handler()
     assert result.get("ok") is True
-    assert result.get("data", {}).get("already_recording") is True
+    data = result.get("data", {})
+    assert data.get("already_recording") is True
+    assert data.get("state") == "recording"
 
 
 def test_ptt_release_success(ptt_server, ptt_session):
-    """ptt_release transitions RECORDING → TRANSCRIBING and returns transmission_id."""
+    """ptt_release finishes recording and returns transmission_id + state."""
+    import voxium.agent_server as _mod
     from voxium.agent_dispatch import ClientState
 
     ptt_session.state = ClientState.RECORDING
     handler = _tool_fn(ptt_server, "ptt_release")
-    with patch(
-        "voxium.agent_server.get_transmission_log",
-        return_value=_FakeTransmissionLog(),
-    ):
+
+    def _fake_finish():
+        return (1, 2)  # tid=1, state=2 (TRANSCRIBING)
+
+    with patch.object(_mod, "_agent_finish_ptt_recording", side_effect=_fake_finish):
         result = handler()
     assert result is not None
-    assert result.get("ok") is True
-    assert "data" in result
+    assert result.get("transmission_id") == 1
+    assert result.get("state") == "transcribing"
 
 
 def test_ptt_release_not_recording(ptt_server, ptt_session):
-    """ptt_release returns not_recording error when state is IDLE."""
+    """ptt_release returns not_recording error when state is IDLE, does not call finish."""
+    import voxium.agent_server as _mod
+
     handler = _tool_fn(ptt_server, "ptt_release")
-    with pytest.raises(RuntimeError) as exc_info:
-        handler()
-    assert "not_recording" in str(exc_info.value).lower()
+    with patch.object(_mod, "_agent_finish_ptt_recording") as mock_finish:
+        with pytest.raises(RuntimeError) as exc_info:
+            handler()
+        assert "not_recording" in str(exc_info.value).lower()
+        mock_finish.assert_not_called()
+
+def test_ptt_release_none_tid_returns_not_recording(ptt_server, ptt_session):
+    """ptt_release returns not_recording when _finish_ptt_recording yields tid=None."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_release")
+    with patch.object(_mod, "_agent_finish_ptt_recording", return_value=(None, 0)):
+        with pytest.raises(RuntimeError) as exc_info:
+            handler()
+        assert "not_recording" in str(exc_info.value).lower()
 
 
 def test_ptt_tools_absent_without_scope(scoped_server):
@@ -1302,11 +1331,9 @@ def test_ptt_tools_present_with_scope(ptt_server):
 
 
 def test_ptt_engage_microphone_unavailable(ptt_server, ptt_session):
-    """ptt_engage returns microphone_unavailable when start_recording fails."""
+    """ptt_engage reverts state to IDLE when start_recording fails, flag stays false."""
     import voxium.agent_server as _mod
-
-    # Use handler directly — when mocked start_recording returns False,
-    # state reverts to IDLE and error envelope is returned
+    import voxium.app as _app
     from voxium.agent_dispatch import AgentDispatch
 
     dispatch = AgentDispatch(
@@ -1314,11 +1341,19 @@ def test_ptt_engage_microphone_unavailable(ptt_server, ptt_session):
         granted_scopes={"status:read", "input:ptt"},
     )
     handler_fn = _mod._build_read_handler_map()["ptt_engage"]
+    # Ensure state starts IDLE
+    with _app.state_lock:
+        _app.state = _app.State.IDLE
     with patch.object(_mod, "_agent_start_recording", return_value=False):
         result = handler_fn(dispatch._session, {})
     assert result is not None
     assert result.get("ok") is False
     assert result.get("error", {}).get("code") == "microphone_unavailable"
+    # State should be IDLE after failure
+    with _app.state_lock:
+        assert _app.state == _app.State.IDLE
+    # Flag must stay false
+    assert getattr(_mod, "_agent_ptt_open", False) is False
 
 
 # FakeTransmissionLog for ptt_release handler tests

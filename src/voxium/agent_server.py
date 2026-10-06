@@ -783,34 +783,33 @@ def _build_read_handler_map() -> dict[str, Callable]:
     # --------------- PTT tools (PR 9) ---------------------------------------
 
     def _handler_ptt_engage(_session, _ri):
-        """Engage PTT key: validate mode, start recording.
+        """Engage PTT key: validate mode, set state, start recording.
 
         Dispatch layer handles scope, busy-state, and idempotent checks.
-        This handler validates input mode and calls start_recording().
+        This handler validates input mode, transitions state to RECORDING
+        under state_lock, then calls start_recording().
         """
         global _agent_ptt_open
-
-        from voxium.agent_dispatch import ClientState
 
         if _session.input_mode != "ptt":
             return _tool_error(
                 "wrong_input_mode",
                 "Engage requires PTT mode.",
             )
-        if _session.state != ClientState.IDLE:
-            return _tool_error(
-                "not_idle",
-                "Session is not idle; cannot start PTT recording.",
-            )
-        # Uses _agent_start_recording for testability (mockable).
+        import voxium.app as _app
+        with _app.state_lock:
+            _app.state = _app.State.RECORDING
+        # start_recording reads app.state; must be RECORDING before call.
         rc = _agent_start_recording()
         if not rc:
+            with _app.state_lock:
+                _app.state = _app.State.IDLE
             return _tool_error(
                 "microphone_unavailable",
                 "Microphone capture failed.",
             )
         _agent_ptt_open = True
-        return {"ok": True, "recorded": True}
+        return {"state": "recording"}
 
     def _handler_ptt_release(_session, _ri):
         """Release PTT key: finish recording, return transmission id.
@@ -828,14 +827,16 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 "Session is not recording.",
             )
         tid, _ = _agent_finish_ptt_recording()
-        # Clear agent PTT flag so future engages go through rate-limit
+        if tid is None:
+            _agent_ptt_open = False
+            return _tool_error(
+                "not_recording",
+                "Session is not recording.",
+            )
         _agent_ptt_open = False
         return {
-            "ok": True,
-            "data": {
-                "transmission_id": tid,
-                "state": "transcribing",
-            },
+            "transmission_id": tid,
+            "state": "transcribing",
         }
 
     return {
