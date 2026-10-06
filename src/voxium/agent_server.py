@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "_agent_dispatch",
     "get_session_history",
     "get_transmission_log",
     "install_state_callable",
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 _listener_thread: Any = None
 _listener_sock: socket.socket | None = None
+
+# Dispatch instance (set by start_agent_listener, None when listener not active)
+_agent_dispatch: Any = None
 
 # ---------------------------------------------------------------------------
 # session_status live-state callable
@@ -48,6 +52,10 @@ _transmission_wait_active: bool = False  # concurrency cap for transmission_wait
 _health_snapshot: Any = None  # cache for debug_health probe
 _health_cache_time: float = 0.0  # monotonic timestamp for health cache
 _HEALTH_CACHE_TTL: float = 10.0  # seconds
+
+# Dispatcher-scoped session_busy for transmission_wait
+# dispatch reads this to gate concurrent wait calls
+_transmission_wait_busy: bool = False
 
 
 def get_transmission_log() -> Any:
@@ -142,14 +150,28 @@ def start_agent_listener(
 
     install_sdk_log_guard()
 
-    # -- Build MCP server ------------------------------------------------------
+    # -- Build MCP server + dispatch layer -------------------------------------
     server = MCPServer(name="voxium-agent", version="0.0.1")
 
-    # Register session_status + PR 5 read-only tools
-    _register_session_status_tool(server)
-    _register_transmission_tools(server)
-    _register_history_tools(server)
-    _register_debug_tools(server)
+    # -- Build read-tool handler map and create AgentDispatch ------------------
+    handler_map = _build_read_handler_map()
+    from voxium.agent_dispatch import (
+        _HANDLER_MAP,
+        AgentDispatch,
+        FakeSessionPort,
+    )
+
+    # Register our handlers in the dispatch handler registry
+    _HANDLER_MAP.update(handler_map)
+
+    dispatch = AgentDispatch(
+        session=FakeSessionPort(),
+        granted_scopes=set(scopes),
+    )
+    _agent_dispatch = dispatch
+
+    # -- Register MCP tools routed through dispatch ----------------------------
+    _register_tools_via_dispatch(server, dispatch)
 
     # -- Bind socket ourselves (127.0.0.1:0) -----------------------------------
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -229,75 +251,102 @@ def stop_agent_listener() -> None:
         pass
 
 
-def _register_session_status_tool(server: Any) -> None:
-    """Register ``session_status`` on *server*.
+# ---------------------------------------------------------------------------
+# Read-tool handler map (populated by _build_read_handler_map)
+# ---------------------------------------------------------------------------
 
-    Returns state, input_mode, inflight records, and latest transmission id.
+_DEBUG_HEALTH_DEFAULTS: dict[str, Any] = {
+    "device": "unknown",
+    "compute": "none",
+    "vad_enabled": False,
+    "loaded_transcribe_models": [],
+    "polish_enabled_default": False,
+    "polish_llama_cpp_reachable": False,
+    "polish_loaded_model": "none",
+    "streaming_enabled": False,
+    "streaming_open_sessions": 0,
+    "cuda_device_name": "",
+    "server_version": "unknown",
+    "timestamp": "",
+    "timestamp_utc": "",
+    "sample_rate": 0,
+}
+
+
+def _rec_to_dict(rec) -> dict[str, Any] | None:
+    """Convert a TransmissionRecord to a strict JSON dict."""
+    if rec is None:
+        return None
+    return {
+        "id": rec.id,
+        "state": rec.state,
+        "transcript": rec.transcript,
+        "filtered": rec.filtered,
+        "paste_ok": rec.paste_ok,
+        "paste_error": rec.paste_error,
+        "duration_ms": rec.duration_ms,
+        "model": rec.model,
+    }
+
+
+def _build_read_handler_map() -> dict[str, Callable]:
+    """Build _HANDLER_MAP entries for read-only tools.
+
+    Each handler receives ``(dispatch, raw_input)`` and returns a dict
+    (or None for not-found). Scope, rate-limit, and busy checks are
+    enforced by the dispatch layer *before* the handler runs.
     """
 
-    @server.tool("session_status")
-    def session_status() -> dict[str, Any]:
-        """Structured snapshot of this client's state."""
+    def _handler_session_status(_session: Any, _ri: dict) -> dict[str, Any]:
         fn = _state_callable
         base = fn() if fn is not None else default_state_callable()
-        # PR 5: merge inflight + latest transmission id
         tlog = get_transmission_log()
-        base["inflight"] = list(tlog.get_inflight()) if tlog is not None else []
+        base["inflight"] = sorted(tlog.get_inflight()) if tlog is not None else []
         base["transmission_latest_id"] = tlog.latest_id() if tlog is not None else None
         return base
 
-
-# ---------------------------------------------------------------------------
-# PR 5: read-only tools (transmission, history, debug)
-# ---------------------------------------------------------------------------
-
-
-def _register_transmission_tools(server: Any) -> None:
-    """Register transmission_last, transmission_get, transmission_wait."""
-
-    @server.tool("transmission_last")
-    def transmission_last() -> dict[str, Any] | None:
-        """Return the most recent transmission record."""
+    def _handler_transmission_last(_session: Any, _ri: dict) -> dict[str, Any] | None:
         tlog = get_transmission_log()
-        if tlog is None:
-            return None
-        return tlog.last()
+        rec = tlog.last() if tlog is not None else None
+        return _rec_to_dict(rec) if rec is not None else None
 
-    @server.tool("transmission_get")
-    def transmission_get(id: int) -> dict[str, Any] | None:  # type: ignore[override]
-        """Return a transmission record by id."""
-        tlog = get_transmission_log()
-        if tlog is None:
-            return None
-        return tlog.get(id)
-
-    @server.tool("transmission_wait")
-    def transmission_wait(
-        id: int, timeout_seconds: float = 30.0
-    ) -> dict[str, Any] | None:  # type: ignore[override]
-        """Long-poll for a transmission to finish (one-at-a-time concurrency cap)."""
-        global _transmission_wait_active
-        if _transmission_wait_active:
+    def _handler_transmission_get(_session: Any, ri: dict) -> dict[str, Any] | None:
+        tid = ri.get("id")
+        if tid is None:
             return None
         tlog = get_transmission_log()
-        if tlog is None:
+        rec = tlog.get(tid) if tlog is not None else None
+        return _rec_to_dict(rec) if rec is not None else None
+
+    def _handler_transmission_wait(_session: Any, ri: dict) -> dict[str, Any] | None:
+        global _transmission_wait_busy
+        tid = ri.get("id")
+        timeout = ri.get("timeout_seconds", 30.0)
+        if _transmission_wait_busy:
+            from voxium.agent_protocol import ToolError
+
+            return ToolError(
+                code="session_busy",
+                message="Another transmission_wait is already in progress.",
+                retryable=True,
+                details={"reason": "transmission_wait"},
+            ).to_dict()
+        tlog = get_transmission_log()
+        if tlog is None or tid is None:
             return None
-        _transmission_wait_active = True
+        _transmission_wait_busy = True
         try:
-            return tlog.wait(id, timeout=timeout_seconds)
+            rec = tlog.wait(tid, timeout=timeout)
+            return _rec_to_dict(rec) if rec is not None else None
         finally:
-            _transmission_wait_active = False
+            _transmission_wait_busy = False
 
-
-def _register_history_tools(server: Any) -> None:
-    """Register history_list, history_get."""
-
-    @server.tool("history_list")
-    def history_list(limit: int = 25, query: str = "") -> list[dict[str, Any]]:  # type: ignore[override]
-        """List recent history entries (read-only)."""
+    def _handler_history_list(_session: Any, ri: dict) -> dict[str, Any]:
+        limit = ri.get("limit", 25)
+        query = ri.get("query", "")
         hist = get_session_history()
         if hist is None:
-            return []
+            return {"entries": [], "total": 0}
         entries = list(hist.iter_entries())
         if query:
             q = query.lower()
@@ -306,11 +355,14 @@ def _register_history_tools(server: Any) -> None:
                 for e in entries
                 if q in (e.get("text") or e.get("preview") or "").lower()
             ]
-        return entries[-limit:] if len(entries) > limit else entries
+        total = len(entries)
+        result = entries[-limit:] if len(entries) > limit else entries
+        return {"entries": result, "total": total}
 
-    @server.tool("history_get")
-    def history_get(index: int) -> dict[str, Any] | None:  # type: ignore[override]
-        """Return a specific history entry by index."""
+    def _handler_history_get(_session: Any, ri: dict) -> dict[str, Any] | None:
+        index = ri.get("index")
+        if index is None:
+            return None
         hist = get_session_history()
         if hist is None:
             return None
@@ -318,10 +370,6 @@ def _register_history_tools(server: Any) -> None:
             return hist.get_entry(index)
         except (IndexError, KeyError):
             return None
-
-
-def _register_debug_tools(server: Any) -> None:
-    """Register debug_health, debug_stats, debug_disk."""
 
     def _take_health_snapshot() -> dict[str, Any]:
         """Take a health snapshot (cached for _HEALTH_CACHE_TTL seconds)."""
@@ -347,26 +395,40 @@ def _register_debug_tools(server: Any) -> None:
         _health_cache_time = now
         return snapshot
 
-    @server.tool("debug_health")
-    def debug_health() -> dict[str, Any]:
-        """Structured health snapshot (fixed field list)."""
-        snap = _take_health_snapshot()
-        return {
-            "healthy": snap.get("healthy", False),
-            "server_up": snap.get("healthy", False),
-            "server_version": (snap.get("info") or {}).get("version", "unknown"),
-            "timestamp": (snap.get("info") or {}).get("timestamp", ""),
-            "timestamp_utc": (snap.get("info") or {}).get("timestamp_utc", ""),
-            "model": (snap.get("info") or {}).get("model", "none"),
-            "model_name": (snap.get("info") or {}).get("model_name", "unknown"),
-            "polish_server_url": (snap.get("info") or {}).get("polish_server_url", ""),
-            "polish_model": (snap.get("info") or {}).get("polish_model", "none"),
-            "sample_rate": (snap.get("info") or {}).get("sample_rate", 0),
+    # Strict field list for debug_health — no raw model names, no raw port.
+    _debug_health_fields = frozenset(
+        {
+            "healthy",
+            "server_up",
+            "server_version",
+            "timestamp",
+            "timestamp_utc",
+            "device",
+            "compute",
+            "vad_enabled",
+            "loaded_transcribe_models",
+            "polish_enabled_default",
+            "polish_llama_cpp_reachable",
+            "polish_loaded_model",
+            "streaming_enabled",
+            "streaming_open_sessions",
+            "cuda_device_name",
+            "sample_rate",
         }
+    )
 
-    @server.tool("debug_stats")
-    def debug_stats() -> dict[str, Any]:
-        """Structured persistent and server statistics."""
+    def _handler_debug_health(_session: Any, _ri: dict) -> dict[str, Any]:
+        snap = _take_health_snapshot()
+        info = snap.get("info") or {}
+        result: dict[str, Any] = {}
+        for key in _debug_health_fields:
+            if key in ("healthy", "server_up"):
+                result[key] = snap.get("healthy", False)
+            else:
+                result[key] = info.get(key, _DEBUG_HEALTH_DEFAULTS.get(key))
+        return result
+
+    def _handler_debug_stats(_session: Any, _ri: dict) -> dict[str, Any]:
         result: dict[str, Any] = {}
         try:
             from voxium.paths import persistent_stats_path
@@ -392,9 +454,7 @@ def _register_debug_tools(server: Any) -> None:
             result["server"] = None
         return result
 
-    @server.tool("debug_disk")
-    def debug_disk() -> list[dict[str, Any]]:
-        """Disk usage report for local data directories."""
+    def _handler_debug_disk(_session: Any, _ri: dict) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         try:
             from voxium.disk_usage_report import (
@@ -419,6 +479,95 @@ def _register_debug_tools(server: Any) -> None:
         except Exception:  # noqa: BLE001, S110
             pass
         return entries
+
+    return {
+        "session_status": _handler_session_status,
+        "transmission_last": _handler_transmission_last,
+        "transmission_get": _handler_transmission_get,
+        "transmission_wait": _handler_transmission_wait,
+        "history_list": _handler_history_list,
+        "history_get": _handler_history_get,
+        "debug_health": _handler_debug_health,
+        "debug_stats": _handler_debug_stats,
+        "debug_disk": _handler_debug_disk,
+    }
+
+
+def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
+    """Register MCP tools that route through AgentDispatch.dispatch.
+
+    Each tool handler extracts *tool_name* and *raw_input*, calls
+    ``dispatch.dispatch(tool_name, raw_input)``, and returns the
+    ``data`` payload. Errors are raised so the MCP SDK returns
+    ``isError: true`` to the client.
+    """
+
+    def _call_dispatch(tool_name: str, raw_input: dict) -> Any:
+        """
+        Call dispatch.dispatch and unwrap the result.
+
+        Dispatch may return:
+        - A ToolError envelope (``{"ok": False, "error": {...}}``) → raise
+        - The raw handler return value (dict, list, None) → pass through
+        """
+        result = dispatch.dispatch(tool_name, raw_input)
+        # ToolError envelopes have ``ok: False`` — everything else is success.
+        if isinstance(result, dict) and not result.get("ok", True):
+            err = result.get("error", {})
+            msg = err.get("message", err.get("code", "internal")) if isinstance(err, dict) else "internal"
+            raise RuntimeError(f"tool error: {msg}")
+        return result
+
+    # session_status — no args
+    @server.tool("session_status")
+    def tool_session_status() -> dict[str, Any]:
+        return _call_dispatch("session_status", {})
+
+    # transmission_last — no args
+    @server.tool("transmission_last")
+    def tool_transmission_last() -> dict[str, Any] | None:
+        return _call_dispatch("transmission_last", {})
+
+    # transmission_get — id
+    @server.tool("transmission_get")
+    def tool_transmission_get(id: int) -> dict[str, Any] | None:  # type: ignore[override]
+        return _call_dispatch("transmission_get", {"id": id})
+
+    # transmission_wait — id, timeout_seconds
+    @server.tool("transmission_wait")
+    def tool_transmission_wait(
+        id: int, timeout_seconds: float = 30.0
+    ) -> dict[str, Any] | None:  # type: ignore[override]
+        return _call_dispatch(
+            "transmission_wait", {"id": id, "timeout_seconds": timeout_seconds}
+        )
+
+    # history_list — limit, query
+    @server.tool("history_list")
+    def tool_history_list(
+        limit: int = 25, query: str = ""
+    ) -> dict[str, Any]:  # type: ignore[override]
+        return _call_dispatch("history_list", {"limit": limit, "query": query})
+
+    # history_get — index
+    @server.tool("history_get")
+    def tool_history_get(index: int) -> dict[str, Any] | None:  # type: ignore[override]
+        return _call_dispatch("history_get", {"index": index})
+
+    # debug_health — no args
+    @server.tool("debug_health")
+    def tool_debug_health() -> dict[str, Any]:
+        return _call_dispatch("debug_health", {})
+
+    # debug_stats — no args
+    @server.tool("debug_stats")
+    def tool_debug_stats() -> dict[str, Any]:
+        return _call_dispatch("debug_stats", {})
+
+    # debug_disk — no args
+    @server.tool("debug_disk")
+    def tool_debug_disk() -> list[dict[str, Any]]:
+        return _call_dispatch("debug_disk", {})
 
 
 # ---------------------------------------------------------------------------

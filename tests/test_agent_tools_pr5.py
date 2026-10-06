@@ -17,6 +17,22 @@ pytest.importorskip("mcp.server")
 # Fixtures: shared TransmissionLog / SessionTranscriptHistory
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _reset_wait_flags():
+    """Reset transmission_wait busy/active flags before each test."""
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    _mod._transmission_wait_active = False
+    yield
+    # Teardown: clean up _HANDLER_MAP so tests are isolated
+    from voxium.agent_dispatch import _HANDLER_MAP
+
+    _mod = None
+    for k in list(_HANDLER_MAP.keys()):
+        if k.startswith(("session_status", "transmission_", "history_", "debug_")):
+            _HANDLER_MAP.pop(k, None)
+
 
 @pytest.fixture
 def tlog():
@@ -42,20 +58,22 @@ def history():
 # Helpers: get registered tools from a fresh MCP server
 # ---------------------------------------------------------------------------
 
-
 @pytest.fixture
 def server():
-    """Create a bare MCPServer and register PR 5 tools."""
+    """Create a bare MCPServer and register PR 5 tools through dispatch."""
     from mcp.server import MCPServer
 
     from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch, FakeSessionPort
 
     srv = MCPServer(name="test-pr5", version="0.0.1")
-    # Register all tool groups
-    _mod._register_session_status_tool(srv)
-    _mod._register_transmission_tools(srv)
-    _mod._register_history_tools(srv)
-    _mod._register_debug_tools(srv)
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=FakeSessionPort(),
+        granted_scopes={"status:read", "transcript:read", "debug:read"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
     return srv
 
 
@@ -175,13 +193,9 @@ def test_transmission_get_found(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler(id=tid)
     assert result is not None
-    if hasattr(result, "id"):
-        assert result.id == tid
-        assert result.state == "no_speech"
-    else:
-        assert result["id"] == tid
-        assert result["state"] == "no_speech"
-        assert result["chars"] == 9
+    assert result["id"] == tid
+    assert result["state"] == "no_speech"
+    assert result["transcript"] == "beep boop"
 
 
 def test_transmission_get_not_found(server, tlog):
@@ -206,12 +220,9 @@ def test_transmission_wait_reuses_completed(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler(id=tid, timeout_seconds=1.0)
     assert result is not None
-    if hasattr(result, "id"):
-        assert result.id == tid
-        assert result.state == "completed"
-    else:
-        assert result["id"] == tid
-        assert result["state"] == "completed"
+    assert result["id"] == tid
+    assert result["state"] == "completed"
+    assert result["transcript"] == "done"
 
 
 def test_transmission_wait_not_found(server, tlog):
@@ -252,7 +263,7 @@ def test_history_list_empty(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=10)
-    assert result == []
+    assert result == {"entries": [], "total": 0}
 
 
 def test_history_list_with_entries(server, history):
@@ -263,9 +274,9 @@ def test_history_list_with_entries(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=5)
-    assert len(result) == 2
-    assert result[0]["source"] == "vox"  # newest first
-    assert result[1]["source"] == "ptt"
+    assert len(result["entries"]) == 2
+    assert result["entries"][0]["source"] == "vox"  # newest first
+    assert result["entries"][1]["source"] == "ptt"
 
 
 def test_history_list_limit(server, history):
@@ -276,7 +287,8 @@ def test_history_list_limit(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=3)
-    assert len(result) == 3
+    assert len(result["entries"]) == 3
+    assert result["total"] == 10
 
 
 def test_history_list_query_filter(server, history):
@@ -339,8 +351,11 @@ def test_debug_health_has_fixed_fields(server):
     result = handler()
     assert "healthy" in result
     assert "server_version" in result
-    assert "model" in result
     assert "timestamp" in result
+    assert "device" in result
+    assert "compute" in result
+    assert "model" not in result  # strictly filtered out
+    assert "polish_server_url" not in result  # no raw URLs
     assert isinstance(result["healthy"], bool)
 
 
@@ -402,3 +417,104 @@ def test_all_pr5_tools_registered(server):
     actual = set(tools.keys())
     missing = expected - actual
     assert not missing, f"Missing registered tools: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Scope gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scoped_server():
+    """Server with only ``status:read`` scope (no ``transcript:read`` or ``debug:read``)."""
+    from mcp.server import MCPServer
+
+    from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch, FakeSessionPort
+
+    srv = MCPServer(name="test-scoped", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=FakeSessionPort(),
+        granted_scopes={"status:read"},  # minimal scopes
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_debug_tools_denied_without_debug_read(scoped_server):
+    """debug_health should raise when ``debug:read`` scope is absent."""
+    handler = _tool_fn(scoped_server, "debug_health")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "scope" in str(exc_info.value).lower()
+
+
+def test_transmission_tools_denied_without_transcript_read(scoped_server):
+    """transmission_get should raise when ``transcript:read`` scope is absent."""
+    handler = _tool_fn(scoped_server, "transmission_get")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(id=1)
+    assert "scope" in str(exc_info.value).lower()
+
+
+def test_session_status_allowed_with_status_read(scoped_server):
+    """session_status should succeed with only ``status:read`` scope."""
+    handler = _tool_fn(scoped_server, "session_status")
+    result = handler()
+    assert isinstance(result, dict)
+    assert "state" in result
+
+
+def test_history_tools_denied_without_transcript_read(scoped_server):
+    """history_list should raise when ``transcript:read`` scope is absent."""
+    handler = _tool_fn(scoped_server, "history_list")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(limit=5)
+    assert "scope" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Transmission record strict format
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_last_returns_dict(server, tlog):
+    """transmission_last returns a strict dict with expected fields."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="strict", state="completed")
+
+    handler = _tool_fn(server, "transmission_last")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+
+    assert isinstance(result, dict)
+    assert "id" in result
+    assert "state" in result
+    assert "transcript" in result
+    assert "filtered" in result
+    assert "paste_ok" in result
+    assert "paste_error" in result
+    assert "duration_ms" in result
+    assert "model" in result
+    # Strict: no raw internal fields
+    assert "_lock" not in result
+    assert "_extra" not in result
+
+
+def test_history_list_returns_envelope(server, history):
+    """history_list returns ``{entries: [...], total: N}`` envelope."""
+    history.add("alpha", source="ptt")
+    history.add("beta", source="vox")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10)
+
+    assert isinstance(result, dict)
+    assert "entries" in result
+    assert "total" in result
+    assert isinstance(result["entries"], list)
+    assert result["total"] == 2
+    assert len(result["entries"]) == 2
