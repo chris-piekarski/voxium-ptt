@@ -1,6 +1,6 @@
 # Opt-in MCP control plane
 
-The **opt-in MCP (Model Context Protocol) listener** exposes a local control-plane endpoint so that **coding agents** (e.g., terminal-based assistants) can query Voxium session state and trigger PTT operations. The listener is **off by default**, binds **only** to `127.0.0.1`, and requires a **bearer token**.
+The **opt-in MCP (Model Context Protocol) listener** exposes a local control-plane endpoint so that **coding agents** (e.g., terminal-based assistants) can query Voxium session state via a scoped, bearer-token-bearing endpoint. The listener is **off by default**, binds **only** to `127.0.0.1`, and requires a **bearer token**.
 
 ## Quick start
 
@@ -17,9 +17,12 @@ voxium run --agent
 The following precedence determines whether the listener starts (highest wins):
 
 1. **CLI** — `--agent` (enable) or `--no-agent` (disable)
-2. **Environment** — `VOXIUM_AGENT=1` / `true` / `yes`
+2. **Environment** — `VOXIUM_AGENT=1` / `true` / `yes` (also `0` / `false` / `no` to disable)
 3. **YAML config** — `agent.enabled: true` in `~/.config/voxium/config.yaml`
 4. **Hardcoded default** — `false` (off)
+
+The resolver is a pure function in ``voxium.agent_resolve`` (``resolve_agent_enabled``) and
+is unit-tested in ``tests/test_agent_resolve.py``.
 
 ## Listener startup
 
@@ -52,15 +55,18 @@ On normal exit (`Ctrl+C`), the listener socket is closed and the thread is joine
 
 Each tool requires a set of scopes. The current scope set is:
 
-- `status:read` — read session state
-- `transcript:read` — read transcription results
-- `clipboard:write` — write to the system clipboard
-- `output:paste` — paste output to an active window
-- `input:ptt` — trigger PTT recording
-- `input:vox` — trigger VOX (open-mic) recording
-- `session:retransmit` — re-transmit (F6) the last capture
-- `debug:read` — read internal debugging state
-- `logs:read` — read CLI log entries
+- `status:read` — read session state (**PR 4: now**) 
+- `transcript:read` — read transcription results (**Reserved: PR 5+**)
+- `clipboard:write` — write to the system clipboard (**Reserved: PR 5+**)
+- `output:paste` — paste output to an active window (**Reserved: PR 5+**)
+- `input:ptt` — trigger PTT recording (**Reserved: PR 5+**)
+- `input:vox` — trigger VOX (open-mic) recording (**Reserved: PR 5+**)
+- `session:retransmit` — re-transmit (F6) the last capture (**Reserved: PR 5+**)
+- `debug:read` — read internal debugging state (**Reserved: PR 5+**)
+- `logs:read` — read CLI log entries (**Reserved: PR 5+**)
+
+By default (no YAML config) the listener grants ``status:read`` and ``transcript:read``,
+which is sufficient for the current ``session_status`` tool.
 
 ## Tool registry
 

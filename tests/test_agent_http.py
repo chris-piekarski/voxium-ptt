@@ -103,9 +103,10 @@ class TestBearerMiddleware:
 
     def test_400_query_token_rejected(self, middleware) -> None:
         scope = _build_scope(
-            path="/?token=test",
+            path="/",
             headers={"authorization": f"Bearer {TOKEN}"},
         )
+        scope["query_string"] = b"token=test"
         responses, _ = self._call(middleware, scope)
         start = responses[0]
         assert start["status"] == 400

@@ -52,6 +52,21 @@ def test_fake_recording_makes_dispatch_busy():
     assert result["data"]["already_recording"] is True
 
 
+def test_ptt_engage_recording_scope_denied_without_scope():
+    """ptt_engage while RECORDING returns scope_denied when caller lacks input:ptt.
+
+    Scope and shutting_down gates must fire before the idempotent success check,
+    so a bearer token without input:ptt is refused even though we're already
+    recording.
+    """
+    _reset_mutable_bucket()
+    fp = FakeSessionPort(state=ClientState.RECORDING)
+    dispatch = AgentDispatch(fp, {"status:read"})  # NO input:ptt
+    result = dispatch.dispatch("ptt_engage", {})
+    assert not result["ok"]
+    assert result["error"]["code"] == "scope_denied"
+
+
 @pytest.mark.linux
 def test_fake_recording_refuses_vox():
     _reset_mutable_bucket()

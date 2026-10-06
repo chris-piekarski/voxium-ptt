@@ -7,18 +7,19 @@ import io
 import json
 import os
 import platform
-from collections import deque
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyperclip
 import requests
+import yaml
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.markup import escape
@@ -26,9 +27,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from scipy.io import wavfile
-import yaml
 
+from voxium import polish_profile, transcribe_stream_client
 from voxium.capture_enrich import enrich_capture_with_recording
+from voxium.cli_argv import normalize_cli_args
 from voxium.console_status import (
     PttSessionStatusBox,
     build_polish_ensure_stack_downlink_panel,
@@ -40,43 +42,38 @@ from voxium.console_status import (
     status_uses_recording_hud_line,
     voxium_panel_width,
 )
-from voxium.cli_argv import normalize_cli_args
 from voxium.constants import (
     APP_VERSION,
+    DEFAULT_HOTKEYS,
     DEFAULT_METRICS_SAMPLE_INTERVAL,
     DEFAULT_SERVER_COMPUTE,
     DEFAULT_SERVER_DEVICE,
     DEFAULT_SERVER_MODEL,
     DEFAULT_SERVER_START_TIMEOUT,
     DEFAULT_SERVER_TIMEOUT,
-    env_polish_enabled_default,
     DEFAULT_SERVER_URL,
-    DEFAULT_HOTKEYS,
     HOTKEY_ORDER,
     LOG_LEVELS,
     SAMPLE_RATE,
+    env_polish_enabled_default,
 )
-from voxium.exit_pause import pause_console_before_exit
 from voxium.ensure_model_client import ensure_model_on_loopback_server
-from voxium.http_detail import http_error_detail_text
-from voxium.radio_readback import (
-    take_edge_inference_detail,
-    take_edge_inference_rexmit_detail,
-    take_readback,
-    take_readback_rexmit,
-)
-from voxium.recording_ui import (
-    build_recording_hud_rich,
-    format_recording_hud,
-    format_recording_hud_minimal,
-    rms_to_dbfs,
-)
+from voxium.exit_pause import pause_console_before_exit
 from voxium.hotkey_rules import (
     hotkey_config_changed,
     normalize_hotkey_name,
     sanitize_hotkey_config,
 )
+from voxium.http_detail import http_error_detail_text
 from voxium.json_sanitize import json_safe_audio_value, round_audio_float
+from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
+from voxium.llama_cpp_daemon import (
+    ManagedLlamaCpp,
+    default_llama_server_path,
+    ensure_llama_cpp_daemon,
+    llama_server_cli_path,
+    stop_managed_llama_cpp,
+)
 from voxium.local_server_cmd import LocalServerLaunchConfig, argv_after_interpreter
 from voxium.loopback import (
     get_gpu_url,
@@ -101,14 +98,6 @@ from voxium.model_registry import (
     validate_model_name,
 )
 from voxium.morse_audio import MorseAudioController
-from voxium.llama_cpp_daemon import (
-    ManagedLlamaCpp,
-    default_llama_server_path,
-    ensure_llama_cpp_daemon,
-    llama_server_cli_path,
-    stop_managed_llama_cpp,
-)
-from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
 from voxium.paths import (
     default_server_log_path,
     ensure_runtime_dirs,
@@ -119,13 +108,6 @@ from voxium.paths import (
     repo_root,
 )
 from voxium.persistent_stats import config_stats_path, load_stats, record_stats
-from voxium.ptt_keying import (
-    PTT_ACTION_START,
-    PTT_ACTION_STOP,
-    PttKeyTracker,
-    handle_ptt_press,
-    handle_ptt_release,
-)
 from voxium.polish_model_registry import (
     DEFAULT_TRUSTED_POLISH_MODEL_ID,
     POLISH_DEFAULT_MODEL,
@@ -140,15 +122,32 @@ from voxium.polish_provision import (
     ensure_windows_llama_cpp_runtime,
     wrap_hf_download_progress,
 )
+from voxium.ptt_keying import (
+    PTT_ACTION_START,
+    PTT_ACTION_STOP,
+    PttKeyTracker,
+    handle_ptt_press,
+    handle_ptt_release,
+)
+from voxium.radio_readback import (
+    take_edge_inference_detail,
+    take_edge_inference_rexmit_detail,
+    take_readback,
+    take_readback_rexmit,
+)
+from voxium.recording_ui import (
+    build_recording_hud_rich,
+    format_recording_hud,
+    format_recording_hud_minimal,
+    rms_to_dbfs,
+)
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
-from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
-from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
-from voxium import polish_profile
-from voxium import transcribe_stream_client
-from voxium.terminal_focus import is_our_terminal_focused
+from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
+from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
+from voxium.terminal_focus import is_our_terminal_focused
 from voxium.vox_chunker import UtteranceChunker
 
 
@@ -847,6 +846,25 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         default=hist.get("pending_audio_max_mib", 32),
         metavar="N",
         help="Max MiB for the last capture in RAM (re-transmit; default F6). Use 0 to disable",
+    )
+
+    agent_group = parser.add_argument_group(
+        "Agent (opt-in MCP control plane)",
+        "Loopback MCP listener for local coding-agents. Bearer token, scoped tools, "
+        "credential file in ~config/voxium/run/agent.json.",
+    )
+    agent_group.add_argument(
+        "--agent",
+        action="store_true",
+        dest="agent",
+        default=None,  # resolved below: CLI > env > YAML > hardcoded
+        help="Opt-in MCP control-plane listener on 127.0.0.1 (default: off).",
+    )
+    agent_group.add_argument(
+        "--no-agent",
+        action="store_false",
+        dest="agent",
+        help="Explicitly disable the MCP control-plane listener.",
     )
 
 
@@ -2954,6 +2972,13 @@ def cleanup_client_runtime():
             stop_managed_llama_cpp(managed_llama_cpp)
         finally:
             managed_llama_cpp = None
+    # Stop opt-in MCP listener (no-op if never started)
+    try:
+        from voxium.agent_server import stop_agent_listener
+
+        stop_agent_listener()
+    except Exception:
+        pass
     _llama_cpp_polish_ready_checked = False
     _llama_cpp_ux_ready_checked = False
 
@@ -4339,6 +4364,51 @@ def run_client(args, _raw_argv: list[str]) -> int:
     clear_ux_chatter_wit()
     args.file_config = _merge_run_file_config(args)
     config = args
+
+    # -- Resolve agent flag precedence: CLI > env > YAML > hardcoded ----
+    _agent_fc = (getattr(config, "file_config", None) or {}).get("agent", {})
+    _agent_fc = _agent_fc if isinstance(_agent_fc, dict) else {}
+    _agent_scopes = None
+    if isinstance(_agent_fc, dict):
+        _agent_scopes = _agent_fc.get("scopes")
+        if not (isinstance(_agent_scopes, list) and _agent_scopes):
+            _agent_scopes = None
+    from voxium.agent_resolve import resolve_agent_enabled
+
+    _agent_enabled = resolve_agent_enabled(
+        cli_flag=getattr(config, "agent", None),
+        file_agent=_agent_fc,
+    )
+    _agent_cfg: dict[str, Any] = {"enabled": _agent_enabled}
+    if _agent_scopes:
+        _agent_cfg["scopes"] = _agent_scopes
+
+    # -- Start opt-in MCP listener (best-effort; failures don't block PTT) --
+    try:
+        from voxium.agent_server import start_agent_listener
+
+        start_agent_listener(_agent_cfg, scopes=_agent_cfg.get("scopes"))
+    except Exception:
+        cli_log(
+            "MCP agent listener failed to start; PTT continues without it.",
+            "warning",
+        )
+
+    # -- Install live state callable for session_status tool (PR 4) ---------
+    try:
+        from voxium.agent_server import install_state_callable
+
+        def _agent_state_fn() -> dict[str, Any]:
+            return {
+                "state": state.name.lower() if state is not None else "unknown",
+                "input_mode": input_mode if input_mode is not None else "ptt",
+                "transmission_latest_id": None,
+            }
+
+        install_state_callable(_agent_state_fn)
+    except Exception:
+        pass
+
     _llama_cpp_polish_ready_checked = False
     _llama_cpp_ux_ready_checked = False
     _telemetry_log_buffer.clear()

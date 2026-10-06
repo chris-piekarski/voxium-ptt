@@ -12,10 +12,10 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 from voxium.agent_auth import (
     compare_tokens,
+    has_query_token,
     parse_bearer,
 )
 
@@ -62,9 +62,10 @@ class AgentBearerMiddleware:
             await self._app(scope, receive, send)
             return
 
-        # -- Query-string token rejection --------------------------------
-        _qs = parse_qs(urlparse(scope.get("path", "")).query)
-        if "token" in _qs:
+        # -- Query-string token rejection (ASGI puts query in scope["query_string"]) --
+        qs_bytes: bytes = scope.get("query_string", b"")
+        qs_str = qs_bytes.decode("utf-8", errors="replace") if qs_bytes else ""
+        if has_query_token(qs_str or None):
             await _respond_json(
                 send, 400, {"detail": "Query-string tokens are not accepted"}
             )
