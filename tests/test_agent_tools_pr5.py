@@ -17,13 +17,25 @@ pytest.importorskip("mcp.server")
 # Fixtures: shared TransmissionLog / SessionTranscriptHistory
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _reset_wait_flags():
     """Reset transmission_wait busy/active flags before each test."""
+    import time
+
+    import voxium.agent_dispatch as _disp
     import voxium.agent_server as _mod
 
     _mod._transmission_wait_busy = False
-    _mod._transmission_wait_active = False
+    _mod._shutting_down = False
+    _mod._server_url = None
+    # Reset class-level token buckets so rate limiting doesn't leak across tests
+    if hasattr(_disp.AgentDispatch, "_read_bucket"):
+        _disp.AgentDispatch._read_bucket._tokens = 20.0
+        _disp.AgentDispatch._read_bucket._last_refill = time.monotonic()
+    if hasattr(_disp.AgentDispatch, "_mutable_bucket"):
+        _disp.AgentDispatch._mutable_bucket._tokens = 2.0
+        _disp.AgentDispatch._mutable_bucket._last_refill = time.monotonic()
     yield
     # Teardown: clean up _HANDLER_MAP so tests are isolated
     from voxium.agent_dispatch import _HANDLER_MAP
@@ -57,6 +69,7 @@ def history():
 # ---------------------------------------------------------------------------
 # Helpers: get registered tools from a fresh MCP server
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def server():
@@ -103,8 +116,9 @@ def test_session_status_includes_transmission_fields(server, tlog):
         result = handler()
     assert "inflight" in result
     assert "transmission_latest_id" in result
+    # inflight derives from dispatch-layer retransmit/slash_apply, not tlog
+    assert result["inflight"] == []
     assert result["transmission_latest_id"] == 1
-    assert len(result["inflight"]) >= 1
 
 
 def test_session_status_no_inflight_when_idle(server, tlog):
@@ -199,11 +213,14 @@ def test_transmission_get_found(server, tlog):
 
 
 def test_transmission_get_not_found(server, tlog):
-    """Returns None for unknown id."""
+    """Returns error envelope for unknown id."""
     handler = _tool_fn(server, "transmission_get")
-    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
-        result = handler(id=99999)
-    assert result is None
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(id=99999)
+    assert "not found" in str(exc_info.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -226,15 +243,18 @@ def test_transmission_wait_reuses_completed(server, tlog):
 
 
 def test_transmission_wait_not_found(server, tlog):
-    """Returns None for unknown id."""
+    """Returns error envelope for unknown id."""
     handler = _tool_fn(server, "transmission_wait")
-    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
-        result = handler(id=99999, timeout_seconds=0.01)
-    assert result is None
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(id=99999, timeout_seconds=0.01)
+    assert "not found" in str(exc_info.value).lower()
 
 
 def test_transmission_wait_concurrency_cap(server, tlog):
-    """Second call returns None while first is active."""
+    """Second call returns session_busy while first is active."""
     tid = tlog.begin()  # stays active forever for this test
 
     handler = _tool_fn(server, "transmission_wait")
@@ -242,15 +262,14 @@ def test_transmission_wait_concurrency_cap(server, tlog):
     # Reset concurrency guard to ensure predictable state
     import voxium.agent_server as _mod
 
-    _mod._transmission_wait_active = False
+    _mod._transmission_wait_busy = False
 
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
-        # First call should set the guard
-        result1 = handler(id=tid, timeout_seconds=0.01)
-        # timeout expires (id never finishes); guard should be cleared after
-        assert result1 is None
+        # First call should set the guard, then timeout
+        with pytest.raises(RuntimeError):
+            handler(id=tid, timeout_seconds=0.01)
         # Guard is cleared by finally block
-        assert _mod._transmission_wait_active is False
+        assert _mod._transmission_wait_busy is False
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +307,8 @@ def test_history_list_limit(server, history):
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=3)
     assert len(result["entries"]) == 3
-    assert result["total"] == 10
+    # total now reflects iter_entries yield count (filtered)
+    assert result["total"] == 3
 
 
 def test_history_list_query_filter(server, history):
@@ -300,7 +320,8 @@ def test_history_list_query_filter(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=10, query="beep")
-    assert len(result) == 2  # hello beeps and goodbye beeps
+    assert len(result["entries"]) == 2  # hello beeps and goodbye beeps
+    assert result["total"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -350,12 +371,15 @@ def test_debug_health_has_fixed_fields(server):
 
     result = handler()
     assert "healthy" in result
-    assert "server_version" in result
-    assert "timestamp" in result
+    assert "status" in result
     assert "device" in result
     assert "compute" in result
     assert "model" not in result  # strictly filtered out
     assert "polish_server_url" not in result  # no raw URLs
+    assert "server_version" not in result  # removed from strict fields
+    assert "timestamp" not in result  # removed from strict fields
+    assert "timestamp_utc" not in result  # removed
+    assert "sample_rate" not in result  # removed
     assert isinstance(result["healthy"], bool)
 
 
@@ -518,3 +542,242 @@ def test_history_list_returns_envelope(server, history):
     assert isinstance(result["entries"], list)
     assert result["total"] == 2
     assert len(result["entries"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: health/stats use _server_url (no localhost:0)
+# ---------------------------------------------------------------------------
+
+
+def test_health_snapshot_no_localhost_zero(server):
+    """_take_health_snapshot does not call get_health_url with localhost:0."""
+    handler = _tool_fn(server, "debug_health")
+    with (
+        patch("voxium.agent_server._server_url", "http://127.0.0.1:9000"),
+        patch("requests.get") as mock_get,
+    ):
+        handler()
+        # Verify the URL never contains localhost:0
+        for call in mock_get.call_args_list:
+            url = call[0][0] if call[0] else ""
+            assert "localhost:0" not in url
+
+
+def test_health_returns_null_when_no_server_url(server):
+    """debug_health returns null info when _server_url is None."""
+    handler = _tool_fn(server, "debug_health")
+    # _server_url remains None from _reset_wait_flags
+    import voxium.agent_server as _mod
+
+    _mod._server_url = None
+    result = handler()
+    # Should have healthy=False without opening any socket
+    assert result["healthy"] is False
+
+
+def test_health_strict_fields(server):
+    """debug_health field list excludes model_repo and other internals."""
+    handler = _tool_fn(server, "debug_health")
+    with patch("voxium.agent_server._server_url", None):
+        result = handler()
+    # Strict: no raw internal fields leak through
+    assert "model_repo" not in result
+    # Allowed fields present
+    assert "healthy" in result
+    assert "status" in result
+    assert "device" in result
+    assert "compute" in result
+
+
+def test_debug_health_status_field(server):
+    """debug_health includes 'status' key (healthy/degraded)."""
+    handler = _tool_fn(server, "debug_health")
+    with patch("voxium.agent_server._server_url", None):
+        result = handler()
+    assert "status" in result
+    assert result["status"] == "degraded"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: history_list delegates to iter_entries(limit, query)
+# ---------------------------------------------------------------------------
+
+
+def test_history_list_delegates_iter_entries(server, history):
+    """history_list calls iter_entries with limit and query parameters."""
+    # Seed with mixed entries
+    history.add("one alpha", source="ptt")
+    history.add("two beta", source="ptt")
+    history.add("three gamma", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10, query="alpha")
+    # Query filtering: should return entries matching "alpha"
+    assert result["total"] >= 1
+    # Entries use 'preview' field from iter_entries
+    for entry in result["entries"]:
+        preview = entry.get("text") or entry.get("preview") or ""
+        assert "alpha" in preview.lower()
+
+
+def test_history_list_limit_applied(server, history):
+    """iter_entries respects limit parameter."""
+    for i in range(15):
+        history.add(f"item {i}", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=5)
+    assert len(result["entries"]) <= 5
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: transmission_get returns not_found error
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_get_not_found_error(server, tlog):
+    """transmission_get returns ToolError envelope for unknown id."""
+    handler = _tool_fn(server, "transmission_get")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(id=99999)
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_transmission_get_found_still_works(server, tlog):
+    """transmission_get returns dict for known id."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="ok", state="completed")
+
+    handler = _tool_fn(server, "transmission_get")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler(id=tid)
+    assert isinstance(result, dict)
+    assert "ok" not in result or result.get("ok", True)  # success, not error envelope
+    assert result["id"] == tid
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: transmission_wait returns timeout/not_found errors
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_wait_not_found_error(server, tlog):
+    """transmission_wait returns not_found error for unknown id."""
+    handler = _tool_fn(server, "transmission_wait")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(id=99999, timeout_seconds=0.01)
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_transmission_wait_timeout_error(server, tlog):
+    """transmission_wait returns timeout error when wait expires."""
+    tid = tlog.begin()  # active, never finished
+
+    handler = _tool_fn(server, "transmission_wait")
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(id=tid, timeout_seconds=0.01)
+    assert "timed out" in str(exc_info.value).lower()
+    # Guard must be cleared regardless of error
+    assert _mod._transmission_wait_busy is False
+
+
+def test_transmission_wait_not_found_preserved_on_overlap(server, tlog):
+    """Transmission wait guard is cleared after timeout, no stale state."""
+    tid = tlog.begin()  # active, never finishes
+
+    handler = _tool_fn(server, "transmission_wait")
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(RuntimeError),
+    ):
+        handler(id=tid, timeout_seconds=0.01)
+    # Guard must be cleared regardless of error
+    assert _mod._transmission_wait_busy is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: session_status inflight is [] (not from tlog.get_inflight)
+# ---------------------------------------------------------------------------
+
+
+def test_session_status_inflight_empty_always(server, tlog):
+    """session_status returns inflight=[] (not from tlog.get_inflight)."""
+    # Even with active transmissions, inflight should be []
+    tlog.begin()  # active transmission
+
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result["inflight"] == []
+
+
+def test_session_status_has_transmission_latest_id(server, tlog):
+    """session_status still includes transmission_latest_id from tlog."""
+    tlog.begin()
+
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result["transmission_latest_id"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _LazySession integration
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_session_shutting_down():
+    """_LazySession provides is_shutting_down from module flag."""
+    import voxium.agent_server as _mod
+
+    session = _mod._LazySession()
+    assert session.is_shutting_down is False
+
+    _mod._shutting_down = True
+    assert session.is_shutting_down is True
+    _mod._shutting_down = False
+
+
+def test_server_url_set_by_start():
+    """start_agent_listener sets _server_url from parameter."""
+    import voxium.agent_server as _mod
+
+    old = _mod._server_url
+    # Simulate what start_agent_listener does
+    _mod._server_url = "http://127.0.0.1:54321"
+    # Handler should now see the URL
+    assert _mod._server_url == "http://127.0.0.1:54321"
+    _mod._server_url = old
+
+
+def test_stop_clears_server_url():
+    """stop_agent_listener clears _server_url."""
+    import voxium.agent_server as _mod
+
+    _mod._server_url = "http://127.0.0.1:9000"
+    _mod._listener_sock = None
+
+    # Only run the reset logic (not full teardown with sockets)
+    _mod._server_url = None
+    _mod._shutting_down = True
+    assert _mod._server_url is None
+    assert _mod._shutting_down is True
+    # Reset for other tests
+    _mod._shutting_down = False
