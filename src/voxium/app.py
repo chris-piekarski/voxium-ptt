@@ -2009,11 +2009,21 @@ def vox_audio_callback(indata, _frames, _time_info, status) -> None:
         if st == State.IDLE:
             with state_lock:
                 state = State.TRANSCRIBING
+            # PR 5: begin transmission BEFORE the thread can race with reads
+            _tlog_vox = _get_agent_transmission_log()
+            _vox_tid: int | None = None
+            if _tlog_vox is not None:
+                _vox_tid = _tlog_vox.begin()
             paste_target = get_active_window()
             threading.Thread(
                 target=transcribe_and_paste,
                 args=(utt,),
-                kwargs={"source": "vox", "paste_target": paste_target},
+                kwargs={
+                    "source": "vox",
+                    "paste_target": paste_target,
+                    "_tlog": _tlog_vox,
+                    "_tid": _vox_tid,
+                },
                 daemon=True,
             ).start()
         else:
@@ -3312,8 +3322,14 @@ def paste_text(text: str):
 
 
 def transcribe_and_paste(
-    audio: np.ndarray, *, source: str = "ptt", paste_target: Any | None = None
-):
+    audio: np.ndarray,
+    *,
+    source: str = "ptt",
+    paste_target: Any | None = None,
+    # PR 5: optional transmission log + id (passed when caller did begin before Thread.start)
+    _tlog: Any = None,
+    _tid: int | None = None,
+) -> None:
     """
     *paste_target* — foreground window to focus before paste (PTT sets this via
     :func:`start_recording` on the main thread; VOX passes it per utterance from
@@ -3325,6 +3341,9 @@ def transcribe_and_paste(
     # Skip the post-take sleep when we already re-armed on an error path (fast VOX/PTT).
     skip_final_pacing = False
     rearm_after_final_pacing = False
+    # PR 5: track outcome for finish()
+    _outcome_state: str = "error"  # default for exception/early-return paths
+    _transcribed_text: str = ""
     try:
         text = transcribe(audio)
         metrics = last_transcription_metrics
@@ -3333,6 +3352,8 @@ def transcribe_and_paste(
         if is_client_shutting_down():
             return
         if text and not is_hallucination(text):
+            _outcome_state = "completed"
+            _transcribed_text = text
             set_spectrum_from_mono_float(audio, SAMPLE_RATE)
             # Record before paste so /history and replay work even if clipboard or focus/paste fails.
             h = get_transcript_history()
@@ -3363,6 +3384,8 @@ def transcribe_and_paste(
             show_status(STATUS_VOX_COPY, copy_readback)
             log_transcription_summary(text, metrics)
         else:
+            _outcome_state = "no_speech"
+            _transcribed_text = ""
             beep_error()
             set_terminal_title()
             h_clear = get_transcript_history()
@@ -3391,6 +3414,13 @@ def transcribe_and_paste(
     finally:
         with state_lock:
             state = State.IDLE
+        # PR 5: finish transmission on every exit path
+        if _tid is not None and _tlog is not None:
+            _tlog.finish(
+                _tid,
+                state=_outcome_state,
+                text=_transcribed_text,
+            )
         if is_client_shutting_down():
             return
         nxt: np.ndarray | None = None
@@ -3399,12 +3429,22 @@ def transcribe_and_paste(
             if vox_pending_audio:
                 nxt, nxt_paste = vox_pending_audio.popleft()
         if nxt is not None and _get_input_mode() == "vox" and vox_stream is not None:
+            # PR 5: begin transmission for queued item BEFORE the thread can race with reads
+            queued_tid: int | None = None
+            tlog_for_queued = _tlog
+            if tlog_for_queued is not None:
+                queued_tid = tlog_for_queued.begin()
             with state_lock:
                 state = State.TRANSCRIBING
             threading.Thread(
                 target=transcribe_and_paste,
                 args=(nxt,),
-                kwargs={"source": "vox", "paste_target": nxt_paste},
+                kwargs={
+                    "source": "vox",
+                    "paste_target": nxt_paste,
+                    "_tlog": tlog_for_queued,
+                    "_tid": queued_tid,
+                },
                 daemon=True,
             ).start()
             return
@@ -3553,6 +3593,24 @@ def _make_gain_bar(level: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _get_agent_transmission_log() -> Any | None:
+    """Lazy-import the process-wide TransmissionLog singleton (PR 5)."""
+    try:
+        from voxium.agent_server import get_transmission_log
+
+        return get_transmission_log()
+    except Exception:
+        return None
+
+
+def _finish_agent_transmission(tlog: Any, tid: int, *, state: str = "error") -> None:
+    """Call tlog.finish for synchronous retry paths (PR 5)."""
+    try:
+        tlog.finish(tid, state=state)
+    except Exception:
+        pass
+
+
 def _finish_ptt_recording() -> None:
     global state
     with state_lock:
@@ -3560,7 +3618,17 @@ def _finish_ptt_recording() -> None:
             return
         state = State.TRANSCRIBING
     audio = stop_recording()
-    threading.Thread(target=transcribe_and_paste, args=(audio,), daemon=True).start()
+    # PR 5: begin transmission BEFORE the thread can race with reads
+    _tlog = _get_agent_transmission_log()
+    _tid: int | None = None
+    if _tlog is not None:
+        _tid = _tlog.begin()
+    threading.Thread(
+        target=transcribe_and_paste,
+        args=(audio,),
+        kwargs={"_tlog": _tlog, "_tid": _tid},
+        daemon=True,
+    ).start()
 
 
 def create_record_hotkey_handlers(hotkey):
@@ -3678,6 +3746,14 @@ def create_retry_handler(retry_key):
             _status_detail_for_edge_inference(rexmit=True),
         )
 
+        # PR 5: begin transmission for synchronous retry
+        _retry_tlog = _get_agent_transmission_log()
+        _retry_tid: int | None = None
+        _retry_outcome: str = "error"
+        _retry_text: str = ""
+        if _retry_tlog is not None:
+            _retry_tid = _retry_tlog.begin()
+
         try:
             wav_buffer = io.BytesIO(pending)
             text = transcribe_server(wav_buffer, last_audio_capture_info)
@@ -3690,6 +3766,8 @@ def create_retry_handler(retry_key):
                 _record_persistent_stats(metrics, source="retry")
 
             if text and not is_hallucination(text):
+                _retry_outcome = "completed"
+                _retry_text = text
                 try:
                     raw = io.BytesIO(pending)
                     r_sr, r_data = wavfile.read(raw)
@@ -3734,6 +3812,7 @@ def create_retry_handler(retry_key):
                 show_status(STATUS_VOX_COPY_REXMIT, copy_rex)
                 log_transcription_summary(text, metrics)
             else:
+                _retry_outcome = "no_speech"
                 beep_error()
                 show_status("❌ NO SPEECH", "Nothing detected")
                 h4 = get_transcript_history()
@@ -3743,6 +3822,11 @@ def create_retry_handler(retry_key):
             beep_error()
             set_terminal_title()
             show_status("❌ RE-TRANSMIT FAILED", str(e)[:200])
+        finally:
+            # PR 5: finish transmission on every exit path
+            _finish_agent_transmission(
+                _retry_tlog, _retry_tid, state=_retry_outcome
+            )
 
     return on_press
 
@@ -4433,6 +4517,10 @@ def run_client(args, _raw_argv: list[str]) -> int:
         max_total_chars=config.history_max_chars,
         max_pending_bytes=_pending_b,
     )
+    # PR 5: wire process-wide history for agent tools
+    from voxium.session_history import _set_session_history
+
+    _set_session_history(history)
 
     if not config.quiet and not config.minimal:
         from voxium.startup_banner import get_startup_hostname, show_startup_banner

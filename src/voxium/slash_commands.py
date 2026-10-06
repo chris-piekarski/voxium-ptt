@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-import pyperclip
 
+import pyperclip
 from rich.text import Text
 
+from voxium import polish_profile
 from voxium.constants import DEFAULT_HOTKEYS, HOTKEY_ORDER
 from voxium.disk_usage_report import format_repo_disk_usage_text
 from voxium.hotkey_rules import normalize_hotkey_name, sanitize_hotkey_config
@@ -18,14 +19,13 @@ from voxium.model_registry import (
     TRUSTED_MODELS,
     validate_model_name,
 )
-from voxium.polish_models import validate_polish_model_tag
-from voxium import polish_profile
 from voxium.polish_model_registry import (
     DEFAULT_TRUSTED_POLISH_MODEL_ID,
     POLISH_DEFAULT_MODEL,
     list_available_polish_models,
     list_local_polish_models,
 )
+from voxium.polish_models import validate_polish_model_tag
 from voxium.session_history import SessionTranscriptHistory
 
 
@@ -218,7 +218,7 @@ def _float_stat(stats: dict | None, key: str) -> float:
         return 0.0
 
 
-def _fmt_int(value: int | float) -> str:
+def _fmt_int(value: float) -> str:
     return f"{int(value):,}"
 
 
@@ -792,6 +792,15 @@ def _run_history_line(
                 text="Use /history clear alone — nothing after “clear”, copy."
             )
         n, had_pending = transcript_history.purge_all()
+        # PR 5: also purge transmission log when history is cleared
+        try:
+            from voxium.agent_server import get_transmission_log
+
+            tlog = get_transmission_log()
+            if tlog is not None:
+                tlog.purge()
+        except Exception:  # noqa: BLE001, S110
+            pass
         if n == 0 and not had_pending:
             return SlashLineResult(
                 text="Session transcript buffer was already empty (RAM only; nothing to clear), copy."

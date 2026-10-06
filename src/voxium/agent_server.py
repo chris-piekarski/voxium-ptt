@@ -10,11 +10,18 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-__all__ = ["start_agent_listener", "stop_agent_listener"]
+__all__ = [
+    "get_session_history",
+    "get_transmission_log",
+    "install_state_callable",
+    "start_agent_listener",
+    "stop_agent_listener",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,27 @@ _listener_sock: socket.socket | None = None
 _state_callable: Callable[[], dict[str, Any]] | None = None
 
 
+# ---------------------------------------------------------------------------
+# Process-wide transmission log (PR 5)
+# ---------------------------------------------------------------------------
+
+_transmission_log: Any = None  # lazy import of transmission_log.TransmissionLog
+_transmission_wait_active: bool = False  # concurrency cap for transmission_wait
+_health_snapshot: Any = None  # cache for debug_health probe
+_health_cache_time: float = 0.0  # monotonic timestamp for health cache
+_HEALTH_CACHE_TTL: float = 10.0  # seconds
+
+
+def get_transmission_log() -> Any:
+    """Return the process-wide TransmissionLog singleton (lazy import)."""
+    global _transmission_log
+    if _transmission_log is None:
+        from voxium.transmission_log import TransmissionLog
+
+        _transmission_log = TransmissionLog()
+    return _transmission_log
+
+
 def install_state_callable(fn: Callable[[], dict[str, Any]]) -> None:
     """Install a zero-arg callable that ``session_status`` proxies to.
 
@@ -47,6 +75,7 @@ def default_state_callable() -> dict[str, Any]:
     return {
         "state": "unknown",
         "input_mode": "ptt",
+        "inflight": [],
         "transmission_latest_id": None,
     }
 
@@ -116,8 +145,11 @@ def start_agent_listener(
     # -- Build MCP server ------------------------------------------------------
     server = MCPServer(name="voxium-agent", version="0.0.1")
 
-    # Register session_status (only tool in PR 4)
+    # Register session_status + PR 5 read-only tools
     _register_session_status_tool(server)
+    _register_transmission_tools(server)
+    _register_history_tools(server)
+    _register_debug_tools(server)
 
     # -- Bind socket ourselves (127.0.0.1:0) -----------------------------------
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -171,7 +203,7 @@ def start_agent_listener(
 
 
 def stop_agent_listener() -> None:
-    """Close the listening socket, unlink the credential file, and join the serve thread.
+    """Close the socket, unlink credentials, and join the serve thread.
 
     No-op when the listener was never started.
     """
@@ -197,19 +229,218 @@ def stop_agent_listener() -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _register_session_status_tool(server: Any) -> None:
-    """Register ``session_status`` on *server* (PR 4 only tool)."""
+    """Register ``session_status`` on *server*.
+
+    Returns state, input_mode, inflight records, and latest transmission id.
+    """
 
     @server.tool("session_status")
     def session_status() -> dict[str, Any]:
         """Structured snapshot of this client's state."""
         fn = _state_callable
-        return fn() if fn is not None else default_state_callable()
+        base = fn() if fn is not None else default_state_callable()
+        # PR 5: merge inflight + latest transmission id
+        tlog = get_transmission_log()
+        base["inflight"] = list(tlog.get_inflight()) if tlog is not None else []
+        base["transmission_latest_id"] = tlog.latest_id() if tlog is not None else None
+        return base
+
+
+# ---------------------------------------------------------------------------
+# PR 5: read-only tools (transmission, history, debug)
+# ---------------------------------------------------------------------------
+
+
+def _register_transmission_tools(server: Any) -> None:
+    """Register transmission_last, transmission_get, transmission_wait."""
+
+    @server.tool("transmission_last")
+    def transmission_last() -> dict[str, Any] | None:
+        """Return the most recent transmission record."""
+        tlog = get_transmission_log()
+        if tlog is None:
+            return None
+        return tlog.last()
+
+    @server.tool("transmission_get")
+    def transmission_get(id: int) -> dict[str, Any] | None:  # type: ignore[override]
+        """Return a transmission record by id."""
+        tlog = get_transmission_log()
+        if tlog is None:
+            return None
+        return tlog.get(id)
+
+    @server.tool("transmission_wait")
+    def transmission_wait(
+        id: int, timeout_seconds: float = 30.0
+    ) -> dict[str, Any] | None:  # type: ignore[override]
+        """Long-poll for a transmission to finish (one-at-a-time concurrency cap)."""
+        global _transmission_wait_active
+        if _transmission_wait_active:
+            return None
+        tlog = get_transmission_log()
+        if tlog is None:
+            return None
+        _transmission_wait_active = True
+        try:
+            return tlog.wait(id, timeout=timeout_seconds)
+        finally:
+            _transmission_wait_active = False
+
+
+def _register_history_tools(server: Any) -> None:
+    """Register history_list, history_get."""
+
+    @server.tool("history_list")
+    def history_list(limit: int = 25, query: str = "") -> list[dict[str, Any]]:  # type: ignore[override]
+        """List recent history entries (read-only)."""
+        hist = get_session_history()
+        if hist is None:
+            return []
+        entries = list(hist.iter_entries())
+        if query:
+            q = query.lower()
+            entries = [
+                e
+                for e in entries
+                if q in (e.get("text") or e.get("preview") or "").lower()
+            ]
+        return entries[-limit:] if len(entries) > limit else entries
+
+    @server.tool("history_get")
+    def history_get(index: int) -> dict[str, Any] | None:  # type: ignore[override]
+        """Return a specific history entry by index."""
+        hist = get_session_history()
+        if hist is None:
+            return None
+        try:
+            return hist.get_entry(index)
+        except (IndexError, KeyError):
+            return None
+
+
+def _register_debug_tools(server: Any) -> None:
+    """Register debug_health, debug_stats, debug_disk."""
+
+    def _take_health_snapshot() -> dict[str, Any]:
+        """Take a health snapshot (cached for _HEALTH_CACHE_TTL seconds)."""
+        global _health_snapshot, _health_cache_time
+        now = time.monotonic()
+        if (
+            _health_snapshot is not None
+            and (now - _health_cache_time) < _HEALTH_CACHE_TTL
+        ):
+            return _health_snapshot
+        snapshot: dict[str, Any] = {"healthy": False}
+        try:
+            import requests
+
+            from voxium.loopback import get_health_url
+
+            resp = requests.get(get_health_url("http://localhost:0"), timeout=3)
+            snapshot["healthy"] = resp.status_code == 200
+            snapshot["info"] = resp.json() if resp.status_code == 200 else None
+        except Exception:  # noqa: BLE001
+            snapshot["info"] = None
+        _health_snapshot = snapshot
+        _health_cache_time = now
+        return snapshot
+
+    @server.tool("debug_health")
+    def debug_health() -> dict[str, Any]:
+        """Structured health snapshot (fixed field list)."""
+        snap = _take_health_snapshot()
+        return {
+            "healthy": snap.get("healthy", False),
+            "server_up": snap.get("healthy", False),
+            "server_version": (snap.get("info") or {}).get("version", "unknown"),
+            "timestamp": (snap.get("info") or {}).get("timestamp", ""),
+            "timestamp_utc": (snap.get("info") or {}).get("timestamp_utc", ""),
+            "model": (snap.get("info") or {}).get("model", "none"),
+            "model_name": (snap.get("info") or {}).get("model_name", "unknown"),
+            "polish_server_url": (snap.get("info") or {}).get("polish_server_url", ""),
+            "polish_model": (snap.get("info") or {}).get("polish_model", "none"),
+            "sample_rate": (snap.get("info") or {}).get("sample_rate", 0),
+        }
+
+    @server.tool("debug_stats")
+    def debug_stats() -> dict[str, Any]:
+        """Structured persistent and server statistics."""
+        result: dict[str, Any] = {}
+        try:
+            from voxium.paths import persistent_stats_path
+
+            p = persistent_stats_path()
+            if p.exists():
+                import json
+
+                result["persistent"] = json.loads(p.read_text())
+        except Exception:  # noqa: BLE001
+            result["persistent"] = None
+        try:
+            import requests
+
+            from voxium.loopback import get_health_url
+
+            resp = requests.get(
+                get_health_url("http://localhost:0").replace("/health", "/stats"),
+                timeout=2,
+            )
+            result["server"] = resp.json() if resp.status_code == 200 else None
+        except Exception:  # noqa: BLE001
+            result["server"] = None
+        return result
+
+    @server.tool("debug_disk")
+    def debug_disk() -> list[dict[str, Any]]:
+        """Disk usage report for local data directories."""
+        entries: list[dict[str, Any]] = []
+        try:
+            from voxium.disk_usage_report import (
+                VOXIUM_DATA_RELPATHS,
+                _dir_size,
+                _human_size,
+            )
+            from voxium.paths import repo_root
+
+            root = repo_root()
+            for rel in VOXIUM_DATA_RELPATHS:
+                p = root / rel
+                size = _dir_size(p) if p.exists() else 0
+                entries.append(
+                    {
+                        "label": rel,
+                        "bytes": size,
+                        "human": _human_size(size),
+                        "present": p.exists(),
+                    }
+                )
+        except Exception:  # noqa: BLE001, S110
+            pass
+        return entries
+
+
+# ---------------------------------------------------------------------------
+# Process-wide session history getter (PR 5)
+# ---------------------------------------------------------------------------
+
+
+def get_session_history() -> Any | None:
+    """Return the process-wide SessionTranscriptHistory singleton (lazy import)."""
+    try:
+        from voxium.session_history import (
+            get_transcript_history,
+        )
+
+        return get_transcript_history()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 def _serve_uvicorn(app: Any, server: Any, sock: socket.socket) -> None:

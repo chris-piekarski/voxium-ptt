@@ -74,7 +74,7 @@ class TestBearerMiddleware:
             if msg.get("type") == "http.response.body":
                 state["more"] = False
 
-        asyncio.get_event_loop().run_until_complete(middleware(scope, receive, send))
+        asyncio.run(middleware(scope, receive, send))
         return responses, state
 
     def test_200_with_valid_bearer(self, middleware) -> None:

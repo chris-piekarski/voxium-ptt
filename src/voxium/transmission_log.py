@@ -9,6 +9,7 @@ Pure module: no network, no microphone, no MCP SDK import.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -139,11 +140,32 @@ class TransmissionLog:
         with self._lock:
             return bool(self._active_ids)
 
+    def get_inflight(self) -> list[int]:
+        """Return a sorted list of active (inflight) transmission ids."""
+        with self._lock:
+            return sorted(self._active_ids)
+
     def clear(self) -> None:
         """Wipe all records (called by ``/history clear``)."""
         with self._lock:
             self._records.clear()
             self._active_ids.clear()
+
+    def wait(self, tid: int, timeout: float = 30.0) -> TransmissionRecord | None:
+        """Poll for *tid* to finish (or not exist). Returns the record
+        or ``None`` on timeout / not-found.
+
+        This is a blocking sync poll; assume the MCP SDK runs sync tools
+        on a worker thread so ``time.sleep`` does not block ``asyncio``.
+        """
+        deadline = time.monotonic() + min(timeout, 240.0)
+        while True:
+            rec = self.get(tid)
+            if rec is None or rec.state != "transcribing":
+                return rec
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.25)
 
     def record_count(self) -> int:
         """Return the number of stored records."""
