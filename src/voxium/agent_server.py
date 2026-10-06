@@ -57,73 +57,115 @@ _server_url: str | None = None
 # Shutdown flag for dispatch layer (set by stop_agent_listener).
 _shutting_down: bool = False
 
+# Live session wiring (PR 7): _LazySession proxies here when set.
+_live_session: Any = None
+
+
+def install_live_session(session: Any) -> None:
+    """Wire ``_LazySession`` to a live SessionPort from ``app.py``.
+
+    After calling this, ``_LazySession`` methods proxy to the real session
+    instead of using hardcoded stub values.
+    """
+    global _live_session
+
+    _live_session = session
+
 
 class _LazySession:
     """Minimal SessionPort for the dispatch layer.
 
-    Read-only tools are idempotent so the busy-path never fires.
-    This class provides the protocol surface for scope and shutting-down checks.
+    Proxies to ``_live_session`` when wired; otherwise provides
+    default stub values for read-only tools.
     """
 
     @property
     def is_shutting_down(self) -> bool:
         return _shutting_down
 
-    # Remaining protocol methods are stubs — never called for read-only tools.
     @property
     def state(self):
+        if _live_session is not None:
+            return _live_session.state
         from voxium.agent_dispatch import ClientState
 
         return ClientState.IDLE
 
     @property
     def input_mode(self):
+        if _live_session is not None:
+            return _live_session.input_mode
         return "ptt"
 
     @property
     def inflight(self):
+        if _live_session is not None:
+            return _live_session.inflight
         return set()
 
     @property
     def active_hotkey(self):
+        if (live := _live_session) is not None:
+            return getattr(live, "active_hotkey", None)
         return None
 
     @property
     def paste_debounce_remaining_ms(self):
+        if (live := _live_session) is not None:
+            return getattr(live, "paste_debounce_remaining_ms", 0)
         return 0.0
 
     @property
     def has_pending_audio(self):
+        if (live := _live_session) is not None:
+            return getattr(live, "has_pending_audio", False)
         return False
 
     @property
     def history_count(self):
+        if _live_session is not None:
+            return _live_session.history_count
         return 0
 
     @property
     def agent_ptt_open(self):
+        if _live_session is not None:
+            return _live_session.agent_ptt_open
         return False
 
     def get_active_window(self):
+        if _live_session is not None:
+            return _live_session.get_active_window()
         return None
 
     def history_text_by_index(self, index: int):
+        if _live_session is not None:
+            return _live_session.history_text_by_index(index)
         return None
 
     def history_list_entries(self, limit: int, query: str):
+        if _live_session is not None:
+            return _live_session.history_list_entries(limit, query)
         return []
 
     def clipboard_set_text(self, text: str):
+        if _live_session is not None:
+            return _live_session.clipboard_set_text(text)
         return 0
 
     def paste_for_agent(self, text: str, window: Any):
+        if _live_session is not None:
+            return _live_session.paste_for_agent(text, window)
         return 0
 
     def next_replay_cursor_index(self):
+        if _live_session is not None:
+            return _live_session.next_replay_cursor_index()
         return None
 
     def advance_replay_cursor(self) -> None:
-        pass
+        if (live := _live_session) is not None:
+            live.advance_replay_cursor()
 
 
 def get_transmission_log() -> Any:
@@ -379,6 +421,15 @@ def _build_read_handler_map() -> dict[str, Callable]:
     enforced by the dispatch layer *before* the handler runs.
     """
 
+    # --------------- Helper: create a ToolError envelope ---------------------
+
+    def _tool_error(code: str, message: str) -> dict[str, Any]:
+        from voxium.agent_protocol import ToolError
+
+        return ToolError(code=code, message=message).to_dict()
+
+    # --------------- Session status ----------------------------------------
+
     def _handler_session_status(_session: Any, _ri: dict) -> dict[str, Any]:
         fn = _state_callable
         base = fn() if fn is not None else default_state_callable()
@@ -585,6 +636,125 @@ def _build_read_handler_map() -> dict[str, Callable]:
             pass
         return entries
 
+    # --------------- Clipboard tools (PR 7) ----------------------------------
+
+    _CLIPBOARD_SIZE_LIMIT = 256 * 1024  # 256 KiB UTF-8 byte limit
+
+    def _handler_clipboard_set(_session: Any, ri: dict) -> dict[str, Any] | None:
+        """Place text on the system clipboard (scope: clipboard:write)."""
+        text = ri.get("text")
+        if not isinstance(text, str) or not text:
+            return _tool_error("invalid_arguments", "Missing or empty text.")
+        if len(text.encode("utf-8")) > _CLIPBOARD_SIZE_LIMIT:
+            return _tool_error(
+                "clipboard_too_large",
+                f"Text exceeds {_CLIPBOARD_SIZE_LIMIT} byte limit.",
+            )
+        try:
+            import pyperclip
+
+            pyperclip.copy(text)
+        except Exception:  # noqa: BLE001
+            return _tool_error(
+                "clipboard_failed",
+                "System clipboard write failed.",
+            )
+        return {"chars": len(text)}
+
+    def _handler_history_copy(_session: Any, ri: dict) -> dict[str, Any] | None:
+        """Copy a history entry to the clipboard.
+
+        Requires both clipboard:write and transcript:read scopes.
+        """
+        index = ri.get("index")
+        if index is None:
+            return _tool_error("invalid_arguments", "Missing 'index'.")
+        text = _session.history_text_by_index(index)
+        if text is None:
+            if _session.history_count == 0:
+                return _tool_error("history_empty", "No history entries.")
+            return _tool_error("history_index_invalid", f"Index {index} out of range.")
+        if len(text.encode("utf-8")) > _CLIPBOARD_SIZE_LIMIT:
+            return _tool_error(
+                "clipboard_too_large",
+                f"History entry exceeds {_CLIPBOARD_SIZE_LIMIT} byte limit.",
+            )
+        try:
+            import pyperclip
+
+            pyperclip.copy(text)
+        except Exception:  # noqa: BLE001
+            return _tool_error(
+                "clipboard_failed",
+                "System clipboard write failed.",
+            )
+        return {"index": index, "chars": len(text)}
+
+    # --------------- Paste tool (PR 7) ---------------------------------------
+
+    def _handler_paste_history(_session: Any, ri: dict) -> dict[str, Any] | None:
+        """Paste one history entry or advance the F8 replay cycle.
+
+        Uses ``session.get_active_window()`` (never accepts window IDs)."""
+        has_index = "index" in ri
+        has_cycle = "cycle" in ri
+        idx = ri.get("index", 1)
+        if has_index and has_cycle:
+            return _tool_error(
+                "invalid_arguments",
+                "Provide either 'index' or 'cycle', not both.",
+            )
+        if not has_index and not has_cycle:
+            return _tool_error(
+                "invalid_arguments",
+                "Missing required argument: 'index' or 'cycle'.",
+            )
+        if has_cycle and not ri.get("cycle"):
+            return _tool_error(
+                "invalid_arguments",
+                "'cycle' must be true.",
+            )
+        if has_index:
+            text = _session.history_text_by_index(idx)
+            if text is None:
+                if _session.history_count == 0:
+                    return _tool_error("history_empty", "No history entries.")
+                return _tool_error("history_index_invalid", "Index out of range.")
+        else:
+            res = _session.next_replay_cursor_index()
+            if res is None:
+                if _session.history_count == 0:
+                    return _tool_error("history_empty", "No history entries.")
+                # Cursor at end of history (no more entries to cycle)
+                return _tool_error(
+                    "history_index_invalid",
+                    "Replay cursor at end of history.",
+                )
+            idx, text = res
+            if has_index and ri.get("index") is not None:
+                idx = ri["index"]
+        target = _session.get_active_window()
+        if target is None:
+            return _tool_error("no_target_window", "No active window for paste.")
+        if has_cycle:
+            try:
+                _session.advance_replay_cursor()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        paste_ok = True
+        try:
+            rc = _session.paste_for_agent(text, target)
+            if rc != 0:
+                paste_ok = False
+        except Exception:  # noqa: BLE001
+            paste_ok = False
+        return {
+            "index": idx,
+            "chars": len(text),
+            "cycle": has_cycle,
+            "paste_ok": paste_ok,
+        }
+
     return {
         "session_status": _handler_session_status,
         "transmission_last": _handler_transmission_last,
@@ -592,6 +762,9 @@ def _build_read_handler_map() -> dict[str, Callable]:
         "transmission_wait": _handler_transmission_wait,
         "history_list": _handler_history_list,
         "history_get": _handler_history_get,
+        "clipboard_set": _handler_clipboard_set,
+        "history_copy": _handler_history_copy,
+        "paste_history": _handler_paste_history,
         "debug_health": _handler_debug_health,
         "debug_stats": _handler_debug_stats,
         "debug_disk": _handler_debug_disk,
@@ -601,7 +774,12 @@ def _build_read_handler_map() -> dict[str, Callable]:
 def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
     """Register MCP tools that route through AgentDispatch.dispatch.
 
-    Each tool handler extracts *tool_name* and *raw_input*, calls
+    Iterates over ``dispatch.tool_list()`` to determine which tools are
+    authorized for the current granted scopes. Only those tools are
+    registered on the MCP server. Unregistered tools are simply absent
+    from the manifest.
+
+    Each registered tool extracts *tool_name* and *raw_input*, calls
     ``dispatch.dispatch(tool_name, raw_input)``, and returns the
     ``data`` payload. Errors are raised so the MCP SDK returns
     ``isError: true`` to the client.
@@ -619,62 +797,45 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
         # ToolError envelopes have ``ok: False`` — everything else is success.
         if isinstance(result, dict) and not result.get("ok", True):
             err = result.get("error", {})
-            msg = (
-                err.get("message", err.get("code", "internal"))
-                if isinstance(err, dict)
-                else "internal"
-            )
-            raise RuntimeError(f"tool error: {msg}")
+            code = err.get("code", "internal") if isinstance(err, dict) else "internal"
+            msg = err.get("message", code) if isinstance(err, dict) else "internal"
+            raise RuntimeError(f"tool error [{code}]: {msg}")
         return result
 
-    # session_status — no args
-    @server.tool("session_status")
-    def tool_session_status() -> dict[str, Any]:
-        return _call_dispatch("session_status", {})
+    # Tool registration table: name → signature builder.
+    # Each entry maps a tool name to the kwargs signature the MCP SDK expects.
+    _TOOL_REGISTRATIONS: dict[str, Any] = {
+        "session_status": {},
+        "transmission_last": {},
+        "transmission_get": {"id": int},
+        "transmission_wait": {"id": int, "timeout_seconds": float},
+        "history_list": {"limit": int, "query": str},
+        "history_get": {"index": int},
+        "clipboard_set": {"text": str},
+        "history_copy": {"index": int},
+        "paste_history": {"index": int, "cycle": bool},
+        "debug_health": {},
+        "debug_stats": {},
+        "debug_disk": {},
+    }
 
-    # transmission_last — no args
-    @server.tool("transmission_last")
-    def tool_transmission_last() -> dict[str, Any] | None:
-        return _call_dispatch("transmission_last", {})
+    def _build_dispatch_caller(tool_name: str) -> Any:
+        """Build a tool handler that dispatches through ``dispatch.dispatch()``."""
 
-    # transmission_get — id
-    @server.tool("transmission_get")
-    def tool_transmission_get(id: int) -> dict[str, Any] | None:
-        return _call_dispatch("transmission_get", {"id": id})
+        def _wrapper(**kwargs: Any) -> Any:
+            return _call_dispatch(tool_name, kwargs)
 
-    # transmission_wait — id, timeout_seconds
-    @server.tool("transmission_wait")
-    def tool_transmission_wait(
-        id: int, timeout_seconds: float = 30.0
-    ) -> dict[str, Any] | None:
-        return _call_dispatch(
-            "transmission_wait", {"id": id, "timeout_seconds": timeout_seconds}
-        )
+        return _wrapper
 
-    # history_list — limit, query
-    @server.tool("history_list")
-    def tool_history_list(limit: int = 25, query: str = "") -> dict[str, Any]:
-        return _call_dispatch("history_list", {"limit": limit, "query": query})
+    # Iterate over granted scopes and register matching tools.
+    # tool_list() returns ToolDefinition objects — extract names for lookup.
+    allowed_names = {t.name for t in dispatch.tool_list()}
 
-    # history_get — index
-    @server.tool("history_get")
-    def tool_history_get(index: int) -> dict[str, Any] | None:
-        return _call_dispatch("history_get", {"index": index})
-
-    # debug_health — no args
-    @server.tool("debug_health")
-    def tool_debug_health() -> dict[str, Any]:
-        return _call_dispatch("debug_health", {})
-
-    # debug_stats — no args
-    @server.tool("debug_stats")
-    def tool_debug_stats() -> dict[str, Any]:
-        return _call_dispatch("debug_stats", {})
-
-    # debug_disk — no args
-    @server.tool("debug_disk")
-    def tool_debug_disk() -> list[dict[str, Any]]:
-        return _call_dispatch("debug_disk", {})
+    for tool_name in _TOOL_REGISTRATIONS:
+        if tool_name not in allowed_names:
+            continue
+        handler = _build_dispatch_caller(tool_name)
+        server.tool(name=tool_name)(handler)
 
 
 # ---------------------------------------------------------------------------

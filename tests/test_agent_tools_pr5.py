@@ -29,6 +29,7 @@ def _reset_wait_flags():
     _mod._transmission_wait_busy = False
     _mod._shutting_down = False
     _mod._server_url = None
+    _mod._live_session = None
     # Reset class-level token buckets so rate limiting doesn't leak across tests
     if hasattr(_disp.AgentDispatch, "_read_bucket"):
         _disp.AgentDispatch._read_bucket._tokens = 20.0
@@ -40,10 +41,22 @@ def _reset_wait_flags():
     # Teardown: clean up _HANDLER_MAP so tests are isolated
     from voxium.agent_dispatch import _HANDLER_MAP
 
-    _mod = None
+    _mod2 = None
     for k in list(_HANDLER_MAP.keys()):
-        if k.startswith(("session_status", "transmission_", "history_", "debug_")):
+        if k.startswith(
+            (
+                "session_status",
+                "transmission_",
+                "history_",
+                "debug_",
+                "clipboard_",
+                "paste_",
+            )
+        ):
             _HANDLER_MAP.pop(k, None)
+    # Reset _live_session so wired tests don't leak
+    if hasattr(_mod, "_live_session"):
+        _mod._live_session = None
 
 
 @pytest.fixture
@@ -781,3 +794,288 @@ def test_stop_clears_server_url():
     assert _mod._shutting_down is True
     # Reset for other tests
     _mod._shutting_down = False
+
+
+# ---------------------------------------------------------------------------
+# Clipboard / paste tools (PR 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clipboard_session():
+    """FakeSessionPort pre-seeded with history for clipboard/paste tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    s = FakeSessionPort(
+        _history_items=["another entry", "hello clipboard"],
+        history_count=2,
+        _window="test-window",
+    )
+    return s
+
+
+@pytest.fixture
+def clipboard_server(clipboard_session):
+    """MCP server with clipboard:write, transcript:read, output:paste scopes."""
+    from mcp.server import MCPServer
+
+    from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-clipboard", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=clipboard_session,
+        granted_scopes={
+            "status:read",
+            "transcript:read",
+            "clipboard:write",
+            "output:paste",
+        },
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_clipboard_set_success(clipboard_server, clipboard_session):
+    """clipboard_set copies text to clipboard."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with patch("pyperclip.copy") as mock_copy:
+        result = handler(text="hello world")
+    assert result is not None
+    assert result["chars"] == 11
+    mock_copy.assert_called_once_with("hello world")
+
+
+def test_clipboard_set_empty_text(clipboard_server, clipboard_session):
+    """clipboard_set rejects empty text."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(text="")
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_missing_text(clipboard_server, clipboard_session):
+    """clipboard_set rejects missing text."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_text_too_large(clipboard_server, clipboard_session):
+    """clipboard_set rejects text exceeding 256 KiB."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    large_text = "x" * (256 * 1024 + 1)  # 256 KiB + 1 byte
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(text=large_text)
+    assert "clipboard_too_large" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_pyperclip_failure(clipboard_server, clipboard_session):
+    """clipboard_set fails gracefully when pyperclip raises."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with (
+        patch("pyperclip.copy", side_effect=Exception("fail")),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        handler(text="hello")
+    assert "clipboard_failed" in str(exc_info.value).lower()
+
+
+def test_history_copy_success(clipboard_server, clipboard_session):
+    """history_copy copies a history entry to the clipboard."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with patch("pyperclip.copy") as mock_copy:
+        result = handler(index=1)
+    assert result is not None
+    assert result["index"] == 1
+    assert result["chars"] == len("hello clipboard")
+    mock_copy.assert_called_once_with("hello clipboard")
+
+
+def test_history_copy_missing_index(clipboard_server, clipboard_session):
+    """history_copy rejects missing index."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_history_copy_out_of_range(clipboard_server, clipboard_session):
+    """history_copy rejects index beyond history."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(index=99)
+    assert "history_index_invalid" in str(exc_info.value).lower()
+
+
+def test_history_copy_empty_history(clipboard_server, clipboard_session):
+    """history_copy rejects when history is empty."""
+    clipboard_session.history_count = 0
+    clipboard_session._history_items = []
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(index=1)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_by_index(clipboard_server, clipboard_session):
+    """paste_history pastes a specific history entry by index."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    result = handler(index=1)
+    assert result is not None
+    assert result["index"] == 1
+    assert result["chars"] == len("hello clipboard")
+    assert result["cycle"] is False
+    assert result["paste_ok"] is True
+
+
+def test_paste_history_by_cycle(clipboard_server, clipboard_session):
+    """paste_history advances the replay cursor with cycle."""
+    clipboard_session._replay_cursor = 1
+    clipboard_session._replay_end = 3
+    handler = _tool_fn(clipboard_server, "paste_history")
+    result = handler(cycle=True)
+    assert result is not None
+    assert result["cycle"] is True
+
+
+def test_paste_history_missing_args(clipboard_server, clipboard_session):
+    """paste_history rejects when neither index nor cycle provided."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_paste_history_both_args(clipboard_server, clipboard_session):
+    """paste_history rejects when both index and cycle provided."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(index=1, cycle=True)
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_paste_history_no_window(clipboard_server, clipboard_session):
+    """paste_history fails when no active window."""
+    clipboard_session._window = None
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(index=1)
+    assert "no_target_window" in str(exc_info.value).lower()
+
+
+def test_paste_history_empty_history(clipboard_server, clipboard_session):
+    """paste_history fails when history is empty."""
+    clipboard_session._history_items = []
+    clipboard_session.history_count = 0
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(index=1)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_cycle_empty_history(clipboard_server, clipboard_session):
+    """paste_history cycle fails when history is empty."""
+    clipboard_session._history_items = []
+    clipboard_session.history_count = 0
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(cycle=True)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_cycle_at_end(clipboard_server, clipboard_session):
+    """paste_history cycle fails when cursor at end (next_replay_cursor_index returns None)."""
+    clipboard_session.next_replay_cursor_index = lambda: None
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler(cycle=True)
+    assert "history_index_invalid" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Clipboard scope gating
+# ---------------------------------------------------------------------------
+
+
+def test_clipboard_tools_absent_without_scope(scoped_server):
+    """clipboard_set should not be registered without clipboard:write."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "clipboard_set" not in tools
+    assert "history_copy" not in tools
+    assert "paste_history" not in tools
+
+
+def test_clipboard_tools_present_with_scope(clipboard_server):
+    """clipboard tools are registered with appropriate scopes."""
+    manager = getattr(clipboard_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "clipboard_set" in tools
+    assert "history_copy" in tools
+    assert "paste_history" in tools
+
+
+# ---------------------------------------------------------------------------
+# _LazySession live wiring
+# ---------------------------------------------------------------------------
+
+
+def test_install_live_session():
+    """install_live_session wires _LazySession to a real SessionPort."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+
+        # Should now proxy to the live session
+        assert lazy.get_active_window() == port.get_active_window()
+        assert lazy.history_text_by_index(1) == port.history_text_by_index(1)
+    finally:
+        # Restore to avoid leaking across tests
+        _mod._live_session = old
+
+
+def test_lazy_session_uses_defaults_when_unwired():
+    """_LazySession falls back to defaults when _live_session is None."""
+    import voxium.agent_server as _mod
+
+    old = _mod._live_session
+    _mod._live_session = None
+
+    try:
+        lazy = _mod._LazySession()
+        assert lazy.input_mode == "ptt"
+        assert lazy.get_active_window() is None
+        assert lazy.history_text_by_index(1) is None
+        assert lazy.history_count == 0
+    finally:
+        _mod._live_session = old
+
+
+def test_lazy_session_proxies_state():
+    """_LazySession proxies state/input_mode from live session."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+        # state and input_mode should proxy to live session
+        assert lazy.state == port.state
+        assert lazy.input_mode == port.input_mode
+    finally:
+        _mod._live_session = old
