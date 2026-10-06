@@ -1201,3 +1201,150 @@ def test_cycle_cursor_advanced_after_success():
     assert result.get("paste_ok") is True
     # Cursor should be advanced
     assert session._replay_cursor == 1
+
+
+# ---------------------------------------------------------------------------
+# PR 9: PTT engage / release tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ptt_session():
+    """FakeSessionPort preconfigured for PTT tool tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    return FakeSessionPort(
+        _window="test-window",
+    )
+
+
+@pytest.fixture
+def ptt_server(ptt_session):
+    """MCP server with input:ptt scope for PTT tools."""
+    from mcp.server import MCPServer
+
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-ptt", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=ptt_session,
+        granted_scopes={"status:read", "input:ptt"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_ptt_engage_success(ptt_server, ptt_session):
+    """ptt_engage transitions IDLE → RECORDING and calls start_recording."""
+    import voxium.agent_server as _mod
+
+    handler = _tool_fn(ptt_server, "ptt_engage")
+    with patch.object(_mod, "_agent_start_recording", return_value=True):
+        result = handler()
+    assert result is not None
+    assert result.get("ok") is True and result.get("recorded") is True
+
+
+def test_ptt_engage_already_recording(ptt_server, ptt_session):
+    """ptt_engage returns idempotent success when already RECORDING (dispatch-layer)."""
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_engage")
+    result = handler()
+    assert result.get("ok") is True
+    assert result.get("data", {}).get("already_recording") is True
+
+
+def test_ptt_release_success(ptt_server, ptt_session):
+    """ptt_release transitions RECORDING → TRANSCRIBING and returns transmission_id."""
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_release")
+    with patch(
+        "voxium.agent_server.get_transmission_log",
+        return_value=_FakeTransmissionLog(),
+    ):
+        result = handler()
+    assert result is not None
+    assert result.get("ok") is True
+    assert "data" in result
+
+
+def test_ptt_release_not_recording(ptt_server, ptt_session):
+    """ptt_release returns not_recording error when state is IDLE."""
+    handler = _tool_fn(ptt_server, "ptt_release")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "not_recording" in str(exc_info.value).lower()
+
+
+def test_ptt_tools_absent_without_scope(scoped_server):
+    """ptt_engage/ptt_release should not be registered without input:ptt."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "ptt_engage" not in tools
+    assert "ptt_release" not in tools
+
+
+def test_ptt_tools_present_with_scope(ptt_server):
+    """PTT tools are registered when input:ptt scope is granted."""
+    manager = getattr(ptt_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "ptt_engage" in tools
+    assert "ptt_release" in tools
+
+
+def test_ptt_engage_microphone_unavailable(ptt_server, ptt_session):
+    """ptt_engage returns microphone_unavailable when start_recording fails."""
+    import voxium.agent_server as _mod
+
+    # Use handler directly — when mocked start_recording returns False,
+    # state reverts to IDLE and error envelope is returned
+    from voxium.agent_dispatch import AgentDispatch
+
+    dispatch = AgentDispatch(
+        session=ptt_session,
+        granted_scopes={"status:read", "input:ptt"},
+    )
+    handler_fn = _mod._build_read_handler_map()["ptt_engage"]
+    with patch.object(_mod, "_agent_start_recording", return_value=False):
+        result = handler_fn(dispatch._session, {})
+    assert result is not None
+    assert result.get("ok") is False
+    assert result.get("error", {}).get("code") == "microphone_unavailable"
+
+
+# FakeTransmissionLog for ptt_release handler tests
+
+
+class _FakeTransmissionLog:
+    def latest_id(self):
+        return 1
+
+    def begin(self):
+        return 1
+
+    def get(self, tid):
+        return None
+
+    def finish(self, tid, transcript=None, state=None):
+        pass
+
+    def last(self):
+        return None
+
+    def wait(self, tid, timeout=5.0):
+        return None
+
+    def get_inflight(self):
+        return []
+
+    def clear(self):
+        pass

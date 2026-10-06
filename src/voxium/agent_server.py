@@ -60,6 +60,9 @@ _shutting_down: bool = False
 # Live session wiring (PR 7): _LazySession proxies here when set.
 _live_session: Any = None
 
+# PTT agent state: True when agent opened the mic and release is exempt from rate-limit.
+_agent_ptt_open: bool = False
+
 
 def install_live_session(session: Any) -> None:
     """Wire ``_LazySession`` to a live SessionPort from ``app.py``.
@@ -129,9 +132,12 @@ class _LazySession:
 
     @property
     def agent_ptt_open(self):
-        if _live_session is not None:
-            return _live_session.agent_ptt_open
-        return False
+        return _agent_ptt_open
+
+    def set_agent_ptt_open(self, val: bool) -> None:
+        """Toggle the agent PTT open flag (used by engage/release handlers)."""
+        global _agent_ptt_open
+        _agent_ptt_open = val
 
     def get_active_window(self):
         if _live_session is not None:
@@ -176,6 +182,25 @@ def get_transmission_log() -> Any:
 
         _transmission_log = TransmissionLog()
     return _transmission_log
+
+
+# ---------------------------------------------------------------------------
+# PTT agent helpers: call into app.py lifecycle functions
+# ---------------------------------------------------------------------------
+
+
+def _agent_start_recording() -> bool:
+    """Call app.start_recording() and return its bool result."""
+    from voxium.app import start_recording
+
+    return start_recording()
+
+
+def _agent_finish_ptt_recording() -> None:
+    """Call app._finish_ptt_recording() to end the active recording."""
+    from voxium.app import _finish_ptt_recording
+
+    _finish_ptt_recording()
 
 
 def install_state_callable(fn: Callable[[], dict[str, Any]]) -> None:
@@ -755,6 +780,61 @@ def _build_read_handler_map() -> dict[str, Callable]:
             "paste_ok": paste_ok,
         }
 
+    # --------------- PTT tools (PR 9) ---------------------------------------
+
+    def _handler_ptt_engage(_session, _ri):
+        """Engage PTT key: validate mode, start recording, toggle agent flag.
+
+        Dispatch layer already guards: scope, shutting-down, idempotent
+        cancel, busy-state, inflight, hotkey-held.
+        """
+        global _agent_ptt_open
+
+        # Input mode check (dispatch layer only checks scope)
+        if _session.input_mode != "ptt":
+            return _tool_error(
+                "wrong_input_mode",
+                "Engage requires PTT mode.",
+            )
+        # Dispatch guarantees idle state here.  start_recording can still
+        # fail if the microphone is unplugged/unavailable.
+        rc = _agent_start_recording()
+        if not rc:
+            return _tool_error(
+                "microphone_unavailable",
+                "Microphone capture failed.",
+            )
+        # Mark agent PTT open so release is rate-exempt
+        _agent_ptt_open = True
+        return {"ok": True, "recorded": True}
+
+    def _handler_ptt_release(_session, _ri):
+        """Release PTT key: finish recording, return transmission id.
+
+        Dispatch layer returns None from busy-check (bypasses it).
+        """
+        global _agent_ptt_open
+
+        from voxium.agent_dispatch import ClientState
+
+        if _session.state != ClientState.RECORDING:
+            return _tool_error(
+                "not_recording",
+                "Session is not recording.",
+            )
+        _agent_finish_ptt_recording()
+        tlog = get_transmission_log()
+        tid = tlog.latest_id() if tlog is not None else None
+        # Clear agent PTT flag so future engages go through rate-limit
+        _agent_ptt_open = False
+        return {
+            "ok": True,
+            "data": {
+                "transmission_id": tid,
+                "state": "transcribing",
+            },
+        }
+
     return {
         "session_status": _handler_session_status,
         "transmission_last": _handler_transmission_last,
@@ -765,6 +845,8 @@ def _build_read_handler_map() -> dict[str, Callable]:
         "clipboard_set": _handler_clipboard_set,
         "history_copy": _handler_history_copy,
         "paste_history": _handler_paste_history,
+        "ptt_engage": _handler_ptt_engage,
+        "ptt_release": _handler_ptt_release,
         "debug_health": _handler_debug_health,
         "debug_stats": _handler_debug_stats,
         "debug_disk": _handler_debug_disk,
@@ -814,6 +896,8 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
         "clipboard_set": {"text": str},
         "history_copy": {"index": int},
         "paste_history": {"index": int, "cycle": bool},
+        "ptt_engage": {},
+        "ptt_release": {},
         "debug_health": {},
         "debug_stats": {},
         "debug_disk": {},

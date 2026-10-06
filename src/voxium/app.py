@@ -195,7 +195,16 @@ class _LiveSessionProxy:
 
     @property
     def state(self):
-        return state
+        """Return ClientState enum (dispatch layer expects strings)."""
+        from voxium.agent_dispatch import ClientState
+
+        _map = {
+            State.IDLE: ClientState.IDLE,
+            State.RECORDING: ClientState.RECORDING,
+            State.TRANSCRIBING: ClientState.TRANSCRIBING,
+            State.COMMAND_INPUT: ClientState.COMMAND_INPUT,
+        }
+        return _map.get(state, ClientState.IDLE)
 
     @property
     def input_mode(self):
@@ -231,7 +240,13 @@ class _LiveSessionProxy:
 
     @property
     def agent_ptt_open(self):
-        return False
+        """Proxy to agent_server._agent_ptt_open (module-level flag)."""
+        try:
+            from voxium.agent_server import _agent_ptt_open
+
+            return bool(_agent_ptt_open)
+        except ImportError:
+            return False
 
     @property
     def history_count(self):
@@ -4636,8 +4651,14 @@ def run_client(args, _raw_argv: list[str]) -> int:
         from voxium.agent_server import install_state_callable
 
         def _agent_state_fn() -> dict[str, Any]:
+            _state_names = {
+                State.IDLE: "idle",
+                State.RECORDING: "recording",
+                State.TRANSCRIBING: "transcribing",
+                State.COMMAND_INPUT: "command_input",
+            }
             return {
-                "state": state.name.lower() if state is not None else "unknown",
+                "state": _state_names.get(state, "unknown"),
                 "input_mode": input_mode if input_mode is not None else "ptt",
                 "transmission_latest_id": None,
             }
