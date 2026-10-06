@@ -3824,9 +3824,7 @@ def create_retry_handler(retry_key):
             show_status("❌ RE-TRANSMIT FAILED", str(e)[:200])
         finally:
             # PR 5: finish transmission on every exit path
-            _finish_agent_transmission(
-                _retry_tlog, _retry_tid, state=_retry_outcome
-            )
+            _finish_agent_transmission(_retry_tlog, _retry_tid, state=_retry_outcome)
 
     return on_press
 
