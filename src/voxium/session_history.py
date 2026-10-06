@@ -270,16 +270,21 @@ class SessionTranscriptHistory:
         """
         q = (query or "").lower()
         with self._lock:
-            rev = list(reversed(self._entries))
+            full = list(reversed(self._entries))
+            # Tag each entry with its full-ring 1-based index before filtering
+            indexed = list(enumerate(full, start=1))
             if q:
-                rev = [e for e in rev if q in e.text.replace("\n", " ").lower()]
+                indexed = [
+                    (idx, e)
+                    for idx, e in indexed
+                    if q in e.text.replace("\n", " ").lower()
+                ]
             out: list[dict[str, object]] = []
-            # index resets to 1 within the filtered result
-            for k, entry in enumerate(rev[:limit], start=1):
+            for idx, entry in indexed[:limit]:
                 text = entry.text.replace("\n", " ").strip()
                 out.append(
                     {
-                        "index": k,
+                        "index": idx,
                         "source": entry.source,
                         "preview": text[:100],
                         "chars": len(entry.text),
@@ -289,7 +294,8 @@ class SessionTranscriptHistory:
 
     def total_entries(self) -> int:
         """Total number of transcript entries (under lock)."""
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def get_entry(self, index: int) -> dict | None:
         """Return a single entry by 1-based display index (#1 = newest).

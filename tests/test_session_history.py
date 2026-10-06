@@ -244,3 +244,46 @@ def test_format_list_text_filtered_tail_when_many_matches() -> None:
         h.add(f"commonword {i} extra")
     out = h.format_list_text_filtered("commonword", max_lines=3)
     assert "more matches (not shown)" in out
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: iter_entries uses full-ring indices (bug #3)
+# ---------------------------------------------------------------------------
+
+
+def test_iter_entries_filtered_uses_full_ring_indices() -> None:
+    """When filtering, iter_entries should return full-ring 1-based indices,
+    not indices relative to the filtered subset.
+
+    Ring: cat_food(4) dog_food(3) cat_toy(2) dog_ball(1).
+    Query "dog" matches dog_ball(#1) and dog_food(#3).
+    """
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=1000, max_pending_bytes=1000
+    )
+    h.add("cat_food")
+    h.add("dog_food")
+    h.add("cat_toy")
+    h.add("dog_ball")
+
+    out = h.iter_entries(query="dog")
+
+    indices = [entry["index"] for entry in out]
+    # Full-ring indices: dog_ball=#1, dog_food=#3 — not renumbered [1, 2]
+    assert indices == [1, 3], f"Expected full-ring indices [1, 3], got {indices}"
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: total_entries uses lock (bug #4)
+# ---------------------------------------------------------------------------
+
+
+def test_total_entries_uses_lock():
+    """total_entries should use self._lock to read self._entries."""
+    import inspect
+
+    src = inspect.getsource(SessionTranscriptHistory.total_entries)
+    # The method should either use self._lock or delegate to __len__ (which does)
+    # Check that it doesn't access _entries without lock
+    has_lock = "_lock" in src or "len(self)" in src or "__len__" in src
+    assert has_lock, "total_entries should use self._lock or delegate to __len__"

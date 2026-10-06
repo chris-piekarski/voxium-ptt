@@ -798,7 +798,7 @@ def _run_history_line(
 
             tlog = get_transmission_log()
             if tlog is not None:
-                tlog.purge()
+                tlog.clear()
         except Exception:  # noqa: BLE001, S110
             pass
         if n == 0 and not had_pending:

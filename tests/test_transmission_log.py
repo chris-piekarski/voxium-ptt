@@ -281,3 +281,33 @@ def test_active_set_matches_extant_records():
     for tid in all_ids:
         if tid not in log._active_ids:
             assert log.has_active(tid) is False
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: finish() accepts transcript=, not text=
+# ---------------------------------------------------------------------------
+
+
+def test_finish_accepts_transcript_kwarg():
+    """TransmissionLog.finish() must accept transcript= keyword argument."""
+    log = TransmissionLog()
+    tid = log.begin()
+    # This should NOT raise TypeError
+    result = log.finish(tid, transcript="hello world", state="completed")
+    assert result is True
+    rec = log.get(tid)
+    assert rec is not None
+    assert rec.transcript == "hello world"
+
+
+def test_finish_text_kwarg_raises_type_error():
+    """TransmissionLog.finish() does NOT accept text= (that was the bug)."""
+    log = TransmissionLog()
+    tid = log.begin()
+    # Passing text= should raise TypeError since finish() expects transcript=
+    try:
+        log.finish(tid, text="hello world")  # type: ignore  # pylint: disable=unexpected-keyword-arg
+        type_error_raised = False
+    except TypeError:
+        type_error_raised = True
+    assert type_error_raised, "finish(text=...) should raise TypeError"

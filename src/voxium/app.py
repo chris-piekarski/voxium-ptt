@@ -3419,7 +3419,7 @@ def transcribe_and_paste(
             _tlog.finish(
                 _tid,
                 state=_outcome_state,
-                text=_transcribed_text,
+                transcript=_transcribed_text,
             )
         if is_client_shutting_down():
             return
