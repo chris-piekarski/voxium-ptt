@@ -792,15 +792,16 @@ def _run_history_line(
                 text="Use /history clear alone — nothing after “clear”, copy."
             )
         n, had_pending = transcript_history.purge_all()
-        # PR 5: also purge transmission log when history is cleared
+        # PR 5: also wipe transmission log when history is cleared
         try:
             from voxium.agent_server import get_transmission_log
 
             tlog = get_transmission_log()
-            if tlog is not None:
-                tlog.clear()
         except Exception:  # noqa: BLE001, S110
             pass
+        else:
+            if tlog is not None:
+                tlog.clear()
         if n == 0 and not had_pending:
             return SlashLineResult(
                 text="Session transcript buffer was already empty (RAM only; nothing to clear), copy."

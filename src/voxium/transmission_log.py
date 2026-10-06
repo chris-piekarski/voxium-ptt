@@ -194,3 +194,27 @@ class TransmissionLog:
                 to_drop = min(self._records.keys())  # fallback: oldest active
             del self._records[to_drop]
             self._active_ids.discard(to_drop)
+
+
+# ---------------------------------------------------------------------------
+# Standalone helpers (safe to call from finally blocks)
+# ---------------------------------------------------------------------------
+
+
+def finish_record(
+    tlog: TransmissionLog | None,
+    tid: int | None,
+    *,
+    transcript: str | None = None,
+    state: str = "error",
+) -> None:
+    """
+    Finish a transmission record, guarding against ``None`` *tlog* / *tid*.
+
+    Does **not** catch exceptions — callers in ``finally`` blocks should wrap
+    the invocation so a ``finish`` failure cannot suppress downstream logic
+    (e.g. VOX re-queue).
+    """
+    if tlog is None or tid is None:
+        return
+    tlog.finish(tid, transcript=transcript, state=state)

@@ -311,3 +311,38 @@ def test_finish_text_kwarg_raises_type_error():
     except TypeError:
         type_error_raised = True
     assert type_error_raised, "finish(text=...) should raise TypeError"
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: finish_record helper stores transcript (retry path)
+# ---------------------------------------------------------------------------
+
+
+def test_finish_record_stores_transcript():
+    """finish_record(transcript=...) must store the transcript on the record."""
+    from voxium.transmission_log import finish_record
+
+    log = TransmissionLog()
+    tid = log.begin()
+    finish_record(log, tid, transcript="again", state="completed")
+    rec = log.get(tid)
+    assert rec is not None
+    assert rec.transcript == "again"
+    assert rec.state == "completed"
+
+
+def test_finish_record_skips_none_tlog():
+    """finish_record returns immediately when tlog is None."""
+    from voxium.transmission_log import finish_record
+
+    # Should not raise
+    finish_record(None, 42, transcript="hello", state="completed")
+
+
+def test_finish_record_skips_none_tid():
+    """finish_record returns immediately when tid is None."""
+    from voxium.transmission_log import finish_record
+
+    log = TransmissionLog()
+    # Should not raise
+    finish_record(log, None, transcript="hello", state="completed")

@@ -3415,12 +3415,15 @@ def transcribe_and_paste(
         with state_lock:
             state = State.IDLE
         # PR 5: finish transmission on every exit path
-        if _tid is not None and _tlog is not None:
-            _tlog.finish(
-                _tid,
-                state=_outcome_state,
-                transcript=_transcribed_text,
-            )
+        try:
+            if _tid is not None and _tlog is not None:
+                _tlog.finish(
+                    _tid,
+                    state=_outcome_state,
+                    transcript=_transcribed_text,
+                )
+        except Exception:
+            pass
         if is_client_shutting_down():
             return
         nxt: np.ndarray | None = None
@@ -3603,12 +3606,19 @@ def _get_agent_transmission_log() -> Any | None:
         return None
 
 
-def _finish_agent_transmission(tlog: Any, tid: int, *, state: str = "error") -> None:
+def _finish_agent_transmission(
+    tlog: Any,
+    tid: int | None,
+    *,
+    state: str = "error",
+    transcript: str | None = None,
+) -> None:
     """Call tlog.finish for synchronous retry paths (PR 5)."""
-    try:
-        tlog.finish(tid, state=state)
-    except Exception:
-        pass
+    from voxium.transmission_log import finish_record as _fr
+
+    if tlog is None or tid is None:
+        return
+    _fr(tlog, tid, transcript=transcript, state=state)  # type: ignore[arg-type]
 
 
 def _finish_ptt_recording() -> None:
@@ -3824,7 +3834,15 @@ def create_retry_handler(retry_key):
             show_status("❌ RE-TRANSMIT FAILED", str(e)[:200])
         finally:
             # PR 5: finish transmission on every exit path
-            _finish_agent_transmission(_retry_tlog, _retry_tid, state=_retry_outcome)
+            try:
+                _finish_agent_transmission(
+                    _retry_tlog,
+                    _retry_tid,
+                    state=_retry_outcome,
+                    transcript=_retry_text or None,
+                )
+            except Exception:
+                pass
 
     return on_press
 
