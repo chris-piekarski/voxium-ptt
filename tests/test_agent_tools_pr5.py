@@ -1481,11 +1481,12 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
     runs while the first worker is still inside it.  The second call must
     not call transcribe_server again, and _agent_inflight must contain
     'retransmit' until the event fires.
+
+    FakeSessionPort.inflight now reads the live _agent_inflight set, so the
+    dispatch layer sees the handler-set flag without a manual bridge.
     """
     import threading
     import time
-
-    from voxium.agent_dispatch import InflightFlag
 
     import voxium.agent_server as _mod
     import voxium.app as _app
@@ -1526,11 +1527,9 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
                 # _agent_inflight must be live.
                 assert "retransmit" in _mod._agent_inflight
 
-                # Bridge: FakeSessionPort does not read _agent_inflight,
-                # so inject the flag so the dispatch layer sees it.
-                retransmit_session.inflight.add(InflightFlag.RETRANSMIT)
-
                 # --- second call while first worker is blocked ---
+                # FakeSessionPort.inflight reads _agent_inflight, so this
+                # session_busy check passes only if the handler set the flag.
                 with pytest.raises(RuntimeError) as exc_info:
                     handler()
                 assert "session_busy" in str(exc_info.value).lower()

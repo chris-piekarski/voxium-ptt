@@ -197,7 +197,9 @@ class AgentDispatch:
         # even when already recording.  Before rate-limit/busy so no tokens
         # are consumed and no start-recording hook fires.
         if tool_name == "ptt_engage" and self._session.state == ClientState.RECORDING:
-            return ToolResult(data={"state": "recording", "already_recording": True}).to_dict()
+            return ToolResult(
+                data={"state": "recording", "already_recording": True}
+            ).to_dict()
 
         # --- Validate input against schema ---
         schema_error = _validate_input(raw_input, tool_def.input_schema)
@@ -411,7 +413,7 @@ class FakeSessionPort:
     def __init__(self, **kwargs: Any) -> None:
         self.state: ClientState = kwargs.get("state", ClientState.IDLE)
         self.input_mode: str = kwargs.get("input_mode", "ptt")
-        self.inflight: set[InflightFlag] = set(kwargs.get("inflight", []))
+        self._inflight: set[InflightFlag] = set(kwargs.get("inflight", []))
         self.active_hotkey: str | None = kwargs.get("active_hotkey", None)
         self.paste_debounce_remaining_ms: float = kwargs.get(
             "paste_debounce_remaining_ms", 0
@@ -427,6 +429,30 @@ class FakeSessionPort:
         self._replay_cursor: int = 0
         self._mode_writes: list[str] = []
         self._cursor_advance_count: int = 0
+
+    @property
+    def inflight(self) -> set[InflightFlag]:
+        """Live inflight union: private test set + module-level _agent_inflight.
+
+        Mirrors :class:`_LiveSessionProxy.inflight` so the dispatch
+        dispatch-layer sees flags the handler set on the real module set.
+        """
+        out: set[InflightFlag] = set(self._inflight)
+        try:
+            import voxium.agent_server as _agent_mod
+
+            for name in _agent_mod._agent_inflight:
+                try:
+                    out.add(InflightFlag(name))
+                except ValueError:
+                    pass
+        except Exception:  # noqa: BLE001, S110
+            pass
+        return out
+
+    @inflight.setter
+    def inflight(self, value: set[InflightFlag]) -> None:
+        self._inflight = set(value)
 
     def get_active_window(self) -> Any:
         return self._window
