@@ -259,7 +259,6 @@ def _vox_deadman_callback() -> None:
     global _vox_auto_disarmed
 
     import voxium.app as _app
-    from voxium.agent_dispatch import ClientState
 
     # Fast path: already disarmed by human or agent.
     if _app.input_mode == "ptt":
@@ -269,71 +268,55 @@ def _vox_deadman_callback() -> None:
         with _app.state_lock:
             _st = _app.state
 
-        if _st == ClientState.TRANSCRIBING:
-            _app._stop_vox_listening()
-            _app._set_input_mode("ptt")
-            _app.show_status(
-                _app.STATUS_VOX_ON_STATION,
-                "Standing by.",
-            )
-            if _app.config and not _app.config.minimal:
-                from voxium.console_status import print_input_mode_downlink
-
-                _ptt_l = (
-                    _app.config.hotkey if _app.config else _app.DEFAULT_HOTKEYS["mode"]
-                ).upper()
-                _mode_hk = (
-                    _app.config.mode_hotkey
-                    if _app.config
-                    else _app.DEFAULT_HOTKEYS["mode"]
-                ).upper()
-                print_input_mode_downlink(
-                    _app.console,
-                    mode="ptt",
-                    mode_hotkey_label=_mode_hk,
-                    ptt_hotkey_label=_ptt_l,
-                )
-                if _app.ptt_status_box is not None:
-                    _app.ptt_status_box.restore_live_after_scrollback_output()
+        if _st == _app.State.TRANSCRIBING:
+            _stop_vox_and_print_downlink()
             _vox_auto_disarmed = True
             return
 
-        if _st == ClientState.RECORDING or _st == ClientState.COMMAND_INPUT:
-            with _app.state_lock:
-                pass
-            import time as _time
-
-            _time.sleep(0.2)
+        if _st in (_app.State.RECORDING, _app.State.COMMAND_INPUT):
+            time.sleep(0.2)
             if _app.input_mode == "ptt":
                 return
             continue
 
         # IDLE
-        _app._stop_vox_listening()
-        _app._set_input_mode("ptt")
-        _app.show_status(
-            _app.STATUS_VOX_ON_STATION,
-            "Standing by.",
-        )
-        if _app.config and not _app.config.minimal:
-            from voxium.console_status import print_input_mode_downlink
-
-            _ptt_l = (
-                _app.config.hotkey if _app.config else _app.DEFAULT_HOTKEYS["mode"]
-            ).upper()
-            _mode_hk = (
-                _app.config.mode_hotkey if _app.config else _app.DEFAULT_HOTKEYS["mode"]
-            ).upper()
-            print_input_mode_downlink(
-                _app.console,
-                mode="ptt",
-                mode_hotkey_label=_mode_hk,
-                ptt_hotkey_label=_ptt_l,
-            )
-            if _app.ptt_status_box is not None:
-                _app.ptt_status_box.restore_live_after_scrollback_output()
+        _stop_vox_and_print_downlink()
         _vox_auto_disarmed = True
         return
+
+
+def _stop_vox_and_print_downlink() -> None:
+    """Common disarm path: stop VOX listening, set ptt, print downlink."""
+    import voxium.app as _app
+
+    _app._stop_vox_listening()
+    _app._set_input_mode("ptt")
+    _app.show_status(
+        _app.STATUS_VOX_ON_STATION,
+        "Standing by.",
+    )
+    if _app.config and not _app.config.minimal:
+        from voxium.console_status import print_input_mode_downlink
+
+        _ptt_l = (
+            getattr(_app.config, "hotkey", None) or _app.DEFAULT_HOTKEYS["record"]
+        ).upper()
+        _mode_hk = (
+            (
+                _app.config.hotkeys.get("mode")
+                if getattr(_app.config, "hotkeys", None)
+                else None
+            )
+            or _app.DEFAULT_HOTKEYS["mode"]
+        ).upper()
+        print_input_mode_downlink(
+            _app.console,
+            mode="ptt",
+            mode_hotkey_label=_mode_hk,
+            ptt_hotkey_label=_ptt_l,
+        )
+        if _app.ptt_status_box is not None:
+            _app.ptt_status_box.restore_live_after_scrollback_output()
 
 
 def _start_vox_deadman() -> None:
@@ -1118,22 +1101,21 @@ def _build_read_handler_map() -> dict[str, Callable]:
         global _vox_auto_disarmed
 
         import voxium.app as _app
-        from voxium.agent_protocol import ToolResult
+        from voxium.agent_protocol import ToolError, ToolResult
 
         mode = ri.get("mode", "").lower()
         if mode not in ("ptt", "vox"):
-            return _tool_error(
-                "invalid_arguments",
-                "mode must be 'ptt' or 'vox'.",
-            )
+            return ToolError(
+                code="invalid_arguments",
+                message="mode must be 'ptt' or 'vox'.",
+            ).to_dict()
 
-        # Guard against out-of-range vox_max_seconds (shouldn't happen if
-        # start_agent_listener validated, but defensive).
-        if mode == "vox" and _vox_max_seconds < 1:
-            return _tool_error(
-                "invalid_arguments",
-                "VOX max-seconds is not configured.",
-            )
+        # Reject VOX arm when max-seconds is out of range.
+        if mode == "vox" and not 1 <= _vox_max_seconds <= 3600:
+            return ToolError(
+                code="invalid_arguments",
+                message="VOX max-seconds is not configured.",
+            ).to_dict()
 
         current_mode = _app.input_mode
 
@@ -1144,14 +1126,22 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
         # ---- Arm: ptt -> vox ----
         if mode == "vox":
+            # Block while a PTT stream is held.
+            if _app.stream is not None:
+                return ToolError(
+                    code="microphone_unavailable",
+                    message="PTT stream is active.",
+                    details={"reason": "ptt_stream_held"},
+                ).to_dict()
             _app._set_input_mode("vox")
             if not _app._start_vox_listening():
                 # Revert; _start_vox_listening already logged + beeped.
                 _app._set_input_mode("ptt")
-                return _tool_error(
-                    "microphone_unavailable",
-                    "VOX capture could not start.",
-                )
+                return ToolError(
+                    code="microphone_unavailable",
+                    message="VOX capture could not start.",
+                    details={"reason": "portaudio"},
+                ).to_dict()
             # Successful arm: clear auto-disarm flag, start dead-man timer.
             _vox_auto_disarmed = False
             _start_vox_deadman()
@@ -1159,29 +1149,7 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
         # ---- Disarm: vox -> ptt ----
         _cancel_vox_deadman()
-        _app._stop_vox_listening()
-        _app._set_input_mode("ptt")
-        _app.show_status(
-            _app.STATUS_VOX_ON_STATION,
-            "Standing by.",
-        )
-        if _app.config and not _app.config.minimal:
-            from voxium.console_status import print_input_mode_downlink
-
-            _ptt_l = (
-                _app.config.hotkey if _app.config else _app.DEFAULT_HOTKEYS["mode"]
-            ).upper()
-            _mode_hk = (
-                _app.config.mode_hotkey if _app.config else _app.DEFAULT_HOTKEYS["mode"]
-            ).upper()
-            print_input_mode_downlink(
-                _app.console,
-                mode="ptt",
-                mode_hotkey_label=_mode_hk,
-                ptt_hotkey_label=_ptt_l,
-            )
-            if _app.ptt_status_box is not None:
-                _app.ptt_status_box.restore_live_after_scrollback_output()
+        _stop_vox_and_print_downlink()
         return ToolResult(data={"input_mode": "ptt"}).to_dict()
 
     return {

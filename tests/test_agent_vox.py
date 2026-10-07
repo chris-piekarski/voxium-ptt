@@ -98,7 +98,8 @@ def test_arm_vox_success():
 
 
 def test_arm_vox_false_start_leaves_mode_ptt():
-    """When _start_vox_listening returns False, mode is reverted to ptt."""
+    """When _start_vox_listening returns False, mode is reverted to ptt and
+    the error includes details.reason = 'portaudio'."""
     dispatch = _make_dispatch()
 
     with (
@@ -111,16 +112,41 @@ def test_arm_vox_false_start_leaves_mode_ptt():
 
         _app.config = MagicMock()
         _app.config.minimal = True
+        _app.stream = None
 
         result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
         assert not result["ok"]
         assert result["error"]["code"] == "microphone_unavailable"
+        assert result["error"]["details"]["reason"] == "portaudio"
         # _set_input_mode was called with "vox" then reverted to "ptt"
         calls = [c[0][0] for c in mock_set_mode.call_args_list]
         assert "vox" in calls
         assert calls[-1] == "ptt"
         # Timer should NOT have been started
         assert _mod._vox_deadman_timer is None
+
+
+def test_arm_vox_blocked_by_active_ptt_stream():
+    """If app.stream is not None, arm is refused with details.reason
+    'ptt_stream_held' and _start_vox_listening is never called."""
+    dispatch = _make_dispatch()
+
+    with (
+        patch("voxium.app._start_vox_listening") as mock_start,
+        patch("voxium.app.show_status"),
+        patch("voxium.app.ptt_status_box"),
+    ):
+        import voxium.app as _app
+
+        _app.config = MagicMock()
+        _app.config.minimal = True
+        _app.stream = MagicMock()  # simulate an active PTT stream
+
+        result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
+        assert not result["ok"]
+        assert result["error"]["code"] == "microphone_unavailable"
+        assert result["error"]["details"]["reason"] == "ptt_stream_held"
+        mock_start.assert_not_called()
 
 
 def test_disarm_vox():
@@ -238,17 +264,13 @@ def test_deadman_retries_during_recording():
 
     _mod._vox_max_seconds = 0.3  # short deadline for tests
 
-    # Fake the app state / input_mode so the timer has something to work with
-    mock_state_obj = MagicMock()
-    mock_state_obj.state = ClientState.RECORDING
-
     # Create a state_lock that's always available
     real_lock = threading.Lock()
 
     with (
         patch.object(_app, "input_mode", "vox"),
         patch.object(_app, "state_lock", real_lock),
-        patch.object(_app, "state", ClientState.RECORDING),
+        patch.object(_app, "state", _app.State.RECORDING),
     ):
 
         # Start the dead-man timer (normally started by the arm handler)
@@ -261,8 +283,7 @@ def test_deadman_retries_during_recording():
         def _switch_to_idle_after_delay():
             time.sleep(0.8)  # let the timer retry a few times during RECORDING
             with real_lock:
-                mock_state_obj.state = ClientState.IDLE
-            _app.state = ClientState.IDLE  # update the patch target too
+                _app.state = _app.State.IDLE
 
         switcher = threading.Thread(target=_switch_to_idle_after_delay, daemon=True)
         switcher.start()
@@ -322,7 +343,7 @@ def test_deadman_disarms_during_transcribing():
     with (
         patch.object(_app, "input_mode", "vox"),
         patch.object(_app, "state_lock", real_lock),
-        patch.object(_app, "state", ClientState.TRANSCRIBING),
+        patch.object(_app, "state", _app.State.TRANSCRIBING),
         patch("voxium.app._stop_vox_listening") as mock_stop,
         patch("voxium.app._set_input_mode"),
         patch("voxium.app.show_status"),
@@ -345,19 +366,21 @@ def test_deadman_disarms_during_transcribing():
 
 def test_auto_disarmed_cleared_on_arm():
     """After timer sets vox_auto_disarmed=True, a new arm clears it."""
+    import voxium.app as _app
+
     _mod._vox_auto_disarmed = True  # simulating prior timer disarm
     dispatch = _make_dispatch()
 
     with (
         patch.object(_mod, "_vox_max_seconds", 2),
+        patch.object(_app, "input_mode", "ptt"),
         patch("voxium.app._start_vox_listening", return_value=True),
         patch("voxium.app._stop_vox_listening"),
         patch("voxium.app._set_input_mode"),
         patch("voxium.app.show_status"),
         patch("voxium.app.ptt_status_box"),
+        patch.object(_app, "stream", None),
     ):
-        import voxium.app as _app
-
         _app.config = MagicMock()
         _app.config.minimal = True
 
