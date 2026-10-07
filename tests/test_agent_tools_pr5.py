@@ -1248,25 +1248,24 @@ def ptt_server(ptt_session):
 
 
 def test_ptt_engage_success(ptt_server, ptt_session):
-    """ptt_engage sets app.state = RECORDING before start_recording, then returns."""
+    """ptt_engage holds state_lock across start_recording, returns on success."""
     import voxium.agent_server as _mod
     import voxium.app as _app
 
     saw_state = []
 
     def _fake_start():
-        with _app.state_lock:
-            saw_state.append(_app.state)
+        # Do NOT acquire _app.state_lock here — the handler already holds it.
+        # threading.Lock is not reentrant; reading the attr directly is safe.
+        saw_state.append(_app.state)
         return True
 
     handler = _tool_fn(ptt_server, "ptt_engage")
     with patch.object(_mod, "_agent_start_recording", side_effect=_fake_start):
-        with patch.object(_mod, "_agent_ptt_open", True):  # avoid opening sound device
-            result = handler()
-            # Restore IDLE and clear _agent_ptt_open so other tests start clean
-            with _app.state_lock:
-                _app.state = _app.State.IDLE
-            _mod._agent_ptt_open = False
+        result = handler()
+        # Restore IDLE so other tests start clean
+        with _app.state_lock:
+            _app.state = _app.State.IDLE
     assert result is not None
     assert saw_state == [
         _app.State.RECORDING

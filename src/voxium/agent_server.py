@@ -787,8 +787,9 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
         Dispatch layer handles scope, busy-state, and idempotent checks.
         This handler validates input mode, transitions state to RECORDING
-        under state_lock only when state is currently IDLE, then calls
-        start_recording().
+        and calls start_recording() under state_lock atomically.
+        After the lock is released, state is either RECORDING (mic open)
+        or IDLE (start failed).
         """
         global _agent_ptt_open
 
@@ -800,21 +801,22 @@ def _build_read_handler_map() -> dict[str, Callable]:
         import voxium.app as _app
 
         with _app.state_lock:
+            # Defensive: if somehow already RECORDING, return idempotent success.
+            if _app.state == _app.State.RECORDING:
+                return {"state": "recording", "already_recording": True}
             if _app.state != _app.State.IDLE:
                 return _tool_error(
                     "session_busy",
                     "Session is not idle.",
                 )
             _app.state = _app.State.RECORDING
-        # start_recording reads app.state; must be RECORDING before call.
-        rc = _agent_start_recording()
-        if not rc:
-            with _app.state_lock:
+            rc = _agent_start_recording()
+            if not rc:
                 _app.state = _app.State.IDLE
-            return _tool_error(
-                "microphone_unavailable",
-                "Microphone capture failed.",
-            )
+                return _tool_error(
+                    "microphone_unavailable",
+                    "Microphone capture failed.",
+                )
         _agent_ptt_open = True
         return {"state": "recording"}
 
