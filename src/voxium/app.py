@@ -4681,6 +4681,9 @@ def run_client(args, _raw_argv: list[str]) -> int:
     _agent_cfg: dict[str, Any] = {"enabled": _agent_enabled}
     if _agent_scopes:
         _agent_cfg["scopes"] = _agent_scopes
+    _vox_ms = _agent_fc.get("vox_max_seconds") if isinstance(_agent_fc, dict) else None
+    if isinstance(_vox_ms, int) and 1 <= _vox_ms <= 3600:
+        _agent_cfg["vox_max_seconds"] = _vox_ms
 
     # -- Start opt-in MCP listener (best-effort; failures don't block PTT) --
     try:
@@ -4704,10 +4707,13 @@ def run_client(args, _raw_argv: list[str]) -> int:
                 State.TRANSCRIBING: "transcribing",
                 State.COMMAND_INPUT: "command_input",
             }
+            from voxium.agent_server import _vox_auto_disarmed
+
             return {
                 "state": _state_names.get(state, "unknown"),
                 "input_mode": input_mode if input_mode is not None else "ptt",
                 "transmission_latest_id": None,
+                "vox_auto_disarmed": _vox_auto_disarmed,
             }
 
         install_state_callable(_agent_state_fn)
