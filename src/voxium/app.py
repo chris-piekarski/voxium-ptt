@@ -216,7 +216,16 @@ class _LiveSessionProxy:
 
     @property
     def inflight(self):
-        return set()
+        """Return live inflight flags from the agent server module."""
+        try:
+            from voxium.agent_dispatch import InflightFlag
+
+            import voxium.agent_server as _agent_mod
+
+            live_names = _agent_mod._agent_inflight
+            return {InflightFlag(name) for name in live_names}
+        except Exception:  # noqa: BLE001
+            return set()
 
     @property
     def active_hotkey(self):

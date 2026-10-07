@@ -63,6 +63,9 @@ _live_session: Any = None
 # PTT agent state: True when agent opened the mic and release is exempt from rate-limit.
 _agent_ptt_open: bool = False
 
+# Inflight flag store (PR 10 retransmit / future slash_apply)
+_agent_inflight: set[str] = set()
+
 
 def install_live_session(session: Any) -> None:
     """Wire ``_LazySession`` to a live SessionPort from ``app.py``.
@@ -848,6 +851,127 @@ def _build_read_handler_map() -> dict[str, Callable]:
             "state": "transcribing",
         }
 
+    def _handler_retransmit_last(_session, _ri):
+        """Retransmit the last audio capture (F6 retry via MCP).
+
+        Dispatch layer handles scope, busy-state, and inflight checks.
+        This handler validates pending audio and active window, spawns a
+        background thread for HTTP inference, and returns immediately with
+        the transmission id.
+
+        Immediate response never includes transcript text.
+        """
+        import io as _io
+
+        # Gate 1: must have pending audio
+        if not _session.has_pending_audio:
+            return _tool_error(
+                "nothing_to_retransmit",
+                "No pending audio to retransmit.",
+            )
+
+        # Capture pending audio flag + window before the lock
+        # (window read is fast; pending audio read is under the lock)
+        target_window = _session.get_active_window()
+
+        import voxium.app as _app
+
+        # Gate 2: validate state == IDLE under lock, then setup
+        with _app.state_lock:
+            if _app.state != _app.State.IDLE:
+                return _tool_error(
+                    "session_busy",
+                    "Session is not idle.",
+                )
+            # Gate 3: active window required for agent path
+            if target_window is None:
+                return _tool_error(
+                    "no_target_window",
+                    "No active target window.",
+                )
+            # Grab pending WAV bytes now that we own the lock
+            _pending_wav = _app.vox_pending_audio
+            if not _pending_wav:
+                return _tool_error(
+                    "nothing_to_retransmit",
+                    "No pending audio to retransmit.",
+                )
+
+            # Set inflight flag and begin transmission
+            _agent_inflight.add("retransmit")
+            tlog = get_transmission_log()
+            tid = tlog.begin() if tlog is not None else 1
+
+        # ---- background worker (after lock is dropped) ----
+        _outcome = "error"
+        _text = ""
+        _last_capture_info = getattr(_app, "last_audio_capture_info", None)
+
+        def _retransmit_worker():
+            nonlocal _outcome, _text
+            try:
+                wav_buffer = _io.BytesIO(_pending_wav)
+                _text = _app.transcribe_server(wav_buffer, _last_capture_info)
+
+                if _text and getattr(_app.config, "polish", True):
+                    _text = _app.maybe_polish_transcript(_text)
+
+                _metrics = getattr(_app, "last_transcription_metrics", None)
+                if _metrics is not None:
+                    _app._record_persistent_stats(_metrics, source="retry")
+
+                if _text and not _app.is_hallucination(_text):
+                    _outcome = "completed"
+                    h = _app.get_transcript_history()
+                    if h is not None:
+                        h.add(_text)
+
+                    paste_rc = _session.paste_for_agent(" " + _text, target_window)
+                    paste_ok = paste_rc >= 0
+
+                    if paste_ok:
+                        h2 = _app.get_transcript_history()
+                        if h2 is not None:
+                            h2.clear_pending_audio()
+
+                    tlog_finish = get_transmission_log()
+                    if tlog_finish is not None:
+                        tlog_finish.finish(
+                            tid,
+                            transcript=_text,
+                            state=_outcome,
+                            paste_ok=paste_ok,
+                        )
+                else:
+                    _outcome = "no_speech"
+                    h_err = _app.get_transcript_history()
+                    if h_err is not None:
+                        h_err.clear_pending_audio()
+                    tlog_finish = get_transmission_log()
+                    if tlog_finish is not None:
+                        tlog_finish.finish(
+                            tid,
+                            state=_outcome,
+                        )
+            except Exception:  # noqa: BLE001
+                _outcome = "error"
+                tlog_finish = get_transmission_log()
+                if tlog_finish is not None:
+                    tlog_finish.finish(
+                        tid,
+                        state=_outcome,
+                    )
+            finally:
+                _agent_inflight.discard("retransmit")
+
+        worker = threading.Thread(target=_retransmit_worker, daemon=True)
+        worker.start()
+
+        return {
+            "transmission_id": tid,
+            "state": "transcribing",
+        }
+
     return {
         "session_status": _handler_session_status,
         "transmission_last": _handler_transmission_last,
@@ -860,6 +984,7 @@ def _build_read_handler_map() -> dict[str, Callable]:
         "paste_history": _handler_paste_history,
         "ptt_engage": _handler_ptt_engage,
         "ptt_release": _handler_ptt_release,
+        "retransmit_last": _handler_retransmit_last,
         "debug_health": _handler_debug_health,
         "debug_stats": _handler_debug_stats,
         "debug_disk": _handler_debug_disk,
@@ -918,6 +1043,7 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
         "paste_history": {"index": int, "cycle": bool},
         "ptt_engage": {},
         "ptt_release": {},
+        "retransmit_last": {},
         "debug_health": {},
         "debug_stats": {},
         "debug_disk": {},

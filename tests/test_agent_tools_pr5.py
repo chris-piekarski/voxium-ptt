@@ -1405,3 +1405,118 @@ class _FakeTransmissionLog:
 
     def clear(self):
         pass
+
+
+# -----------------------------------------------------------------------
+# PR 10: retransmit_last tool
+# -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def retransmit_session():
+    """FakeSessionPort preconfigured for retransmit tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    return FakeSessionPort(
+        has_pending_audio=True,
+        _window="retransmit-win",
+    )
+
+
+@pytest.fixture
+def retransmit_server(retransmit_session):
+    """MCP server with session:retransmit scope."""
+    from mcp.server import MCPServer
+
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-retransmit", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=retransmit_session,
+        granted_scopes={"status:read", "session:retransmit"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_retransmit_nothing_to_retransmit(retransmit_server, retransmit_session):
+    """retransmit_last returns nothing_to_retransmit when no pending audio."""
+    retransmit_session.has_pending_audio = False
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "nothing_to_retransmit" in str(exc_info.value).lower()
+
+
+def test_retransmit_no_target_window(retransmit_server, retransmit_session):
+    """retransmit_last returns no_target_window when active window is None."""
+    retransmit_session._window = None
+    retransmit_session.has_pending_audio = True
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "no_target_window" in str(exc_info.value).lower()
+
+
+def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_session):
+    """retransmit_last returns transmission_id and state=transcribing on success."""
+    import voxium.agent_server as _mod
+    import voxium.app as _app
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+
+    with _app.state_lock:
+        _app.state = _app.State.IDLE
+        _app.vox_pending_audio = b"dummy-wav-data"
+
+    with patch.object(_mod, "_agent_inflight", set()):
+        result = handler()
+
+    assert result is not None
+    assert result.get("ok") is True
+    assert "transmission_id" in result["data"]
+    assert result["data"]["state"] == "transcribing"
+
+
+def test_retransmit_inflight_blocks_second_call(retransmit_server, retransmit_session):
+    """A second retransmit_last call while inflight is set returns session_busy."""
+    from voxium.agent_dispatch import ClientState, InflightFlag
+
+    retransmit_session.state = ClientState.IDLE
+    retransmit_session.inflight = {InflightFlag.RETRANSMIT}
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "session_busy" in str(exc_info.value).lower()
+
+
+def test_retransmit_recording_returns_busy(retransmit_server, retransmit_session):
+    """retransmit_last returns session_busy when state is RECORDING."""
+    from voxium.agent_dispatch import ClientState
+
+    retransmit_session.state = ClientState.RECORDING
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(RuntimeError) as exc_info:
+        handler()
+    assert "session_busy" in str(exc_info.value).lower()
+
+
+def test_retransmit_tool_absent_without_scope(scoped_server):
+    """retransmit_last should not be registered without session:retransmit scope."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "retransmit_last" not in tools
+
+
+def test_retransmit_tool_present_with_scope(retransmit_server):
+    """retransmit_last is registered when session:retransmit scope is granted."""
+    manager = getattr(retransmit_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "retransmit_last" in tools
