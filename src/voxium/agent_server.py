@@ -787,7 +787,8 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
         Dispatch layer handles scope, busy-state, and idempotent checks.
         This handler validates input mode, transitions state to RECORDING
-        under state_lock, then calls start_recording().
+        under state_lock only when state is currently IDLE, then calls
+        start_recording().
         """
         global _agent_ptt_open
 
@@ -797,7 +798,13 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 "Engage requires PTT mode.",
             )
         import voxium.app as _app
+
         with _app.state_lock:
+            if _app.state != _app.State.IDLE:
+                return _tool_error(
+                    "session_busy",
+                    "Session is not idle.",
+                )
             _app.state = _app.State.RECORDING
         # start_recording reads app.state; must be RECORDING before call.
         rc = _agent_start_recording()
@@ -877,8 +884,12 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
 
         Dispatch may return:
         - A ToolError envelope (``{"ok": False, "error": {...}}``) → raise
-        - The raw handler return value (dict, list, None) → pass through
+        - A ToolResult envelope (``{"ok": True, "data": {...}}``) → pass through
+        - The raw handler return value (dict with no ``ok`` / ``data`` keys) →
+          wrap in ``ToolResult(data=result)`` so every success uses one shape.
         """
+        from voxium.agent_protocol import ToolResult
+
         result = dispatch.dispatch(tool_name, raw_input)
         # ToolError envelopes have ``ok: False`` — everything else is success.
         if isinstance(result, dict) and not result.get("ok", True):
@@ -886,6 +897,9 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
             code = err.get("code", "internal") if isinstance(err, dict) else "internal"
             msg = err.get("message", code) if isinstance(err, dict) else "internal"
             raise RuntimeError(f"tool error [{code}]: {msg}")
+        # Wrap raw handler returns so the MCP SDK sees {ok: true, data: {...}}
+        if isinstance(result, dict) and "data" not in result:
+            result = ToolResult(data=result).to_dict()
         return result
 
     # Tool registration table: name → signature builder.

@@ -127,11 +127,12 @@ def test_session_status_includes_transmission_fields(server, tlog):
     handler = _tool_fn(server, "session_status")
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler()
-    assert "inflight" in result
-    assert "transmission_latest_id" in result
+    assert result.get("ok") is True
+    assert "inflight" in result["data"]
+    assert "transmission_latest_id" in result["data"]
     # inflight derives from dispatch-layer retransmit/slash_apply, not tlog
-    assert result["inflight"] == []
-    assert result["transmission_latest_id"] == 1
+    assert result["data"]["inflight"] == []
+    assert result["data"]["transmission_latest_id"] == 1
 
 
 def test_session_status_no_inflight_when_idle(server, tlog):
@@ -139,8 +140,8 @@ def test_session_status_no_inflight_when_idle(server, tlog):
     handler = _tool_fn(server, "session_status")
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler()
-    assert result["inflight"] == []
-    assert result["transmission_latest_id"] is None
+    assert result["data"]["inflight"] == []
+    assert result["data"]["transmission_latest_id"] is None
 
 
 def test_session_status_falls_back_to_default_callable(server):
@@ -154,8 +155,8 @@ def test_session_status_falls_back_to_default_callable(server):
         handler = _tool_fn(server, "session_status")
         result = handler()
         # Should return basic fields from default callable
-        assert "state" in result
-        assert "input_mode" in result
+        assert "state" in result["data"]
+        assert "input_mode" in result["data"]
     finally:
         _mod._state_callable = old_callable
 
@@ -185,10 +186,10 @@ def test_transmission_last_returns_last(server, tlog):
         result = handler()
     assert result is not None
     # tlog.last() returns the newest record by insertion order
-    if hasattr(result, "id"):
-        assert result.id == tid3  # newest
+    if hasattr(result["data"], "id"):
+        assert result["data"].id == tid3  # newest
     else:
-        assert result["id"] == tid3
+        assert result["data"]["id"] == tid3
 
 
 def test_transmission_last_returns_active_when_no_completed(server, tlog):
@@ -200,10 +201,10 @@ def test_transmission_last_returns_active_when_no_completed(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler()
     assert result is not None
-    if hasattr(result, "id"):
-        assert result.id == tid2
+    if hasattr(result["data"], "id"):
+        assert result["data"].id == tid2
     else:
-        assert result["id"] == tid2
+        assert result["data"]["id"] == tid2
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +221,9 @@ def test_transmission_get_found(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler(id=tid)
     assert result is not None
-    assert result["id"] == tid
-    assert result["state"] == "no_speech"
-    assert result["transcript"] == "beep boop"
+    assert result["data"]["id"] == tid
+    assert result["data"]["state"] == "no_speech"
+    assert result["data"]["transcript"] == "beep boop"
 
 
 def test_transmission_get_not_found(server, tlog):
@@ -250,9 +251,9 @@ def test_transmission_wait_reuses_completed(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler(id=tid, timeout_seconds=1.0)
     assert result is not None
-    assert result["id"] == tid
-    assert result["state"] == "completed"
-    assert result["transcript"] == "done"
+    assert result["data"]["id"] == tid
+    assert result["data"]["state"] == "completed"
+    assert result["data"]["transcript"] == "done"
 
 
 def test_transmission_wait_not_found(server, tlog):
@@ -295,7 +296,7 @@ def test_history_list_empty(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=10)
-    assert result == {"entries": [], "total": 0}
+    assert result["data"] == {"entries": [], "total": 0}
 
 
 def test_history_list_with_entries(server, history):
@@ -306,9 +307,9 @@ def test_history_list_with_entries(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=5)
-    assert len(result["entries"]) == 2
-    assert result["entries"][0]["source"] == "vox"  # newest first
-    assert result["entries"][1]["source"] == "ptt"
+    assert len(result["data"]["entries"]) == 2
+    assert result["data"]["entries"][0]["source"] == "vox"  # newest first
+    assert result["data"]["entries"][1]["source"] == "ptt"
 
 
 def test_history_list_limit(server, history):
@@ -319,9 +320,9 @@ def test_history_list_limit(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=3)
-    assert len(result["entries"]) == 3
+    assert len(result["data"]["entries"]) == 3
     # total now reflects iter_entries yield count (filtered)
-    assert result["total"] == 3
+    assert result["data"]["total"] == 3
 
 
 def test_history_list_query_filter(server, history):
@@ -333,8 +334,8 @@ def test_history_list_query_filter(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=10, query="beep")
-    assert len(result["entries"]) == 2  # hello beeps and goodbye beeps
-    assert result["total"] == 2
+    assert len(result["data"]["entries"]) == 2  # hello beeps and goodbye beeps
+    assert result["data"]["total"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +352,8 @@ def test_history_get_found(server, history):
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(index=1)
     assert result is not None
-    assert result["index"] == 1
-    assert result["text"] == "second"  # #1 = newest
+    assert result["data"]["index"] == 1
+    assert result["data"]["text"] == "second"  # #1 = newest
 
 
 def test_history_get_out_of_range(server, history):
@@ -383,17 +384,19 @@ def test_debug_health_has_fixed_fields(server):
     handler = _tool_fn(server, "debug_health")
 
     result = handler()
-    assert "healthy" in result
-    assert "status" in result
-    assert "device" in result
-    assert "compute" in result
-    assert "model" not in result  # strictly filtered out
-    assert "polish_server_url" not in result  # no raw URLs
-    assert "server_version" not in result  # removed from strict fields
-    assert "timestamp" not in result  # removed from strict fields
-    assert "timestamp_utc" not in result  # removed
-    assert "sample_rate" not in result  # removed
-    assert isinstance(result["healthy"], bool)
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "healthy" in d
+    assert "status" in d
+    assert "device" in d
+    assert "compute" in d
+    assert "model" not in d  # strictly filtered out
+    assert "polish_server_url" not in d  # no raw URLs
+    assert "server_version" not in d  # removed from strict fields
+    assert "timestamp" not in d  # removed from strict fields
+    assert "timestamp_utc" not in d  # removed
+    assert "sample_rate" not in d  # removed
+    assert isinstance(d["healthy"], bool)
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +409,11 @@ def test_debug_stats_returns_dict(server):
     handler = _tool_fn(server, "debug_stats")
 
     result = handler()
-    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    d = result["data"]
+    assert isinstance(d, dict)
     # Should have at least one of the expected keys
-    assert "persistent" in result or "server" in result
+    assert "persistent" in d or "server" in d
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +506,8 @@ def test_session_status_allowed_with_status_read(scoped_server):
     handler = _tool_fn(scoped_server, "session_status")
     result = handler()
     assert isinstance(result, dict)
-    assert "state" in result
+    assert result.get("ok") is True
+    assert "state" in result["data"]
 
 
 def test_history_tools_denied_without_transcript_read(scoped_server):
@@ -527,17 +533,19 @@ def test_transmission_last_returns_dict(server, tlog):
         result = handler()
 
     assert isinstance(result, dict)
-    assert "id" in result
-    assert "state" in result
-    assert "transcript" in result
-    assert "filtered" in result
-    assert "paste_ok" in result
-    assert "paste_error" in result
-    assert "duration_ms" in result
-    assert "model" in result
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "id" in d
+    assert "state" in d
+    assert "transcript" in d
+    assert "filtered" in d
+    assert "paste_ok" in d
+    assert "paste_error" in d
+    assert "duration_ms" in d
+    assert "model" in d
     # Strict: no raw internal fields
-    assert "_lock" not in result
-    assert "_extra" not in result
+    assert "_lock" not in d
+    assert "_extra" not in d
 
 
 def test_history_list_returns_envelope(server, history):
@@ -550,11 +558,13 @@ def test_history_list_returns_envelope(server, history):
         result = handler(limit=10)
 
     assert isinstance(result, dict)
-    assert "entries" in result
-    assert "total" in result
-    assert isinstance(result["entries"], list)
-    assert result["total"] == 2
-    assert len(result["entries"]) == 2
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "entries" in d
+    assert "total" in d
+    assert isinstance(d["entries"], list)
+    assert d["total"] == 2
+    assert len(d["entries"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +595,7 @@ def test_health_returns_null_when_no_server_url(server):
     _mod._server_url = None
     result = handler()
     # Should have healthy=False without opening any socket
-    assert result["healthy"] is False
+    assert result["data"]["healthy"] is False
 
 
 def test_health_strict_fields(server):
@@ -594,12 +604,12 @@ def test_health_strict_fields(server):
     with patch("voxium.agent_server._server_url", None):
         result = handler()
     # Strict: no raw internal fields leak through
-    assert "model_repo" not in result
+    assert "model_repo" not in result["data"]
     # Allowed fields present
-    assert "healthy" in result
-    assert "status" in result
-    assert "device" in result
-    assert "compute" in result
+    assert "healthy" in result["data"]
+    assert "status" in result["data"]
+    assert "device" in result["data"]
+    assert "compute" in result["data"]
 
 
 def test_debug_health_status_field(server):
@@ -607,8 +617,8 @@ def test_debug_health_status_field(server):
     handler = _tool_fn(server, "debug_health")
     with patch("voxium.agent_server._server_url", None):
         result = handler()
-    assert "status" in result
-    assert result["status"] == "degraded"
+    assert "status" in result["data"]
+    assert result["data"]["status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
@@ -627,9 +637,9 @@ def test_history_list_delegates_iter_entries(server, history):
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=10, query="alpha")
     # Query filtering: should return entries matching "alpha"
-    assert result["total"] >= 1
+    assert result["data"]["total"] >= 1
     # Entries use 'preview' field from iter_entries
-    for entry in result["entries"]:
+    for entry in result["data"]["entries"]:
         preview = entry.get("text") or entry.get("preview") or ""
         assert "alpha" in preview.lower()
 
@@ -642,7 +652,7 @@ def test_history_list_limit_applied(server, history):
     handler = _tool_fn(server, "history_list")
     with patch("voxium.agent_server.get_session_history", return_value=history):
         result = handler(limit=5)
-    assert len(result["entries"]) <= 5
+    assert len(result["data"]["entries"]) <= 5
 
 
 # ---------------------------------------------------------------------------
@@ -670,8 +680,8 @@ def test_transmission_get_found_still_works(server, tlog):
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler(id=tid)
     assert isinstance(result, dict)
-    assert "ok" not in result or result.get("ok", True)  # success, not error envelope
-    assert result["id"] == tid
+    assert result.get("ok") is True  # success envelope
+    assert result["data"]["id"] == tid
 
 
 # ---------------------------------------------------------------------------
@@ -738,7 +748,7 @@ def test_session_status_inflight_empty_always(server, tlog):
     handler = _tool_fn(server, "session_status")
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler()
-    assert result["inflight"] == []
+    assert result["data"]["inflight"] == []
 
 
 def test_session_status_has_transmission_latest_id(server, tlog):
@@ -748,7 +758,7 @@ def test_session_status_has_transmission_latest_id(server, tlog):
     handler = _tool_fn(server, "session_status")
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         result = handler()
-    assert result["transmission_latest_id"] == 1
+    assert result["data"]["transmission_latest_id"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +854,7 @@ def test_clipboard_set_success(clipboard_server, clipboard_session):
     with patch("pyperclip.copy") as mock_copy:
         result = handler(text="hello world")
     assert result is not None
-    assert result["chars"] == 11
+    assert result["data"]["chars"] == 11
     mock_copy.assert_called_once_with("hello world")
 
 
@@ -890,8 +900,8 @@ def test_history_copy_success(clipboard_server, clipboard_session):
     with patch("pyperclip.copy") as mock_copy:
         result = handler(index=1)
     assert result is not None
-    assert result["index"] == 1
-    assert result["chars"] == len("hello clipboard")
+    assert result["data"]["index"] == 1
+    assert result["data"]["chars"] == len("hello clipboard")
     mock_copy.assert_called_once_with("hello clipboard")
 
 
@@ -926,10 +936,10 @@ def test_paste_history_by_index(clipboard_server, clipboard_session):
     handler = _tool_fn(clipboard_server, "paste_history")
     result = handler(index=1)
     assert result is not None
-    assert result["index"] == 1
-    assert result["chars"] == len("hello clipboard")
-    assert result["cycle"] is False
-    assert result["paste_ok"] is True
+    assert result["data"]["index"] == 1
+    assert result["data"]["chars"] == len("hello clipboard")
+    assert result["data"]["cycle"] is False
+    assert result["data"]["paste_ok"] is True
 
 
 def test_paste_history_by_cycle(clipboard_server, clipboard_session):
@@ -939,7 +949,7 @@ def test_paste_history_by_cycle(clipboard_server, clipboard_session):
     handler = _tool_fn(clipboard_server, "paste_history")
     result = handler(cycle=True)
     assert result is not None
-    assert result["cycle"] is True
+    assert result["data"]["cycle"] is True
 
 
 def test_paste_history_missing_args(clipboard_server, clipboard_session):
@@ -1251,10 +1261,18 @@ def test_ptt_engage_success(ptt_server, ptt_session):
 
     handler = _tool_fn(ptt_server, "ptt_engage")
     with patch.object(_mod, "_agent_start_recording", side_effect=_fake_start):
-        result = handler()
+        with patch.object(_mod, "_agent_ptt_open", True):  # avoid opening sound device
+            result = handler()
+            # Restore IDLE and clear _agent_ptt_open so other tests start clean
+            with _app.state_lock:
+                _app.state = _app.State.IDLE
+            _mod._agent_ptt_open = False
     assert result is not None
-    assert saw_state == [_app.State.RECORDING], f"expected RECORDING during start_recording, got {saw_state}"
-    assert result.get("state") == "recording"
+    assert saw_state == [
+        _app.State.RECORDING
+    ], f"expected RECORDING during start_recording, got {saw_state}"
+    assert result.get("ok") is True
+    assert result["data"].get("state") == "recording"
 
 
 def test_ptt_engage_already_recording(ptt_server, ptt_session):
@@ -1284,8 +1302,9 @@ def test_ptt_release_success(ptt_server, ptt_session):
     with patch.object(_mod, "_agent_finish_ptt_recording", side_effect=_fake_finish):
         result = handler()
     assert result is not None
-    assert result.get("transmission_id") == 1
-    assert result.get("state") == "transcribing"
+    assert result.get("ok") is True
+    assert result["data"].get("transmission_id") == 1
+    assert result["data"].get("state") == "transcribing"
 
 
 def test_ptt_release_not_recording(ptt_server, ptt_session):
@@ -1298,6 +1317,7 @@ def test_ptt_release_not_recording(ptt_server, ptt_session):
             handler()
         assert "not_recording" in str(exc_info.value).lower()
         mock_finish.assert_not_called()
+
 
 def test_ptt_release_none_tid_returns_not_recording(ptt_server, ptt_session):
     """ptt_release returns not_recording when _finish_ptt_recording yields tid=None."""

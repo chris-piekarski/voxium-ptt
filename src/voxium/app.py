@@ -220,7 +220,9 @@ class _LiveSessionProxy:
 
     @property
     def active_hotkey(self):
-        return _ptt_key_tracker.is_down
+        if _ptt_key_tracker.is_down:
+            return "ptt"
+        return None
 
     @property
     def paste_debounce_remaining_ms(self):
@@ -278,23 +280,31 @@ class _LiveSessionProxy:
         Peek at the next history entry for replay cursor (does not advance).
 
         Returns ``(1-based_index, text)`` or ``None`` when history is empty.
+        Reads the history's own _replay_cursor (used by F8).
         """
         h = get_transcript_history()
         if h is None:
             return None
         with h._lock:
             n = len(h._entries)
+            cursor = h._replay_cursor
         if n == 0:
             return None
-        i = self._replay_cursor % n
+        i = cursor % n
         text = h.text_by_display_index(i + 1)
         if text is None:
             return None
         return (i + 1, text)
 
     def advance_replay_cursor(self):
-        """Advance the replay cursor by one position."""
-        self._replay_cursor += 1
+        """Advance the replay cursor by one position (holds history lock)."""
+        h = get_transcript_history()
+        if h is None:
+            return
+        with h._lock:
+            n = len(h._entries) if h._entries else 0
+            if n > 0:
+                h._replay_cursor = (h._replay_cursor + 1) % n
 
     def paste_for_agent(self, text: str, window):
         """
@@ -3788,10 +3798,10 @@ def _finish_ptt_recording() -> tuple[int | None, int]:
 
     # Clear agent PTT flag so human hotkey path also resets it.
     try:
-        from voxium.agent_server import _agent_ptt_open as _ao
+        import voxium.agent_server as _agent_mod
 
-        _ao = False  # type: ignore[misc]
-    except (ImportError, ModuleNotFoundError):
+        _agent_mod._agent_ptt_open = False
+    except (ImportError, ModuleNotFoundError, AttributeError):
         pass
 
     tid: int | None = None
