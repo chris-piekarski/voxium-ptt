@@ -463,7 +463,7 @@ def _build_read_handler_map() -> dict[str, Callable]:
         base = fn() if fn is not None else default_state_callable()
         # inflight derives from dispatch-layer sessions (retransmit / slash_apply),
         # not from tlog.get_inflight() — read-only tools never populate inflight
-        base["inflight"] = []
+        base["inflight"] = list(_agent_inflight)
         tlog = get_transmission_log()
         base["transmission_latest_id"] = tlog.latest_id() if tlog is not None else None
         return base
@@ -863,15 +863,13 @@ def _build_read_handler_map() -> dict[str, Callable]:
         """
         import io as _io
 
-        # Gate 1: must have pending audio
+        # Gate 1: must have pending audio (F6 retry buffer, not vox queue)
         if not _session.has_pending_audio:
             return _tool_error(
                 "nothing_to_retransmit",
                 "No pending audio to retransmit.",
             )
 
-        # Capture pending audio flag + window before the lock
-        # (window read is fast; pending audio read is under the lock)
         target_window = _session.get_active_window()
 
         import voxium.app as _app
@@ -889,18 +887,31 @@ def _build_read_handler_map() -> dict[str, Callable]:
                     "no_target_window",
                     "No active target window.",
                 )
-            # Grab pending WAV bytes now that we own the lock
-            _pending_wav = _app.vox_pending_audio
+            # Grab pending WAV bytes from history (F6 retry buffer)
+            h = _app.get_transcript_history()
+            if h is None:
+                return _tool_error(
+                    "internal",
+                    "Transcript history is not available.",
+                )
+            _pending_wav = h.get_pending_audio()
             if not _pending_wav:
                 return _tool_error(
                     "nothing_to_retransmit",
                     "No pending audio to retransmit.",
                 )
 
+            # Require a live transmission log
+            tlog = get_transmission_log()
+            if tlog is None:
+                return _tool_error(
+                    "internal",
+                    "Transmission log is not available.",
+                )
+
             # Set inflight flag and begin transmission
             _agent_inflight.add("retransmit")
-            tlog = get_transmission_log()
-            tid = tlog.begin() if tlog is not None else 1
+            tid = tlog.begin()
 
         # ---- background worker (after lock is dropped) ----
         _outcome = "error"
@@ -913,7 +924,7 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 wav_buffer = _io.BytesIO(_pending_wav)
                 _text = _app.transcribe_server(wav_buffer, _last_capture_info)
 
-                if _text and getattr(_app.config, "polish", True):
+                if _text and _app.config and getattr(_app.config, "polish", True):
                     _text = _app.maybe_polish_transcript(_text)
 
                 _metrics = getattr(_app, "last_transcription_metrics", None)
@@ -922,17 +933,15 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
                 if _text and not _app.is_hallucination(_text):
                     _outcome = "completed"
-                    h = _app.get_transcript_history()
-                    if h is not None:
-                        h.add(_text)
+                    _h = _app.get_transcript_history()
+                    if _h is not None:
+                        _h.add(_text)
 
                     paste_rc = _session.paste_for_agent(" " + _text, target_window)
-                    paste_ok = paste_rc >= 0
 
-                    if paste_ok:
-                        h2 = _app.get_transcript_history()
-                        if h2 is not None:
-                            h2.clear_pending_audio()
+                    # Clear pending audio on success branch, regardless of paste
+                    if _h is not None:
+                        _h.clear_pending_audio()
 
                     tlog_finish = get_transmission_log()
                     if tlog_finish is not None:
@@ -940,13 +949,13 @@ def _build_read_handler_map() -> dict[str, Callable]:
                             tid,
                             transcript=_text,
                             state=_outcome,
-                            paste_ok=paste_ok,
+                            paste_ok=paste_rc >= 0,
                         )
                 else:
                     _outcome = "no_speech"
-                    h_err = _app.get_transcript_history()
-                    if h_err is not None:
-                        h_err.clear_pending_audio()
+                    _h_err = _app.get_transcript_history()
+                    if _h_err is not None:
+                        _h_err.clear_pending_audio()
                     tlog_finish = get_transmission_log()
                     if tlog_finish is not None:
                         tlog_finish.finish(

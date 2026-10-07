@@ -1381,6 +1381,19 @@ def test_ptt_engage_microphone_unavailable(ptt_server, ptt_session):
 # FakeTransmissionLog for ptt_release handler tests
 
 
+def _mock_history():
+    """Return a MagicMock standing in for SessionTranscriptHistory."""
+    from unittest.mock import MagicMock
+
+    h = MagicMock()
+    h.get_pending_audio.return_value = None
+    h.is_hallucination.return_value = False
+    h.clear_pending_audio.return_value = None
+    h.add.return_value = None
+    h.total_entries.return_value = 0
+    return h
+
+
 class _FakeTransmissionLog:
     def latest_id(self):
         return 1
@@ -1466,19 +1479,42 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
     import voxium.agent_server as _mod
     import voxium.app as _app
 
+    import time
+
     handler = _tool_fn(retransmit_server, "retransmit_last")
+
+    original_state = _app.state
+    mock_hist = _mock_history()
+    mock_hist.get_pending_audio.return_value = b"dummy-wav-bytes"
+    mock_hist.is_hallucination.return_value = False
 
     with _app.state_lock:
         _app.state = _app.State.IDLE
-        _app.vox_pending_audio = b"dummy-wav-data"
 
-    with patch.object(_mod, "_agent_inflight", set()):
-        result = handler()
+    try:
+        with patch.object(_app, "get_transcript_history", return_value=mock_hist):
+            with patch.object(
+                _app, "transcribe_server", return_value="retransmit test"
+            ):
+                result = handler()
 
-    assert result is not None
-    assert result.get("ok") is True
-    assert "transmission_id" in result["data"]
-    assert result["data"]["state"] == "transcribing"
+        assert result is not None
+        assert result.get("ok") is True
+        assert "transmission_id" in result["data"]
+        assert result["data"]["state"] == "transcribing"
+        # Wait for background worker to complete (daemon thread)
+        for _ in range(50):  # up to 5s
+            if mock_hist.clear_pending_audio.called:
+                break
+            time.sleep(0.1)
+        # History add and clear should have been called by the worker
+        mock_hist.add.assert_called_once_with("retransmit test")
+        mock_hist.clear_pending_audio.assert_called_once()
+        # inflight flag should be cleared after worker finishes
+        assert "retransmit" not in _mod._agent_inflight
+    finally:
+        with _app.state_lock:
+            _app.state = original_state
 
 
 def test_retransmit_inflight_blocks_second_call(retransmit_server, retransmit_session):

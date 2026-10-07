@@ -244,9 +244,13 @@ class _LiveSessionProxy:
 
     @property
     def has_pending_audio(self):
-        global vox_pending_audio
-        if vox_pending_audio is not None:
-            return len(vox_pending_audio) > 0
+        """Check if there is pending audio from an F6 retry buffer (not vox queue)."""
+        try:
+            h = get_transcript_history()
+            if h is not None:
+                return h.get_pending_audio() is not None
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
     @property
