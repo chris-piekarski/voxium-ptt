@@ -1262,10 +1262,13 @@ def test_ptt_engage_success(ptt_server, ptt_session):
 
     handler = _tool_fn(ptt_server, "ptt_engage")
     with patch.object(_mod, "_agent_start_recording", side_effect=_fake_start):
-        result = handler()
-        # Restore IDLE so other tests start clean
-        with _app.state_lock:
-            _app.state = _app.State.IDLE
+        try:
+            result = handler()
+        finally:
+            # Always restore IDLE and clear the agent-PTT flag so other tests start clean.
+            with _app.state_lock:
+                _app.state = _app.State.IDLE
+            _mod._agent_ptt_open = False
     assert result is not None
     assert saw_state == [
         _app.State.RECORDING
