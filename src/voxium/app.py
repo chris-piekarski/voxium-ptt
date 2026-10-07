@@ -4681,9 +4681,10 @@ def run_client(args, _raw_argv: list[str]) -> int:
     _agent_cfg: dict[str, Any] = {"enabled": _agent_enabled}
     if _agent_scopes:
         _agent_cfg["scopes"] = _agent_scopes
-    _vox_ms = _agent_fc.get("vox_max_seconds") if isinstance(_agent_fc, dict) else None
-    if isinstance(_vox_ms, int) and 1 <= _vox_ms <= 3600:
-        _agent_cfg["vox_max_seconds"] = _vox_ms
+    # Forward the raw VOX cap so start_agent_listener can distinguish
+    # "absent (use 120 s default)" from "present but invalid (reject VOX arm)".
+    if isinstance(_agent_fc, dict) and "vox_max_seconds" in _agent_fc:
+        _agent_cfg["vox_max_seconds"] = _agent_fc["vox_max_seconds"]
 
     # -- Start opt-in MCP listener (best-effort; failures don't block PTT) --
     try:

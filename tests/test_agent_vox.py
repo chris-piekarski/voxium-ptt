@@ -37,6 +37,7 @@ def _reset_vox_state():
     _mod._vox_auto_disarmed = False
     _mod._vox_disarming = False
     _mod._vox_max_seconds = 120
+    _mod._vox_cap_invalid = False
     if _mod._vox_deadman_timer is not None:
         _mod._vox_deadman_timer.cancel()
         _mod._vox_deadman_timer = None
@@ -173,6 +174,69 @@ def test_disarm_vox():
 
 
 # ---------------------------------------------------------------------------
+# Config reader: out-of-range VOX cap must reject arm (not fall back to 120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_cap", [0, 3601, 1.5, "120"])
+def test_vox_cap_rejects_out_of_range_config(bad_cap):
+    """A configured but invalid vox_max_seconds must reject VOX arm.
+
+    The value is passed through the same reader start_agent_listener uses
+    (``_resolve_vox_cap``), not assigned to ``_vox_max_seconds`` after the
+    filter, so it proves the 120 s fallback does not silently open the mic.
+    """
+    import voxium.app as _app
+
+    _mod._resolve_vox_cap({"vox_max_seconds": bad_cap})
+    assert _mod._vox_cap_invalid is True
+
+    dispatch = _make_dispatch()
+
+    with (
+        patch("voxium.app._set_input_mode") as mock_set,
+        patch("voxium.app._start_vox_listening") as mock_start,
+        patch("voxium.app.show_status"),
+        patch("voxium.app.ptt_status_box"),
+    ):
+        _app.config = MagicMock()
+        _app.config.minimal = True
+        _app.stream = None
+
+        result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
+        assert result["ok"] is False
+        assert result["error"]["code"] == "invalid_arguments"
+        mock_set.assert_not_called()
+        mock_start.assert_not_called()
+
+
+def test_vox_cap_absent_uses_default_120():
+    """Absent vox_max_seconds keeps the 120 s default and still allows arm."""
+    import voxium.app as _app
+
+    _mod._resolve_vox_cap({})  # key absent
+    assert _mod._vox_cap_invalid is False
+    assert _mod._vox_max_seconds == 120
+
+    dispatch = _make_dispatch()
+
+    with (
+        patch("voxium.app._start_vox_listening", return_value=True),
+        patch("voxium.app._stop_vox_listening"),
+        patch("voxium.app._set_input_mode"),
+        patch("voxium.app.show_status"),
+        patch("voxium.app.ptt_status_box"),
+        patch.object(_app, "stream", None),
+    ):
+        _app.config = MagicMock()
+        _app.config.minimal = True
+
+        result = dispatch.dispatch("input_mode_set", {"mode": "vox"})
+        assert result["ok"] is True
+        assert result["data"]["input_mode"] == "vox"
+
+
+# ---------------------------------------------------------------------------
 # Idempotency: already vox, already ptt
 # ---------------------------------------------------------------------------
 
@@ -256,9 +320,8 @@ def test_recording_refuses_same_mode():
 
 
 def test_deadman_retries_during_recording():
-    """The timer should not disarm while state is RECORDING; it sleeps and retries.
-
-    After state transitions to IDLE the timer disarms and sets vox_auto_disarmed.
+    """The timer must not disarm while state is RECORDING; it sleeps and
+    retries. It disarms only after state leaves RECORDING (here to IDLE).
     """
     import voxium.app as _app
 
@@ -267,19 +330,33 @@ def test_deadman_retries_during_recording():
     # Create a state_lock that's always available
     real_lock = threading.Lock()
 
+    # Record the state observed each time the disarm path runs. Disarming
+    # while state is still RECORDING is the bug this test must catch.
+    _call_states: list = []
+
+    def _record_stop(*_args, **_kwargs):
+        with real_lock:
+            _call_states.append(_app.state)
+
     with (
         patch.object(_app, "input_mode", "vox"),
         patch.object(_app, "state_lock", real_lock),
         patch.object(_app, "state", _app.State.RECORDING),
+        patch("voxium.app._stop_vox_listening", side_effect=_record_stop) as mock_stop,
+        patch("voxium.app._set_input_mode"),
+        patch("voxium.app.show_status"),
+        patch(
+            "voxium.app.config",
+            new_callable=lambda: MagicMock(minimal=True),
+        ),
+        patch("voxium.app.ptt_status_box"),
     ):
-
         # Start the dead-man timer (normally started by the arm handler)
         _mod._start_vox_deadman()
         assert _mod._vox_deadman_timer is not None
 
-        # The timer fires after 0.3 s, sees RECORDING, sleeps 200 ms and retries.
-        # After a few retries the mock state changes to IDLE and the timer disarms.
-        # After a short delay, switch state to IDLE so the timer can disarm
+        # The timer fires after 0.3 s, sees RECORDING, sleeps 200 ms and
+        # retries. After a short delay, switch state to IDLE so it can disarm.
         def _switch_to_idle_after_delay():
             time.sleep(0.8)  # let the timer retry a few times during RECORDING
             with real_lock:
@@ -288,22 +365,14 @@ def test_deadman_retries_during_recording():
         switcher = threading.Thread(target=_switch_to_idle_after_delay, daemon=True)
         switcher.start()
 
-        # Patch the disarm path
-        with (
-            patch("voxium.app._stop_vox_listening"),
-            patch("voxium.app._set_input_mode"),
-            patch("voxium.app.show_status"),
-            patch(
-                "voxium.app.config",
-                new_callable=lambda: MagicMock(minimal=True),
-            ),
-            patch("voxium.app.ptt_status_box"),
-        ):
-            # Wait for the timer to run (give it some buffer)
-            _mod._vox_deadman_timer.join(timeout=2.0)
+        # Wait for the timer to run (give it some buffer)
+        _mod._vox_deadman_timer.join(timeout=2.0)
 
         switcher.join(timeout=1.0)
         assert _mod._vox_auto_disarmed is True
+        mock_stop.assert_called()
+        # Must never have disarmed while state was still RECORDING.
+        assert _app.State.RECORDING not in _call_states
 
 
 # ---------------------------------------------------------------------------

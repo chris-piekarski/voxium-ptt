@@ -69,6 +69,11 @@ _agent_inflight: set[str] = set()
 # VOX dead-man: max seconds the mic may stay open for an agent-armed VOX (PR 11)
 _vox_max_seconds: int = 120  # default
 
+# True when vox_max_seconds is *present* in config but not an int in 1..3600.
+# Absent config keeps the 120 s default usable; an invalid configured value
+# must reject VOX arm rather than silently fall back to 120 and open the mic.
+_vox_cap_invalid: bool = False
+
 # Dead-man timer handle (cancelled on any disarm; started on agent VOX arm)
 _vox_deadman_timer: threading.Timer | None = None
 
@@ -328,6 +333,28 @@ def _start_vox_deadman() -> None:
     _vox_deadman_timer.start()
 
 
+def _resolve_vox_cap(agent_cfg: dict[str, Any]) -> None:
+    """Resolve the VOX dead-man cap from listener config into module state.
+
+    The ``vox_max_seconds`` key is optional. Absent (or the whole config
+    missing it) keeps the 120 s product default and leaves the cap usable.
+    Present but not an ``int`` in ``1..3600`` is a configuration error: a
+    silent fallback to 120 would arm the mic far longer than requested, so
+    the cap is flagged unusable and ``input_mode_set`` rejects VOX with
+    ``invalid_arguments`` instead.
+    """
+    global _vox_max_seconds, _vox_cap_invalid
+    if "vox_max_seconds" not in agent_cfg:
+        _vox_cap_invalid = False
+        return
+    raw = agent_cfg["vox_max_seconds"]
+    if isinstance(raw, int) and 1 <= raw <= 3600:
+        _vox_max_seconds = raw
+        _vox_cap_invalid = False
+    else:
+        _vox_cap_invalid = True
+
+
 # ---------------------------------------------------------------------------
 # Listener startup / shutdown
 # ---------------------------------------------------------------------------
@@ -376,11 +403,9 @@ def start_agent_listener(
     bind_port: int = agent_cfg.get("port", 0)
     allow_non_loopback: bool = bool(agent_cfg.get("allow_non_loopback", False))
 
-    # -- VOX dead-man cap (default 120 s; validated in range 1..3600) --------
-    _vox_ms_raw = agent_cfg.get("vox_max_seconds")
-    if isinstance(_vox_ms_raw, int) and 1 <= _vox_ms_raw <= 3600:
-        global _vox_max_seconds
-        _vox_max_seconds = _vox_ms_raw
+    # -- VOX dead-man cap (default 120 s when absent; reject VOX arm when the
+    #    key is present but not an int in 1..3600) ---------------------------
+    _resolve_vox_cap(agent_cfg)
 
     # -- Bind-host policy (loopback only) --------------------------------------
     from voxium.agent_auth import (
@@ -1110,11 +1135,15 @@ def _build_read_handler_map() -> dict[str, Callable]:
                 message="mode must be 'ptt' or 'vox'.",
             ).to_dict()
 
-        # Reject VOX arm when max-seconds is out of range.
-        if mode == "vox" and not 1 <= _vox_max_seconds <= 3600:
+        # Reject VOX arm when max-seconds was configured but invalid (present
+        # but not an int in 1..3600). Absent config keeps the 120 s default
+        # usable, so only the explicit _vox_cap_invalid flag rejects here.
+        if mode == "vox" and (_vox_cap_invalid or not 1 <= _vox_max_seconds <= 3600):
             return ToolError(
                 code="invalid_arguments",
-                message="VOX max-seconds is not configured.",
+                message=(
+                    "VOX max-seconds is not configured or is out of range " "(1-3600)."
+                ),
             ).to_dict()
 
         current_mode = _app.input_mode
