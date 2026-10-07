@@ -1475,11 +1475,20 @@ def test_retransmit_no_target_window(retransmit_server, retransmit_session):
 
 
 def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_session):
-    """retransmit_last returns transmission_id and state=transcribing on success."""
+    """retransmit_last returns transmission_id and state=transcribing on success.
+
+    Hold the fake transcribe_server on an event so a second retransmit_last
+    runs while the first worker is still inside it.  The second call must
+    not call transcribe_server again, and _agent_inflight must contain
+    'retransmit' until the event fires.
+    """
+    import threading
+    import time
+
+    from voxium.agent_dispatch import InflightFlag
+
     import voxium.agent_server as _mod
     import voxium.app as _app
-
-    import time
 
     handler = _tool_fn(retransmit_server, "retransmit_last")
 
@@ -1488,30 +1497,57 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
     mock_hist.get_pending_audio.return_value = b"dummy-wav-bytes"
     mock_hist.is_hallucination.return_value = False
 
+    # Event that unblocks the fake transcribe_server while the first worker
+    # is running, proving the inflight flag holds a second call at bay.
+    _unblock = threading.Event()
+
+    def _blocked_transcribe(*_a, **_kw):  # noqa: ANN002
+        _unblock.wait(timeout=10)
+        return "retransmit test"
+
     with _app.state_lock:
         _app.state = _app.State.IDLE
 
     try:
         with patch.object(_app, "get_transcript_history", return_value=mock_hist):
             with patch.object(
-                _app, "transcribe_server", return_value="retransmit test"
+                _app, "transcribe_server", side_effect=_blocked_transcribe
             ):
+                # --- first call ---
                 result = handler()
 
-        assert result is not None
-        assert result.get("ok") is True
-        assert "transmission_id" in result["data"]
-        assert result["data"]["state"] == "transcribing"
-        # Wait for background worker to complete (daemon thread)
-        for _ in range(50):  # up to 5s
-            if mock_hist.clear_pending_audio.called:
-                break
-            time.sleep(0.1)
-        # History add and clear should have been called by the worker
-        mock_hist.add.assert_called_once_with("retransmit test")
-        mock_hist.clear_pending_audio.assert_called_once()
-        # inflight flag should be cleared after worker finishes
-        assert "retransmit" not in _mod._agent_inflight
+                # Verify immediate dispatch response
+                assert result is not None
+                assert result.get("ok") is True
+                assert "transmission_id" in result["data"]
+                assert result["data"]["state"] == "transcribing"
+
+                # Worker thread is now blocked inside _blocked_transcribe.
+                # _agent_inflight must be live.
+                assert "retransmit" in _mod._agent_inflight
+
+                # Bridge: FakeSessionPort does not read _agent_inflight,
+                # so inject the flag so the dispatch layer sees it.
+                retransmit_session.inflight.add(InflightFlag.RETRANSMIT)
+
+                # --- second call while first worker is blocked ---
+                with pytest.raises(RuntimeError) as exc_info:
+                    handler()
+                assert "session_busy" in str(exc_info.value).lower()
+
+                # Unblock the worker.
+                _unblock.set()
+
+                # Wait for background worker to complete (daemon thread).
+                for _ in range(50):  # up to 5 s
+                    if mock_hist.clear_pending_audio.called:
+                        break
+                    time.sleep(0.1)
+
+                # Worker-side assertions
+                mock_hist.add.assert_called_once_with("retransmit test")
+                mock_hist.clear_pending_audio.assert_called_once()
+                assert "retransmit" not in _mod._agent_inflight
     finally:
         with _app.state_lock:
             _app.state = original_state
