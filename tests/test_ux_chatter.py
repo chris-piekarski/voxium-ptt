@@ -50,6 +50,16 @@ def test_ux_chatter_runtime_defaults() -> None:
     rt = ux_chatter_runtime_from_config({})
     assert rt.base_url == "http://127.0.0.1:11435"
     assert rt.model == DEFAULT_TRUSTED_POLISH_MODEL_ID
+    assert rt.timeout_s == 6.0
+
+
+def test_ux_chatter_call_timeout_covers_a_cpu_line() -> None:
+    from voxium.ux_chatter import ux_chatter_call_timeout
+
+    assert ux_chatter_call_timeout(6.0) == 6.0
+    assert ux_chatter_call_timeout(6.0, extra=1.2) == 7.2
+    assert ux_chatter_call_timeout(30.0) == 8.0
+    assert ux_chatter_call_timeout(0.45) == 0.45
 
 
 def test_ux_chatter_runtime_uses_resolved_model_id() -> None:
