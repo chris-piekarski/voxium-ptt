@@ -7,6 +7,7 @@ the ``agent`` extra is not installed.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import socket
 import threading
@@ -79,6 +80,10 @@ _vox_deadman_timer: threading.Timer | None = None
 
 # True after the timer actually disarmed VOX; cleared on next successful arm
 _vox_auto_disarmed: bool = False
+
+# Bumped when an agent arm starts and when VOX is left, so a stale timer
+# cannot disarm a VOX session the operator opened after the agent one.
+_vox_arm_generation: int = 0
 
 # Guard: prevents concurrent disarm (timer vs manual) from double-closing
 _vox_disarming: bool = False
@@ -254,22 +259,42 @@ def _cancel_vox_deadman() -> None:
         _vox_deadman_timer = None
 
 
-def _vox_deadman_callback() -> None:
+def invalidate_vox_deadman() -> None:
+    """Drop any agent VOX dead-man so a later human arm is not forced off.
+
+    Called when input mode leaves VOX (F7 back to PTT, agent disarm, or a
+    failed arm that reverts to PTT). Bumps the generation so a callback
+    that has already started will not close a newer VOX session.
+    """
+    global _vox_arm_generation
+    _vox_arm_generation += 1
+    _cancel_vox_deadman()
+
+
+def _vox_deadman_callback(generation: int | None = None) -> None:
     """Dead-man timer expiry: disarm VOX if still armed.
 
     Does not call create_mode_toggle_handler or hold locks while waiting.
     Retries through TRANSCRIBING / COMMAND_INPUT / RECORDING until the
     disarm can actually run or the mode is already ptt.
+
+    *generation* is the arm token captured when the timer was started.
+    ``None`` means a direct call (tests) that is not tied to an arm.
     """
     global _vox_auto_disarmed
 
     import voxium.app as _app
 
-    # Fast path: already disarmed by human or agent.
-    if _app.input_mode == "ptt":
+    def _superseded() -> bool:
+        return generation is not None and generation != _vox_arm_generation
+
+    # Fast path: already disarmed by human or agent, or a newer arm replaced us.
+    if _superseded() or _app.input_mode == "ptt":
         return
 
     while True:
+        if _superseded() or _app.input_mode == "ptt":
+            return
         with _app.state_lock:
             _st = _app.state
 
@@ -326,9 +351,15 @@ def _stop_vox_and_print_downlink() -> None:
 
 def _start_vox_deadman() -> None:
     """Arm the dead-man timer for agent VOX (not human F7)."""
-    global _vox_deadman_timer
+    global _vox_deadman_timer, _vox_arm_generation
     _cancel_vox_deadman()
-    _vox_deadman_timer = threading.Timer(_vox_max_seconds, _vox_deadman_callback)
+    _vox_arm_generation += 1
+    generation = _vox_arm_generation
+
+    def _fire() -> None:
+        _vox_deadman_callback(generation)
+
+    _vox_deadman_timer = threading.Timer(_vox_max_seconds, _fire)
     _vox_deadman_timer.daemon = True
     _vox_deadman_timer.start()
 
@@ -348,7 +379,8 @@ def _resolve_vox_cap(agent_cfg: dict[str, Any]) -> None:
         _vox_cap_invalid = False
         return
     raw = agent_cfg["vox_max_seconds"]
-    if isinstance(raw, int) and 1 <= raw <= 3600:
+    # bool is a subclass of int; YAML ``true`` must not become a 1-second cap.
+    if isinstance(raw, int) and not isinstance(raw, bool) and 1 <= raw <= 3600:
         _vox_max_seconds = raw
         _vox_cap_invalid = False
     else:
@@ -428,8 +460,10 @@ def start_agent_listener(
     # -- Build MCP server + dispatch layer -------------------------------------
     server = MCPServer(name="voxium-agent", version="0.0.1")
 
-    # Store configured server URL for health/stats probes
-    global _server_url
+    # Store configured server URL for health/stats probes.
+    # ``server_url`` here is the Whisper base (often ``.../transcribe``).
+    # The credential URL below is a different value and must not overwrite it.
+    global _server_url, _agent_dispatch
     _server_url = server_url
 
     # -- Build read-tool handler map (closures capture _server_url) -------------
@@ -466,12 +500,12 @@ def start_agent_listener(
         sock.listen(1)
 
         actual_host, actual_port = sock.getsockname()
-        server_url = f"http://{actual_host}:{actual_port}/mcp"
+        mcp_url = f"http://{actual_host}:{actual_port}/mcp"
 
         # -- Mint token and write credential file ------------------------------
         token = mint_token()
 
-        cred = SessionCredential(url=server_url, token=token, scopes=scopes)
+        cred = SessionCredential(url=mcp_url, token=token, scopes=scopes)
         write_session_credential(cred, user_dir=user_dir)
 
         # -- Mount streamable-HTTP with bearer middleware ----------------------
@@ -702,7 +736,12 @@ def _build_read_handler_map() -> dict[str, Callable]:
         if cached and cached[0] == cache_key:
             return cached[1]
         snapshot: dict[str, Any] = {"healthy": False}
-        health_url = url + "/health"
+        from voxium.loopback import get_health_url
+
+        # ``url`` may be the transcribe endpoint (``.../transcribe``).
+        # Derive ``/health`` from the origin so we do not request
+        # ``/transcribe/health``.
+        health_url = get_health_url(url)
         try:
             import requests
 
@@ -763,7 +802,12 @@ def _build_read_handler_map() -> dict[str, Callable]:
 
             url = _server_url
             if url:
-                resp = requests.get(url + "/stats", timeout=2)
+                from voxium.loopback import get_server_endpoint_url
+
+                resp = requests.get(
+                    get_server_endpoint_url(url, "stats"),
+                    timeout=2,
+                )
                 result["server"] = resp.json() if resp.status_code == 200 else None
             else:
                 result["server"] = None
@@ -1042,9 +1086,12 @@ def _build_read_handler_map() -> dict[str, Callable]:
                     "Transmission log is not available.",
                 )
 
-            # Set inflight flag and begin transmission
+            # Set inflight flag and begin transmission.
+            # Mark the client TRANSCRIBING so the keyboard path (F6 / PTT)
+            # sees a busy station. The inflight set only gates other MCP tools.
             _agent_inflight.add("retransmit")
             tid = tlog.begin()
+            _app.state = _app.State.TRANSCRIBING
 
         # ---- background worker (after lock is dropped) ----
         _outcome = "error"
@@ -1105,6 +1152,9 @@ def _build_read_handler_map() -> dict[str, Callable]:
                     )
             finally:
                 _agent_inflight.discard("retransmit")
+                with _app.state_lock:
+                    if _app.state == _app.State.TRANSCRIBING:
+                        _app.state = _app.State.IDLE
 
         worker = threading.Thread(target=_retransmit_worker, daemon=True)
         worker.start()
@@ -1201,6 +1251,99 @@ def _build_read_handler_map() -> dict[str, Callable]:
     }
 
 
+_JSON_SCHEMA_TYPES: dict[str, type[Any]] = {
+    "integer": int,
+    "number": float,
+    "string": str,
+    "boolean": bool,
+}
+
+
+def _mcp_parameter_signature(schema: dict[str, Any]) -> inspect.Signature:
+    """Build the signature the MCP SDK turns into the tool's argument model.
+
+    A ``**kwargs`` wrapper makes that model require a field named ``kwargs``,
+    so a normal client call such as ``{}`` never reaches dispatch.
+    """
+    properties = schema.get("properties") or {}
+    required = set(schema.get("required") or [])
+    parameters: list[inspect.Parameter] = []
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            continue
+        annotation = _JSON_SCHEMA_TYPES.get(str(prop.get("type") or ""), Any)
+        if name in required:
+            default: Any = inspect.Parameter.empty
+        elif "default" in prop:
+            default = prop["default"]
+        else:
+            # Optional and no schema default. None is stripped before dispatch
+            # so a missing field stays missing (paste_history treats presence
+            # as significant).
+            default = None
+        parameters.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=default,
+                annotation=annotation,
+            )
+        )
+    return inspect.Signature(parameters)
+
+
+def _surface_dispatch_result(result: Any) -> Any:
+    """Turn a dispatch envelope into the value the MCP SDK should return.
+
+    An ``ok: false`` envelope becomes the SDK's anticipated ``ToolError``.
+    A bare ``RuntimeError`` is logged as a crash and the client only sees
+    ``Error executing tool <name>``.
+    """
+    from voxium.agent_protocol import ToolResult
+
+    if isinstance(result, dict) and not result.get("ok", True):
+        err = result.get("error", {})
+        code = err.get("code", "internal") if isinstance(err, dict) else "internal"
+        msg = err.get("message", code) if isinstance(err, dict) else "internal"
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        raise ToolError(f"tool error [{code}]: {msg}")
+    if isinstance(result, dict) and "data" not in result:
+        result = ToolResult(data=result).to_dict()
+    return result
+
+
+def _mcp_tool_entrypoint(
+    tool_name: str,
+    schema: dict[str, Any],
+    invoke: Callable[[dict[str, Any]], Any],
+) -> Callable[..., Any]:
+    """Return a callable whose signature matches ``schema``."""
+    signature = _mcp_parameter_signature(schema)
+    optional_without_default = {
+        name
+        for name, prop in (schema.get("properties") or {}).items()
+        if isinstance(prop, dict)
+        and name not in set(schema.get("required") or [])
+        and "default" not in prop
+    }
+
+    def _wrapper(**kwargs: Any) -> Any:
+        payload = {
+            key: value
+            for key, value in kwargs.items()
+            if not (key in optional_without_default and value is None)
+        }
+        return invoke(payload)
+
+    _wrapper.__name__ = tool_name
+    _wrapper.__signature__ = signature  # type: ignore[attr-defined]
+    _wrapper.__annotations__ = {
+        param.name: param.annotation for param in signature.parameters.values()
+    }
+    return _wrapper
+
+
 def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
     """Register MCP tools that route through AgentDispatch.dispatch.
 
@@ -1225,57 +1368,44 @@ def _register_tools_via_dispatch(server: Any, dispatch: Any) -> None:
         - The raw handler return value (dict with no ``ok`` / ``data`` keys) →
           wrap in ``ToolResult(data=result)`` so every success uses one shape.
         """
-        from voxium.agent_protocol import ToolResult
-
         result = dispatch.dispatch(tool_name, raw_input)
-        # ToolError envelopes have ``ok: False`` — everything else is success.
-        if isinstance(result, dict) and not result.get("ok", True):
-            err = result.get("error", {})
-            code = err.get("code", "internal") if isinstance(err, dict) else "internal"
-            msg = err.get("message", code) if isinstance(err, dict) else "internal"
-            raise RuntimeError(f"tool error [{code}]: {msg}")
-        # Wrap raw handler returns so the MCP SDK sees {ok: true, data: {...}}
-        if isinstance(result, dict) and "data" not in result:
-            result = ToolResult(data=result).to_dict()
-        return result
+        return _surface_dispatch_result(result)
 
-    # Tool registration table: name → signature builder.
-    # Each entry maps a tool name to the kwargs signature the MCP SDK expects.
-    _TOOL_REGISTRATIONS: dict[str, Any] = {
-        "session_status": {},
-        "transmission_last": {},
-        "transmission_get": {"id": int},
-        "transmission_wait": {"id": int, "timeout_seconds": float},
-        "history_list": {"limit": int, "query": str},
-        "history_get": {"index": int},
-        "clipboard_set": {"text": str},
-        "history_copy": {"index": int},
-        "paste_history": {"index": int, "cycle": bool},
-        "ptt_engage": {},
-        "ptt_release": {},
-        "retransmit_last": {},
-        "input_mode_set": {"mode": str},
-        "debug_health": {},
-        "debug_stats": {},
-        "debug_disk": {},
-    }
-
-    def _build_dispatch_caller(tool_name: str) -> Any:
-        """Build a tool handler that dispatches through ``dispatch.dispatch()``."""
-
-        def _wrapper(**kwargs: Any) -> Any:
-            return _call_dispatch(tool_name, kwargs)
-
-        return _wrapper
+    # Implemented tools. ``debug_logs`` stays off this tuple: it is catalog-only.
+    # Argument shapes come from each tool's input schema.
+    _REGISTERED_TOOLS = (
+        "session_status",
+        "transmission_last",
+        "transmission_get",
+        "transmission_wait",
+        "history_list",
+        "history_get",
+        "clipboard_set",
+        "history_copy",
+        "paste_history",
+        "ptt_engage",
+        "ptt_release",
+        "retransmit_last",
+        "input_mode_set",
+        "debug_health",
+        "debug_stats",
+        "debug_disk",
+    )
 
     # Iterate over granted scopes and register matching tools.
     # tool_list() returns ToolDefinition objects — extract names for lookup.
-    allowed_names = {t.name for t in dispatch.tool_list()}
+    # Signatures come from the catalog schema, not from a **kwargs wrapper.
+    allowed = {t.name: t for t in dispatch.tool_list()}
 
-    for tool_name in _TOOL_REGISTRATIONS:
-        if tool_name not in allowed_names:
+    for tool_name in _REGISTERED_TOOLS:
+        tool_def = allowed.get(tool_name)
+        if tool_def is None:
             continue
-        handler = _build_dispatch_caller(tool_name)
+
+        def _invoke(payload: dict[str, Any], *, _name: str = tool_name) -> Any:
+            return _call_dispatch(_name, payload)
+
+        handler = _mcp_tool_entrypoint(tool_name, tool_def.input_schema, _invoke)
         server.tool(name=tool_name)(handler)
 
 

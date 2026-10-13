@@ -13,6 +13,8 @@ import pytest
 # Use importorskip so these tests skip when mcp extra is absent.
 pytest.importorskip("mcp.server")
 
+from mcp.server.mcpserver.exceptions import ToolError
+
 # ---------------------------------------------------------------------------
 # Fixtures: shared TransmissionLog / SessionTranscriptHistory
 # ---------------------------------------------------------------------------
@@ -21,8 +23,6 @@ pytest.importorskip("mcp.server")
 @pytest.fixture(autouse=True)
 def _reset_wait_flags():
     """Reset transmission_wait busy/active flags before each test."""
-    import time
-
     import voxium.agent_dispatch as _disp
     import voxium.agent_server as _mod
 
@@ -30,13 +30,14 @@ def _reset_wait_flags():
     _mod._shutting_down = False
     _mod._server_url = None
     _mod._live_session = None
-    # Reset class-level token buckets so rate limiting doesn't leak across tests
-    if hasattr(_disp.AgentDispatch, "_read_bucket"):
-        _disp.AgentDispatch._read_bucket._tokens = 20.0
-        _disp.AgentDispatch._read_bucket._last_refill = time.monotonic()
-    if hasattr(_disp.AgentDispatch, "_mutable_bucket"):
-        _disp.AgentDispatch._mutable_bucket._tokens = 2.0
-        _disp.AgentDispatch._mutable_bucket._last_refill = time.monotonic()
+    _mod._agent_ptt_open = False
+    _mod._agent_inflight.clear()
+    # Replace the buckets. Refilling ``_tokens`` is not enough: an earlier
+    # module can leave a capacity-0 bucket, and acquire() clamps to capacity.
+    from voxium.agent_dispatch import TokenBucket
+
+    _disp.AgentDispatch._read_bucket = TokenBucket(capacity=20, refill_per_second=20.0)
+    _disp.AgentDispatch._mutable_bucket = TokenBucket(capacity=2, refill_per_second=2.0)
     yield
     # Teardown: clean up _HANDLER_MAP so tests are isolated
     from voxium.agent_dispatch import _HANDLER_MAP
@@ -231,7 +232,7 @@ def test_transmission_get_not_found(server, tlog):
     handler = _tool_fn(server, "transmission_get")
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(id=99999)
     assert "not found" in str(exc_info.value).lower()
@@ -261,7 +262,7 @@ def test_transmission_wait_not_found(server, tlog):
     handler = _tool_fn(server, "transmission_wait")
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(id=99999, timeout_seconds=0.01)
     assert "not found" in str(exc_info.value).lower()
@@ -280,7 +281,7 @@ def test_transmission_wait_concurrency_cap(server, tlog):
 
     with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
         # First call should set the guard, then timeout
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ToolError):
             handler(id=tid, timeout_seconds=0.01)
         # Guard is cleared by finally block
         assert _mod._transmission_wait_busy is False
@@ -485,20 +486,20 @@ def scoped_server():
     return srv
 
 
-def test_debug_tools_denied_without_debug_read(scoped_server):
-    """debug_health should raise when ``debug:read`` scope is absent."""
-    handler = _tool_fn(scoped_server, "debug_health")
-    with pytest.raises(RuntimeError) as exc_info:
-        handler()
-    assert "scope" in str(exc_info.value).lower()
+def _registered_tool_names(server) -> set[str]:
+    manager = getattr(server, "_tool_manager", None)
+    assert manager is not None
+    return set(getattr(manager, "_tools", {}))
 
 
-def test_transmission_tools_denied_without_transcript_read(scoped_server):
-    """transmission_get should raise when ``transcript:read`` scope is absent."""
-    handler = _tool_fn(scoped_server, "transmission_get")
-    with pytest.raises(RuntimeError) as exc_info:
-        handler(id=1)
-    assert "scope" in str(exc_info.value).lower()
+def test_debug_tools_absent_without_debug_read(scoped_server):
+    """debug_health is left off the manifest when ``debug:read`` is not granted."""
+    assert "debug_health" not in _registered_tool_names(scoped_server)
+
+
+def test_transmission_tools_absent_without_transcript_read(scoped_server):
+    """transmission_get is left off the manifest without ``transcript:read``."""
+    assert "transmission_get" not in _registered_tool_names(scoped_server)
 
 
 def test_session_status_allowed_with_status_read(scoped_server):
@@ -510,12 +511,9 @@ def test_session_status_allowed_with_status_read(scoped_server):
     assert "state" in result["data"]
 
 
-def test_history_tools_denied_without_transcript_read(scoped_server):
-    """history_list should raise when ``transcript:read`` scope is absent."""
-    handler = _tool_fn(scoped_server, "history_list")
-    with pytest.raises(RuntimeError) as exc_info:
-        handler(limit=5)
-    assert "scope" in str(exc_info.value).lower()
+def test_history_tools_absent_without_transcript_read(scoped_server):
+    """history_list is left off the manifest without ``transcript:read``."""
+    assert "history_list" not in _registered_tool_names(scoped_server)
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +663,7 @@ def test_transmission_get_not_found_error(server, tlog):
     handler = _tool_fn(server, "transmission_get")
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(id=99999)
     assert "not found" in str(exc_info.value).lower()
@@ -694,7 +692,7 @@ def test_transmission_wait_not_found_error(server, tlog):
     handler = _tool_fn(server, "transmission_wait")
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(id=99999, timeout_seconds=0.01)
     assert "not found" in str(exc_info.value).lower()
@@ -710,7 +708,7 @@ def test_transmission_wait_timeout_error(server, tlog):
     _mod._transmission_wait_busy = False
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(id=tid, timeout_seconds=0.01)
     assert "timed out" in str(exc_info.value).lower()
@@ -728,7 +726,7 @@ def test_transmission_wait_not_found_preserved_on_overlap(server, tlog):
     _mod._transmission_wait_busy = False
     with (
         patch("voxium.agent_server.get_transmission_log", return_value=tlog),
-        pytest.raises(RuntimeError),
+        pytest.raises(ToolError),
     ):
         handler(id=tid, timeout_seconds=0.01)
     # Guard must be cleared regardless of error
@@ -861,7 +859,7 @@ def test_clipboard_set_success(clipboard_server, clipboard_session):
 def test_clipboard_set_empty_text(clipboard_server, clipboard_session):
     """clipboard_set rejects empty text."""
     handler = _tool_fn(clipboard_server, "clipboard_set")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(text="")
     assert "invalid_arguments" in str(exc_info.value).lower()
 
@@ -869,7 +867,7 @@ def test_clipboard_set_empty_text(clipboard_server, clipboard_session):
 def test_clipboard_set_missing_text(clipboard_server, clipboard_session):
     """clipboard_set rejects missing text."""
     handler = _tool_fn(clipboard_server, "clipboard_set")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "invalid_arguments" in str(exc_info.value).lower()
 
@@ -878,7 +876,7 @@ def test_clipboard_set_text_too_large(clipboard_server, clipboard_session):
     """clipboard_set rejects text exceeding 256 KiB."""
     handler = _tool_fn(clipboard_server, "clipboard_set")
     large_text = "x" * (256 * 1024 + 1)  # 256 KiB + 1 byte
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(text=large_text)
     assert "clipboard_too_large" in str(exc_info.value).lower()
 
@@ -888,7 +886,7 @@ def test_clipboard_set_pyperclip_failure(clipboard_server, clipboard_session):
     handler = _tool_fn(clipboard_server, "clipboard_set")
     with (
         patch("pyperclip.copy", side_effect=Exception("fail")),
-        pytest.raises(RuntimeError) as exc_info,
+        pytest.raises(ToolError) as exc_info,
     ):
         handler(text="hello")
     assert "clipboard_failed" in str(exc_info.value).lower()
@@ -908,7 +906,7 @@ def test_history_copy_success(clipboard_server, clipboard_session):
 def test_history_copy_missing_index(clipboard_server, clipboard_session):
     """history_copy rejects missing index."""
     handler = _tool_fn(clipboard_server, "history_copy")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "invalid_arguments" in str(exc_info.value).lower()
 
@@ -916,7 +914,7 @@ def test_history_copy_missing_index(clipboard_server, clipboard_session):
 def test_history_copy_out_of_range(clipboard_server, clipboard_session):
     """history_copy rejects index beyond history."""
     handler = _tool_fn(clipboard_server, "history_copy")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(index=99)
     assert "history_index_invalid" in str(exc_info.value).lower()
 
@@ -926,7 +924,7 @@ def test_history_copy_empty_history(clipboard_server, clipboard_session):
     clipboard_session.history_count = 0
     clipboard_session._history_items = []
     handler = _tool_fn(clipboard_server, "history_copy")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(index=1)
     assert "history_empty" in str(exc_info.value).lower()
 
@@ -955,7 +953,7 @@ def test_paste_history_by_cycle(clipboard_server, clipboard_session):
 def test_paste_history_missing_args(clipboard_server, clipboard_session):
     """paste_history rejects when neither index nor cycle provided."""
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "invalid_arguments" in str(exc_info.value).lower()
 
@@ -963,7 +961,7 @@ def test_paste_history_missing_args(clipboard_server, clipboard_session):
 def test_paste_history_both_args(clipboard_server, clipboard_session):
     """paste_history rejects when both index and cycle provided."""
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(index=1, cycle=True)
     assert "invalid_arguments" in str(exc_info.value).lower()
 
@@ -972,7 +970,7 @@ def test_paste_history_no_window(clipboard_server, clipboard_session):
     """paste_history fails when no active window."""
     clipboard_session._window = None
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(index=1)
     assert "no_target_window" in str(exc_info.value).lower()
 
@@ -982,7 +980,7 @@ def test_paste_history_empty_history(clipboard_server, clipboard_session):
     clipboard_session._history_items = []
     clipboard_session.history_count = 0
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(index=1)
     assert "history_empty" in str(exc_info.value).lower()
 
@@ -992,7 +990,7 @@ def test_paste_history_cycle_empty_history(clipboard_server, clipboard_session):
     clipboard_session._history_items = []
     clipboard_session.history_count = 0
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(cycle=True)
     assert "history_empty" in str(exc_info.value).lower()
 
@@ -1001,7 +999,7 @@ def test_paste_history_cycle_at_end(clipboard_server, clipboard_session):
     """paste_history cycle fails when cursor at end (next_replay_cursor_index returns None)."""
     clipboard_session.next_replay_cursor_index = lambda: None
     handler = _tool_fn(clipboard_server, "paste_history")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler(cycle=True)
     assert "history_index_invalid" in str(exc_info.value).lower()
 
@@ -1315,7 +1313,7 @@ def test_ptt_release_not_recording(ptt_server, ptt_session):
 
     handler = _tool_fn(ptt_server, "ptt_release")
     with patch.object(_mod, "_agent_finish_ptt_recording") as mock_finish:
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             handler()
         assert "not_recording" in str(exc_info.value).lower()
         mock_finish.assert_not_called()
@@ -1329,7 +1327,7 @@ def test_ptt_release_none_tid_returns_not_recording(ptt_server, ptt_session):
     ptt_session.state = ClientState.RECORDING
     handler = _tool_fn(ptt_server, "ptt_release")
     with patch.object(_mod, "_agent_finish_ptt_recording", return_value=(None, 0)):
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(ToolError) as exc_info:
             handler()
         assert "not_recording" in str(exc_info.value).lower()
 
@@ -1459,7 +1457,7 @@ def test_retransmit_nothing_to_retransmit(retransmit_server, retransmit_session)
     """retransmit_last returns nothing_to_retransmit when no pending audio."""
     retransmit_session.has_pending_audio = False
     handler = _tool_fn(retransmit_server, "retransmit_last")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "nothing_to_retransmit" in str(exc_info.value).lower()
 
@@ -1469,7 +1467,7 @@ def test_retransmit_no_target_window(retransmit_server, retransmit_session):
     retransmit_session._window = None
     retransmit_session.has_pending_audio = True
     handler = _tool_fn(retransmit_server, "retransmit_last")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "no_target_window" in str(exc_info.value).lower()
 
@@ -1502,7 +1500,7 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
     # is running, proving the inflight flag holds a second call at bay.
     _unblock = threading.Event()
 
-    def _blocked_transcribe(*_a, **_kw):  # noqa: ANN002
+    def _blocked_transcribe(*_a, **_kw):
         _unblock.wait(timeout=10)
         return "retransmit test"
 
@@ -1510,43 +1508,43 @@ def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_se
         _app.state = _app.State.IDLE
 
     try:
-        with patch.object(_app, "get_transcript_history", return_value=mock_hist):
-            with patch.object(
-                _app, "transcribe_server", side_effect=_blocked_transcribe
-            ):
-                # --- first call ---
-                result = handler()
+        with (
+            patch.object(_app, "get_transcript_history", return_value=mock_hist),
+            patch.object(_app, "transcribe_server", side_effect=_blocked_transcribe),
+        ):
+            # --- first call ---
+            result = handler()
 
-                # Verify immediate dispatch response
-                assert result is not None
-                assert result.get("ok") is True
-                assert "transmission_id" in result["data"]
-                assert result["data"]["state"] == "transcribing"
+            # Verify immediate dispatch response
+            assert result is not None
+            assert result.get("ok") is True
+            assert "transmission_id" in result["data"]
+            assert result["data"]["state"] == "transcribing"
 
-                # Worker thread is now blocked inside _blocked_transcribe.
-                # _agent_inflight must be live.
-                assert "retransmit" in _mod._agent_inflight
+            # Worker thread is now blocked inside _blocked_transcribe.
+            # _agent_inflight must be live.
+            assert "retransmit" in _mod._agent_inflight
 
-                # --- second call while first worker is blocked ---
-                # FakeSessionPort.inflight reads _agent_inflight, so this
-                # session_busy check passes only if the handler set the flag.
-                with pytest.raises(RuntimeError) as exc_info:
-                    handler()
-                assert "session_busy" in str(exc_info.value).lower()
+            # --- second call while first worker is blocked ---
+            # FakeSessionPort.inflight reads _agent_inflight, so this
+            # session_busy check passes only if the handler set the flag.
+            with pytest.raises(ToolError) as exc_info:
+                handler()
+            assert "session_busy" in str(exc_info.value).lower()
 
-                # Unblock the worker.
-                _unblock.set()
+            # Unblock the worker.
+            _unblock.set()
 
-                # Wait for background worker to complete (daemon thread).
-                for _ in range(50):  # up to 5 s
-                    if mock_hist.clear_pending_audio.called:
-                        break
-                    time.sleep(0.1)
+            # Wait for background worker to complete (daemon thread).
+            for _ in range(50):  # up to 5 s
+                if mock_hist.clear_pending_audio.called:
+                    break
+                time.sleep(0.1)
 
-                # Worker-side assertions
-                mock_hist.add.assert_called_once_with("retransmit test")
-                mock_hist.clear_pending_audio.assert_called_once()
-                assert "retransmit" not in _mod._agent_inflight
+            # Worker-side assertions
+            mock_hist.add.assert_called_once_with("retransmit test")
+            mock_hist.clear_pending_audio.assert_called_once()
+            assert "retransmit" not in _mod._agent_inflight
     finally:
         with _app.state_lock:
             _app.state = original_state
@@ -1560,7 +1558,7 @@ def test_retransmit_inflight_blocks_second_call(retransmit_server, retransmit_se
     retransmit_session.inflight = {InflightFlag.RETRANSMIT}
 
     handler = _tool_fn(retransmit_server, "retransmit_last")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "session_busy" in str(exc_info.value).lower()
 
@@ -1572,7 +1570,7 @@ def test_retransmit_recording_returns_busy(retransmit_server, retransmit_session
     retransmit_session.state = ClientState.RECORDING
 
     handler = _tool_fn(retransmit_server, "retransmit_last")
-    with pytest.raises(RuntimeError) as exc_info:
+    with pytest.raises(ToolError) as exc_info:
         handler()
     assert "session_busy" in str(exc_info.value).lower()
 

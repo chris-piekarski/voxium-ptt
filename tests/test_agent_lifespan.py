@@ -171,3 +171,63 @@ class TestMcpLifespan:
                 shutdown_event.set()
 
         anyio.run(_run)
+
+
+def test_tool_error_envelope_reaches_the_client_text() -> None:
+    """An ok:false envelope must raise the SDK ToolError, not a hidden crash."""
+    pytest.importorskip("mcp.server")
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from voxium.agent_server import _surface_dispatch_result
+
+    with pytest.raises(ToolError, match=r"tool error \[history_empty\]"):
+        _surface_dispatch_result(
+            {
+                "ok": False,
+                "error": {"code": "history_empty", "message": "No history entries."},
+            }
+        )
+
+
+def test_mcp_sdk_accepts_catalog_arguments() -> None:
+    """A normal tools/call payload must validate. A **kwargs wrapper does not."""
+    pytest.importorskip("mcp.server")
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+    from voxium.agent_server import _mcp_tool_entrypoint
+    from voxium.agent_tools import (
+        TOOL_HISTORY_LIST,
+        TOOL_PASTE_HISTORY,
+        TOOL_SESSION_STATUS,
+    )
+
+    seen: dict[str, Any] = {}
+
+    def _invoke(payload: dict[str, Any]) -> dict[str, Any]:
+        seen["payload"] = payload
+        return payload
+
+    status_fn = _mcp_tool_entrypoint(
+        TOOL_SESSION_STATUS.name, TOOL_SESSION_STATUS.input_schema, _invoke
+    )
+    status_meta = func_metadata(status_fn, structured_output=False)
+    assert "kwargs" not in status_meta.arg_model.model_fields
+    status_fn(**status_meta.arg_model.model_validate({}).model_dump())
+    assert seen["payload"] == {}
+
+    seen.clear()
+    history_fn = _mcp_tool_entrypoint(
+        TOOL_HISTORY_LIST.name, TOOL_HISTORY_LIST.input_schema, _invoke
+    )
+    history_meta = func_metadata(history_fn, structured_output=False)
+    history_fn(**history_meta.arg_model.model_validate({"limit": 3}).model_dump())
+    assert seen["payload"]["limit"] == 3
+    assert "query" in seen["payload"]
+
+    seen.clear()
+    paste_fn = _mcp_tool_entrypoint(
+        TOOL_PASTE_HISTORY.name, TOOL_PASTE_HISTORY.input_schema, _invoke
+    )
+    paste_meta = func_metadata(paste_fn, structured_output=False)
+    paste_fn(**paste_meta.arg_model.model_validate({"cycle": True}).model_dump())
+    assert seen["payload"] == {"cycle": True}

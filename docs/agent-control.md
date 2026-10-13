@@ -32,7 +32,7 @@ When enabled, Voxium:
 2. **Binds** a TCP socket on `127.0.0.1:0` (OS-assigned random port).
 3. **Serves** an MCP `streamable_http_app` over the socket using **uvicorn** on a dedicated daemon thread.
 4. **Writes** the credential file (`~/.config/voxium/run/agent.json`) with mode `0o600`.
-5. **Registers** only the `session_status` tool (returns current state, input mode, and latest transmission ID).
+5. **Registers** the tools allowed by the granted scopes (see [Tool registry](#tool-registry)). With the default scopes that is session status, transmission records, and history reads.
 
 If any step fails (e.g., `mcp` not installed, bind error, file write failure), the client **logs neutrally and continues** — the MCP listener is **best-effort** and never blocks the primary PTT path.
 
@@ -53,30 +53,60 @@ On normal exit (`Ctrl+C`), the listener socket is closed and the thread is joine
 
 ## Scope system
 
-Each tool requires a set of scopes. The current scope set is:
+Each tool requires a set of scopes. A tool is registered only when every scope it needs is granted.
 
-- `status:read` — read session state (**PR 4: now**) 
-- `transcript:read` — read transcription results (**Reserved: PR 5+**)
-- `clipboard:write` — write to the system clipboard (**Reserved: PR 5+**)
-- `output:paste` — paste output to an active window (**Reserved: PR 5+**)
-- `input:ptt` — trigger PTT recording (**Reserved: PR 5+**)
-- `input:vox` — trigger VOX (open-mic) recording (**Reserved: PR 5+**)
-- `session:retransmit` — re-transmit (F6) the last capture (**Reserved: PR 5+**)
-- `debug:read` — read internal debugging state (**Reserved: PR 5+**)
-- `logs:read` — read CLI log entries (**Reserved: PR 5+**)
+- `status:read` — session state
+- `transcript:read` — transmission records and the in-RAM history list
+- `clipboard:write` — system clipboard
+- `output:paste` — paste a history line into the active window
+- `input:ptt` — engage and release PTT
+- `input:vox` — switch between PTT and VOX
+- `session:retransmit` — re-transmit the pending F6 capture
+- `debug:read` — health, stats, and disk report
+- `logs:read` — reserved. `debug_logs` is in the catalog but is **not** registered on the listener
 
-By default (no YAML config) the listener grants ``status:read`` and ``transcript:read``,
-which is sufficient for the current ``session_status`` tool.
+By default (no YAML `agent.scopes` list) the listener grants ``status:read`` and ``transcript:read``.
+
+Grant more scopes in ``~/.config/voxium/config.yaml``:
+
+```yaml
+agent:
+  enabled: true
+  scopes:
+    - status:read
+    - transcript:read
+    - input:ptt
+    - input:vox
+    - session:retransmit
+  # Optional. Absent keeps the 120 second agent VOX cap.
+  # Present but not an integer from 1 to 3600 rejects VOX arm.
+  vox_max_seconds: 120
+```
+
+The listener does not reject unknown scope names. A name that is not in the table above simply matches no tool, and that tool stays off the manifest. The PTT path still starts.
 
 ## Tool registry
 
-Currently registered tools:
-
 | Tool | Purpose | Scopes |
 |------|---------|--------|
-| `session_status` | Returns current session state, input mode, and latest transmission ID | `status:read` |
+| `session_status` | State, input mode, inflight flags, latest transmission id | `status:read` |
+| `transmission_last` | Most recent transmission record | `transcript:read` |
+| `transmission_get` | One transmission record by id | `transcript:read` |
+| `transmission_wait` | Long-poll until that transmission finishes | `transcript:read` |
+| `history_list` | Recent history previews (newest is `#1`) | `transcript:read` |
+| `history_get` | One history entry, full text | `transcript:read` |
+| `clipboard_set` | Put text on the system clipboard | `clipboard:write` |
+| `history_copy` | Copy one history entry to the clipboard | `clipboard:write`, `transcript:read` |
+| `paste_history` | Paste one history line, or advance the replay cycle | `output:paste`, `transcript:read` |
+| `ptt_engage` | Open the mic (PTT mode, station idle) | `input:ptt` |
+| `ptt_release` | Drop the carrier and start transcription | `input:ptt` |
+| `input_mode_set` | Arm or disarm VOX. Agent arm starts a dead-man timer (default 120 s, cap `vox_max_seconds`). The mode hotkey back to PTT cancels that timer | `input:vox` |
+| `retransmit_last` | Re-transmit the pending capture (same buffer as F6) | `session:retransmit` |
+| `debug_health` | Loopback server health. Uses the client's server URL | `debug:read` |
+| `debug_stats` | Persistent counters and server `/stats` | `debug:read` |
+| `debug_disk` | Repo data-directory sizes | `debug:read` |
 
-Future tools (PRs 5+) may add PTT trigger, VOX trigger, and replay capabilities.
+Mutating tools are refused while the station is recording, transcribing, or already running a retransmit. `ptt_engage` while already recording returns success with `already_recording: true` and does not open a second mic.
 
 ## Dependency policy
 

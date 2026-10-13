@@ -28,6 +28,16 @@ def _reset_read_bucket():
     AgentDispatch._read_bucket = TokenBucket(capacity=20, refill_per_second=20.0)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_rate_buckets():
+    """Keep class-level buckets from leaking a capacity-0 limiter into later modules."""
+    _reset_mutable_bucket()
+    _reset_read_bucket()
+    yield
+    _reset_mutable_bucket()
+    _reset_read_bucket()
+
+
 # ---------------------------------------------------------------------------
 # Fake SessionPort state behaviour
 # ---------------------------------------------------------------------------

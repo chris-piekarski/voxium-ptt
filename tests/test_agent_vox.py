@@ -38,6 +38,7 @@ def _reset_vox_state():
     _mod._vox_disarming = False
     _mod._vox_max_seconds = 120
     _mod._vox_cap_invalid = False
+    _mod._vox_arm_generation = 0
     if _mod._vox_deadman_timer is not None:
         _mod._vox_deadman_timer.cancel()
         _mod._vox_deadman_timer = None
@@ -178,7 +179,7 @@ def test_disarm_vox():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad_cap", [0, 3601, 1.5, "120"])
+@pytest.mark.parametrize("bad_cap", [0, 3601, 1.5, "120", True])
 def test_vox_cap_rejects_out_of_range_config(bad_cap):
     """A configured but invalid vox_max_seconds must reject VOX arm.
 
@@ -378,6 +379,47 @@ def test_deadman_retries_during_recording():
 # ---------------------------------------------------------------------------
 # Dead-man timer: cancels when mode is already ptt
 # ---------------------------------------------------------------------------
+
+
+def test_human_ptt_cancels_agent_deadman_before_rearm():
+    """Returning to PTT cancels the agent timer so a later human VOX stays open."""
+    import voxium.app as _app
+
+    previous_mode = _app.input_mode
+    previous_box = _app.ptt_status_box
+    _mod._vox_max_seconds = 30
+    try:
+        _app.ptt_status_box = None
+        _app.input_mode = "vox"
+        with patch("voxium.app._stop_vox_listening") as mock_stop:
+            _mod._start_vox_deadman()
+            assert _mod._vox_deadman_timer is not None
+            # Same call the F7 handler makes when leaving VOX.
+            _app._set_input_mode("ptt")
+            assert _mod._vox_deadman_timer is None
+            _app._set_input_mode("vox")
+            mock_stop.assert_not_called()
+            assert _app.input_mode == "vox"
+    finally:
+        _app.input_mode = previous_mode
+        _app.ptt_status_box = previous_box
+        _mod.invalidate_vox_deadman()
+
+
+def test_stale_deadman_generation_does_not_disarm():
+    """A callback from an older arm must not close the VOX session now open."""
+    import voxium.app as _app
+
+    previous_mode = _app.input_mode
+    try:
+        _app.input_mode = "vox"
+        _mod._vox_arm_generation = 2
+        with patch("voxium.app._stop_vox_listening") as mock_stop:
+            _mod._vox_deadman_callback(generation=1)
+            mock_stop.assert_not_called()
+            assert _app.input_mode == "vox"
+    finally:
+        _app.input_mode = previous_mode
 
 
 def test_deadman_cancels_when_already_ptt():

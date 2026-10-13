@@ -79,7 +79,12 @@ class AgentBearerMiddleware:
             return
 
         result = parse_bearer(auth_value)
-        if result.error is not None or not compare_tokens(result.token, self._token):
+        token = result.token
+        if (
+            result.error is not None
+            or token is None
+            or not compare_tokens(token, self._token)
+        ):
             await _respond_json(send, 401, {"detail": "Invalid bearer token"})
             return
 

@@ -278,6 +278,21 @@ def test_iter_entries_filtered_uses_full_ring_indices() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_get_entry_keeps_newlines() -> None:
+    """Full-text reads keep the stored transcript, including line breaks.
+
+    List previews flatten newlines. Paste and history_get must not.
+    """
+    h = SessionTranscriptHistory(
+        max_entries=5, max_total_chars=1000, max_pending_bytes=1000
+    )
+    h.add("line one\nline two")
+    entry = h.get_entry(1)
+    assert entry is not None
+    assert entry["text"] == "line one\nline two"
+    assert entry["chars"] == len("line one\nline two")
+
+
 def test_total_entries_uses_lock():
     """total_entries should use self._lock to read self._entries."""
     import inspect

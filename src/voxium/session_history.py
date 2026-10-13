@@ -300,17 +300,17 @@ class SessionTranscriptHistory:
     def get_entry(self, index: int) -> dict | None:
         """Return a single entry by 1-based display index (#1 = newest).
 
-        Returns ``None`` when *index* is out of range.
+        ``text`` is the stored transcript, including newlines. Returns
+        ``None`` when *index* is out of range.
         """
         with self._lock:
             n = len(self._entries)
             if index < 1 or index > n:
                 return None
             entry = self._entries[-index]
-            text = entry.text.replace("\n", " ").strip()
             return {
                 "index": index,
                 "source": entry.source,
-                "text": text,
+                "text": entry.text,
                 "chars": len(entry.text),
             }

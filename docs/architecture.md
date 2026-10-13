@@ -282,5 +282,5 @@ Polish-specific config lives in the same flow:
 ## 6. Related reading
 
 - [testing.md](testing.md) — coverage **fail-under** gate (see `pyproject.toml`), `make test-cov`, markers.
-- [agent-control.md](agent-control.md) — opt-in **MCP control-plane** listener for local coding agents (bearer auth, scopes, `session_status` tool, loopback-only).
+- [agent-control.md](agent-control.md) — opt-in **MCP control-plane** listener for local coding agents (bearer auth, scopes, PTT/VOX and history tools, loopback-only).
 - Top-level [README.md](../README.md) — user-facing install and run.

@@ -321,48 +321,28 @@ class _LiveSessionProxy:
 
     def paste_for_agent(self, text: str, window):
         """
-        Paste ``text`` into ``window`` using the same key injection as paste_text.
+        Paste ``text`` into ``window`` using the same path as operator paste.
 
-        Returns 0 on success, non-zero if window is None.
-        Must not hold locks across sleep or key injection.
+        Returns 0 on success, non-zero if window is None or the client is
+        shutting down. Must not hold locks across sleep or key injection.
         """
-        if window is None:
+        global target_window
+        if window is None or is_client_shutting_down():
             return -1
-        import time as _t
-
-        # Write clipboard
+        # Same focus, key injection, debounce stamp, and clipboard restore
+        # as a human paste. ``paste_text`` reads the module-level target.
+        target_window = window
         try:
-            pyperclip.copy(text)
-        except Exception:
+            paste_text(text)
+        except Exception:  # noqa: BLE001
             return -1
-        _t.sleep(0.05)
-
-        # Focus target and inject paste keys
-        focus_window(window)
-        _t.sleep(0.05)
-
-        _is_terminal = is_terminal_window(window) if window else False
-        if SYSTEM == "Linux":
-            key = "ctrl+shift+v" if _is_terminal else "ctrl+v"
-            subprocess.run(
-                ["xdotool", "key", "--clearmodifiers", "--delay", "50", key],
-                stderr=subprocess.DEVNULL,
-            )
-        elif SYSTEM == "Windows":
-            import pyautogui
-
-            pyautogui.hotkey("ctrl", "v")
-        elif SYSTEM == "Darwin":
-            import pyautogui
-
-            pyautogui.hotkey("command", "v")
-
         return 0
 
 
 sd: Any = _SoundDeviceProxy()
 keyboard: Any = _PynputKeyboardProxy()
 
+SYSTEM = platform.system()
 
 TERMINALS = {
     "Linux": [
@@ -2150,6 +2130,16 @@ def _set_input_mode(mode: str) -> None:
     with input_mode_lock:
         input_mode = "vox" if (mode or "").lower() == "vox" else "ptt"
     m = "vox" if input_mode == "vox" else "ptt"
+    # Leaving VOX (human F7 or agent disarm) must cancel an agent dead-man.
+    # Otherwise that timer still fires and forces PTT after the operator
+    # has armed VOX again on the mode hotkey.
+    if m != "vox":
+        try:
+            from voxium.agent_server import invalidate_vox_deadman
+
+            invalidate_vox_deadman()
+        except Exception:  # noqa: BLE001, S110
+            pass
     if ptt_status_box is not None and config is not None and not config.minimal:
         ptt_status_box.set_input_mode_for_footer(m)
 
@@ -4690,7 +4680,11 @@ def run_client(args, _raw_argv: list[str]) -> int:
     try:
         from voxium.agent_server import start_agent_listener
 
-        start_agent_listener(_agent_cfg, scopes=_agent_cfg.get("scopes"))
+        start_agent_listener(
+            _agent_cfg,
+            scopes=_agent_cfg.get("scopes"),
+            server_url=getattr(config, "server_url", None),
+        )
     except Exception:
         cli_log(
             "MCP agent listener failed to start; PTT continues without it.",
