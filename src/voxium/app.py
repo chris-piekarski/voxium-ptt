@@ -5117,7 +5117,16 @@ def run_client(args, _raw_argv: list[str]) -> int:
         except (OSError, ValueError):
             pass
 
+    # Herdr writes F9 into this tty as ESC [ 20 ~ and does not emit an X11 key,
+    # so the pynput listener never sees a press in this pane.
+    from voxium.terminal_hotkeys import TerminalHotkeyPump
+
+    terminal_keys = TerminalHotkeyPump(
+        on_press=combined_handler,
+        on_release=combined_release_handler,
+    )
     try:
+        terminal_keys.start()
         with keyboard.Listener(
             on_press=combined_handler,
             on_release=combined_release_handler,
@@ -5127,6 +5136,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
     except KeyboardInterrupt:
         request_interrupt()
     finally:
+        terminal_keys.stop()
         try:
             signal.signal(signal.SIGINT, previous_sigint)
         except (OSError, ValueError):
