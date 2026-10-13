@@ -323,6 +323,19 @@ def clear_resolved_ux_chatter_model_id() -> None:
     _resolved_ux_chatter_model_id = None
 
 
+# A CPU llama-server needs a few seconds to read a chatter prompt and write one
+# line. The old 0.45s default cancelled those calls before the first token, and
+# the panel then showed the static fallback. The ceiling keeps a wedged server
+# from holding a panel open.
+_UX_CHATTER_TIMEOUT_DEFAULT_S = 6.0
+_UX_CHATTER_TIMEOUT_CEILING_S = 8.0
+
+
+def ux_chatter_call_timeout(timeout_s: float, *, extra: float = 0.0) -> float:
+    """HTTP budget for one UX line. Honors ``timeout_s`` and never exceeds the ceiling."""
+    return min(_UX_CHATTER_TIMEOUT_CEILING_S, float(timeout_s) + extra)
+
+
 @dataclass(frozen=True)
 class UxChatterRuntime:
     base_url: str
@@ -384,7 +397,7 @@ def ux_chatter_runtime_from_config(
     return UxChatterRuntime(
         base_url=base_url,
         model=model,
-        timeout_s=float(uxc.get("timeout_s") or 0.45),
+        timeout_s=float(uxc.get("timeout_s") or _UX_CHATTER_TIMEOUT_DEFAULT_S),
         max_tokens=int(uxc.get("max_tokens") or 42),
         wit_max_chars=int(uxc.get("wit_max_chars") or 72),
         cooldown_s=float(uxc.get("cooldown_s") or 4.0),
@@ -414,7 +427,7 @@ def fetch_ux_startup_tagline(
     if not is_ux_chatter_wanted(cli_enabled=cli_enabled, file_config=file_config):
         return None
     rt = ux_chatter_runtime_from_config(file_config)
-    timeout = min(2.8, max(0.9, float(rt.timeout_s) + 1.2))
+    timeout = ux_chatter_call_timeout(rt.timeout_s, extra=1.2)
     ok, _ = llama_cpp_reachable(
         rt.base_url, timeout=min(0.65, max(0.35, float(rt.timeout_s)))
     )
@@ -456,7 +469,7 @@ def fetch_ux_rig_subtitle(
     if not is_ux_chatter_wanted(cli_enabled=cli_enabled, file_config=file_config):
         return None
     rt = ux_chatter_runtime_from_config(file_config)
-    timeout = min(2.5, max(0.85, float(rt.timeout_s) + 1.0))
+    timeout = ux_chatter_call_timeout(rt.timeout_s, extra=1.0)
     ok, _ = llama_cpp_reachable(
         rt.base_url, timeout=min(0.6, max(0.35, float(rt.timeout_s)))
     )
@@ -509,7 +522,7 @@ def fetch_ux_log_subtitle(
     if not t0:
         return None
     rt = ux_chatter_runtime_from_config(file_config)
-    timeout = min(1.65, max(0.85, float(rt.timeout_s) + 0.75))
+    timeout = ux_chatter_call_timeout(rt.timeout_s, extra=0.75)
     ok, _ = llama_cpp_reachable(
         rt.base_url, timeout=min(0.55, max(0.3, float(rt.timeout_s)))
     )
@@ -585,7 +598,7 @@ def fetch_ux_shutdown_line(
     rt = ux_chatter_runtime_from_config(file_config)
     # Allow a bit more wall time than the hot path; sign-off runs once at exit and the UX stack
     # must still be up (see :func:`voxium.app.run_client` — farewell before ``cleanup_client_runtime``).
-    timeout = min(2.6, max(0.85, float(rt.timeout_s) + 0.85))
+    timeout = ux_chatter_call_timeout(rt.timeout_s, extra=0.85)
     ok, _ = llama_cpp_reachable(
         rt.base_url, timeout=min(0.65, max(0.3, float(rt.timeout_s)))
     )
@@ -685,7 +698,7 @@ def request_ux_chatter_line_full(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        timeout=runtime.timeout_s,
+        timeout=ux_chatter_call_timeout(runtime.timeout_s),
         temperature=0.55,
         max_tokens=max(8, int(runtime.max_tokens)),
     )
@@ -730,7 +743,7 @@ def request_ux_chatter_edge_line_full(
     ok, _ = llama_cpp_reachable(runtime.base_url, timeout=min(0.35, runtime.timeout_s))
     if not ok:
         return UxChatterLineResult("", None, "unreachable")
-    edge_timeout = max(0.6, min(1.25, float(runtime.timeout_s) * 1.5))
+    edge_timeout = ux_chatter_call_timeout(runtime.timeout_s)
     res = llama_cpp_chat_completions(
         runtime.base_url,
         runtime.model,

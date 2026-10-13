@@ -57,6 +57,8 @@ dev = [
     "types-requests",
 ]
 
+agent = ["mcp>=2.3,<3"]
+
 [project.scripts]
 voxium = "voxium.cli.main:main"
 

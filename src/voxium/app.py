@@ -7,18 +7,19 @@ import io
 import json
 import os
 import platform
-from collections import deque
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
+from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyperclip
 import requests
+import yaml
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.markup import escape
@@ -26,9 +27,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from scipy.io import wavfile
-import yaml
 
+from voxium import polish_profile, transcribe_stream_client
 from voxium.capture_enrich import enrich_capture_with_recording
+from voxium.cli_argv import normalize_cli_args
 from voxium.console_status import (
     PttSessionStatusBox,
     build_polish_ensure_stack_downlink_panel,
@@ -40,43 +42,38 @@ from voxium.console_status import (
     status_uses_recording_hud_line,
     voxium_panel_width,
 )
-from voxium.cli_argv import normalize_cli_args
 from voxium.constants import (
     APP_VERSION,
+    DEFAULT_HOTKEYS,
     DEFAULT_METRICS_SAMPLE_INTERVAL,
     DEFAULT_SERVER_COMPUTE,
     DEFAULT_SERVER_DEVICE,
     DEFAULT_SERVER_MODEL,
     DEFAULT_SERVER_START_TIMEOUT,
     DEFAULT_SERVER_TIMEOUT,
-    env_polish_enabled_default,
     DEFAULT_SERVER_URL,
-    DEFAULT_HOTKEYS,
     HOTKEY_ORDER,
     LOG_LEVELS,
     SAMPLE_RATE,
+    env_polish_enabled_default,
 )
-from voxium.exit_pause import pause_console_before_exit
 from voxium.ensure_model_client import ensure_model_on_loopback_server
-from voxium.http_detail import http_error_detail_text
-from voxium.radio_readback import (
-    take_edge_inference_detail,
-    take_edge_inference_rexmit_detail,
-    take_readback,
-    take_readback_rexmit,
-)
-from voxium.recording_ui import (
-    build_recording_hud_rich,
-    format_recording_hud,
-    format_recording_hud_minimal,
-    rms_to_dbfs,
-)
+from voxium.exit_pause import pause_console_before_exit
 from voxium.hotkey_rules import (
     hotkey_config_changed,
     normalize_hotkey_name,
     sanitize_hotkey_config,
 )
+from voxium.http_detail import http_error_detail_text
 from voxium.json_sanitize import json_safe_audio_value, round_audio_float
+from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
+from voxium.llama_cpp_daemon import (
+    ManagedLlamaCpp,
+    default_llama_server_path,
+    ensure_llama_cpp_daemon,
+    llama_server_cli_path,
+    stop_managed_llama_cpp,
+)
 from voxium.local_server_cmd import LocalServerLaunchConfig, argv_after_interpreter
 from voxium.loopback import (
     get_gpu_url,
@@ -101,14 +98,6 @@ from voxium.model_registry import (
     validate_model_name,
 )
 from voxium.morse_audio import MorseAudioController
-from voxium.llama_cpp_daemon import (
-    ManagedLlamaCpp,
-    default_llama_server_path,
-    ensure_llama_cpp_daemon,
-    llama_server_cli_path,
-    stop_managed_llama_cpp,
-)
-from voxium.llama_cpp_client import llama_cpp_loaded_model, llama_cpp_reachable
 from voxium.paths import (
     default_server_log_path,
     ensure_runtime_dirs,
@@ -119,13 +108,6 @@ from voxium.paths import (
     repo_root,
 )
 from voxium.persistent_stats import config_stats_path, load_stats, record_stats
-from voxium.ptt_keying import (
-    PTT_ACTION_START,
-    PTT_ACTION_STOP,
-    PttKeyTracker,
-    handle_ptt_press,
-    handle_ptt_release,
-)
 from voxium.polish_model_registry import (
     DEFAULT_TRUSTED_POLISH_MODEL_ID,
     POLISH_DEFAULT_MODEL,
@@ -140,15 +122,32 @@ from voxium.polish_provision import (
     ensure_windows_llama_cpp_runtime,
     wrap_hf_download_progress,
 )
+from voxium.ptt_keying import (
+    PTT_ACTION_START,
+    PTT_ACTION_STOP,
+    PttKeyTracker,
+    handle_ptt_press,
+    handle_ptt_release,
+)
+from voxium.radio_readback import (
+    take_edge_inference_detail,
+    take_edge_inference_rexmit_detail,
+    take_readback,
+    take_readback_rexmit,
+)
+from voxium.recording_ui import (
+    build_recording_hud_rich,
+    format_recording_hud,
+    format_recording_hud_minimal,
+    rms_to_dbfs,
+)
 from voxium.resolve_log import resolve_log_level as resolve_log_level_pure
-from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
-from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
 from voxium.session_history import SessionTranscriptHistory
-from voxium import polish_profile
-from voxium import transcribe_stream_client
-from voxium.terminal_focus import is_our_terminal_focused
+from voxium.slash_commands import SlashLineResult, run_slash_line, slash_data_needs
+from voxium.slash_complete import apply_slash_tab, format_slash_command_hints
 from voxium.speech_guards import has_speech, is_hallucination
 from voxium.standby_fft import set_spectrum_from_mono_float
+from voxium.terminal_focus import is_our_terminal_focused
 from voxium.vox_chunker import UtteranceChunker
 
 
@@ -184,11 +183,166 @@ class _PynputKeyboardProxy:
         return getattr(self._ensure(), name)
 
 
+class _LiveSessionProxy:
+    """SessionPort adapter that reads live client state from app.py globals.
+
+    Wired via ``install_live_session`` during ``run_client`` so that agent
+    tools get real state, history, and paste operations instead of stubs.
+    """
+
+    def __init__(self):
+        self._replay_cursor: int = 0
+
+    @property
+    def state(self):
+        """Return ClientState enum (dispatch layer expects strings)."""
+        from voxium.agent_dispatch import ClientState
+
+        _map = {
+            State.IDLE: ClientState.IDLE,
+            State.RECORDING: ClientState.RECORDING,
+            State.TRANSCRIBING: ClientState.TRANSCRIBING,
+            State.COMMAND_INPUT: ClientState.COMMAND_INPUT,
+        }
+        return _map.get(state, ClientState.IDLE)
+
+    @property
+    def input_mode(self):
+        return input_mode
+
+    @property
+    def is_shutting_down(self):
+        return is_client_shutting_down()
+
+    @property
+    def inflight(self):
+        """Return live inflight flags from the agent server module."""
+        try:
+            from voxium.agent_dispatch import InflightFlag
+
+            import voxium.agent_server as _agent_mod
+
+            live_names = _agent_mod._agent_inflight
+            return {InflightFlag(name) for name in live_names}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    @property
+    def active_hotkey(self):
+        if _ptt_key_tracker.is_down:
+            return "ptt"
+        return None
+
+    @property
+    def paste_debounce_remaining_ms(self):
+        import time as _time
+
+        delta = _time.time() * 1000 - _last_paste_time
+        if delta < PASTE_DEBOUNCE_MS:
+            return PASTE_DEBOUNCE_MS - delta
+        return 0.0
+
+    @property
+    def has_pending_audio(self):
+        """Check if there is pending audio from an F6 retry buffer (not vox queue)."""
+        try:
+            h = get_transcript_history()
+            if h is not None:
+                return h.get_pending_audio() is not None
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    @property
+    def agent_ptt_open(self):
+        """Proxy to agent_server._agent_ptt_open (module-level flag)."""
+        try:
+            from voxium.agent_server import _agent_ptt_open
+
+            return bool(_agent_ptt_open)
+        except ImportError:
+            return False
+
+    @property
+    def history_count(self):
+        h = get_transcript_history()
+        if h is None:
+            return 0
+        return h.total_entries()
+
+    def get_active_window(self):
+        return get_active_window()
+
+    def history_text_by_index(self, index: int):
+        h = get_transcript_history()
+        if h is None:
+            return None
+        entry = h.get_entry(index)
+        if entry is None:
+            return None
+        return entry.get("text")
+
+    def history_list_entries(self, limit: int = 25, query: str = ""):
+        h = get_transcript_history()
+        if h is None:
+            return []
+        return h.iter_entries(limit=limit, query=query)
+
+    def next_replay_cursor_index(self):
+        """
+        Peek at the next history entry for replay cursor (does not advance).
+
+        Returns ``(1-based_index, text)`` or ``None`` when history is empty.
+        Reads the history's own _replay_cursor (used by F8).
+        """
+        h = get_transcript_history()
+        if h is None:
+            return None
+        with h._lock:
+            n = len(h._entries)
+            cursor = h._replay_cursor
+        if n == 0:
+            return None
+        i = cursor % n
+        text = h.text_by_display_index(i + 1)
+        if text is None:
+            return None
+        return (i + 1, text)
+
+    def advance_replay_cursor(self):
+        """Advance the replay cursor by one position (holds history lock)."""
+        h = get_transcript_history()
+        if h is None:
+            return
+        with h._lock:
+            n = len(h._entries) if h._entries else 0
+            if n > 0:
+                h._replay_cursor = (h._replay_cursor + 1) % n
+
+    def paste_for_agent(self, text: str, window):
+        """
+        Paste ``text`` into ``window`` using the same path as operator paste.
+
+        Returns 0 on success, non-zero if window is None or the client is
+        shutting down. Must not hold locks across sleep or key injection.
+        """
+        global target_window
+        if window is None or is_client_shutting_down():
+            return -1
+        # Same focus, key injection, debounce stamp, and clipboard restore
+        # as a human paste. ``paste_text`` reads the module-level target.
+        target_window = window
+        try:
+            paste_text(text)
+        except Exception:  # noqa: BLE001
+            return -1
+        return 0
+
+
 sd: Any = _SoundDeviceProxy()
 keyboard: Any = _PynputKeyboardProxy()
 
 SYSTEM = platform.system()
-
 
 TERMINALS = {
     "Linux": [
@@ -847,6 +1001,25 @@ def add_run_options(parser: argparse.ArgumentParser, file_config: dict):
         default=hist.get("pending_audio_max_mib", 32),
         metavar="N",
         help="Max MiB for the last capture in RAM (re-transmit; default F6). Use 0 to disable",
+    )
+
+    agent_group = parser.add_argument_group(
+        "Agent (opt-in MCP control plane)",
+        "Loopback MCP listener for local coding-agents. Bearer token, scoped tools, "
+        "credential file in ~config/voxium/run/agent.json.",
+    )
+    agent_group.add_argument(
+        "--agent",
+        action="store_true",
+        dest="agent",
+        default=None,  # resolved below: CLI > env > YAML > hardcoded
+        help="Opt-in MCP control-plane listener on 127.0.0.1 (default: off).",
+    )
+    agent_group.add_argument(
+        "--no-agent",
+        action="store_false",
+        dest="agent",
+        help="Explicitly disable the MCP control-plane listener.",
     )
 
 
@@ -1957,6 +2130,16 @@ def _set_input_mode(mode: str) -> None:
     with input_mode_lock:
         input_mode = "vox" if (mode or "").lower() == "vox" else "ptt"
     m = "vox" if input_mode == "vox" else "ptt"
+    # Leaving VOX (human F7 or agent disarm) must cancel an agent dead-man.
+    # Otherwise that timer still fires and forces PTT after the operator
+    # has armed VOX again on the mode hotkey.
+    if m != "vox":
+        try:
+            from voxium.agent_server import invalidate_vox_deadman
+
+            invalidate_vox_deadman()
+        except Exception:  # noqa: BLE001, S110
+            pass
     if ptt_status_box is not None and config is not None and not config.minimal:
         ptt_status_box.set_input_mode_for_footer(m)
 
@@ -1991,11 +2174,21 @@ def vox_audio_callback(indata, _frames, _time_info, status) -> None:
         if st == State.IDLE:
             with state_lock:
                 state = State.TRANSCRIBING
+            # PR 5: begin transmission BEFORE the thread can race with reads
+            _tlog_vox = _get_agent_transmission_log()
+            _vox_tid: int | None = None
+            if _tlog_vox is not None:
+                _vox_tid = _tlog_vox.begin()
             paste_target = get_active_window()
             threading.Thread(
                 target=transcribe_and_paste,
                 args=(utt,),
-                kwargs={"source": "vox", "paste_target": paste_target},
+                kwargs={
+                    "source": "vox",
+                    "paste_target": paste_target,
+                    "_tlog": _tlog_vox,
+                    "_tid": _vox_tid,
+                },
                 daemon=True,
             ).start()
         else:
@@ -2954,6 +3147,13 @@ def cleanup_client_runtime():
             stop_managed_llama_cpp(managed_llama_cpp)
         finally:
             managed_llama_cpp = None
+    # Stop opt-in MCP listener (no-op if never started)
+    try:
+        from voxium.agent_server import stop_agent_listener
+
+        stop_agent_listener()
+    except Exception:
+        pass
     _llama_cpp_polish_ready_checked = False
     _llama_cpp_ux_ready_checked = False
 
@@ -3287,8 +3487,14 @@ def paste_text(text: str):
 
 
 def transcribe_and_paste(
-    audio: np.ndarray, *, source: str = "ptt", paste_target: Any | None = None
-):
+    audio: np.ndarray,
+    *,
+    source: str = "ptt",
+    paste_target: Any | None = None,
+    # PR 5: optional transmission log + id (passed when caller did begin before Thread.start)
+    _tlog: Any = None,
+    _tid: int | None = None,
+) -> None:
     """
     *paste_target* — foreground window to focus before paste (PTT sets this via
     :func:`start_recording` on the main thread; VOX passes it per utterance from
@@ -3300,6 +3506,9 @@ def transcribe_and_paste(
     # Skip the post-take sleep when we already re-armed on an error path (fast VOX/PTT).
     skip_final_pacing = False
     rearm_after_final_pacing = False
+    # PR 5: track outcome for finish()
+    _outcome_state: str = "error"  # default for exception/early-return paths
+    _transcribed_text: str = ""
     try:
         text = transcribe(audio)
         metrics = last_transcription_metrics
@@ -3308,6 +3517,8 @@ def transcribe_and_paste(
         if is_client_shutting_down():
             return
         if text and not is_hallucination(text):
+            _outcome_state = "completed"
+            _transcribed_text = text
             set_spectrum_from_mono_float(audio, SAMPLE_RATE)
             # Record before paste so /history and replay work even if clipboard or focus/paste fails.
             h = get_transcript_history()
@@ -3338,6 +3549,8 @@ def transcribe_and_paste(
             show_status(STATUS_VOX_COPY, copy_readback)
             log_transcription_summary(text, metrics)
         else:
+            _outcome_state = "no_speech"
+            _transcribed_text = ""
             beep_error()
             set_terminal_title()
             h_clear = get_transcript_history()
@@ -3366,6 +3579,16 @@ def transcribe_and_paste(
     finally:
         with state_lock:
             state = State.IDLE
+        # PR 5: finish transmission on every exit path
+        try:
+            if _tid is not None and _tlog is not None:
+                _tlog.finish(
+                    _tid,
+                    state=_outcome_state,
+                    transcript=_transcribed_text,
+                )
+        except Exception:
+            pass
         if is_client_shutting_down():
             return
         nxt: np.ndarray | None = None
@@ -3374,12 +3597,22 @@ def transcribe_and_paste(
             if vox_pending_audio:
                 nxt, nxt_paste = vox_pending_audio.popleft()
         if nxt is not None and _get_input_mode() == "vox" and vox_stream is not None:
+            # PR 5: begin transmission for queued item BEFORE the thread can race with reads
+            queued_tid: int | None = None
+            tlog_for_queued = _tlog
+            if tlog_for_queued is not None:
+                queued_tid = tlog_for_queued.begin()
             with state_lock:
                 state = State.TRANSCRIBING
             threading.Thread(
                 target=transcribe_and_paste,
                 args=(nxt,),
-                kwargs={"source": "vox", "paste_target": nxt_paste},
+                kwargs={
+                    "source": "vox",
+                    "paste_target": nxt_paste,
+                    "_tlog": tlog_for_queued,
+                    "_tid": queued_tid,
+                },
                 daemon=True,
             ).start()
             return
@@ -3528,14 +3761,73 @@ def _make_gain_bar(level: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def _finish_ptt_recording() -> None:
+def _get_agent_transmission_log() -> Any | None:
+    """Lazy-import the process-wide TransmissionLog singleton (PR 5)."""
+    try:
+        from voxium.agent_server import get_transmission_log
+
+        return get_transmission_log()
+    except Exception:
+        return None
+
+
+def _finish_agent_transmission(
+    tlog: Any,
+    tid: int | None,
+    *,
+    state: str = "error",
+    transcript: str | None = None,
+) -> None:
+    """Call tlog.finish for synchronous retry paths (PR 5)."""
+    from voxium.transmission_log import finish_record as _fr
+
+    if tlog is None or tid is None:
+        return
+    _fr(tlog, tid, transcript=transcript, state=state)  # type: ignore[arg-type]
+
+
+def _finish_ptt_recording() -> tuple[int | None, int]:
+    """Finish PTT recording: stop audio, begin transmission, spawn worker.
+
+    Returns (transmission_id, new_state) where:
+    - transmission_id is the id minted by tlog.begin(), or None if
+      the session was not in RECORDING state (nothing to stop).
+    - new_state is the state integer after the transition
+      (State.TRANSCRIBING on success, the unchanged state otherwise).
+
+    The hotkey handlers ignore the return value.
+    """
     global state
+
+    # Clear agent PTT flag so human hotkey path also resets it.
+    try:
+        import voxium.agent_server as _agent_mod
+
+        _agent_mod._agent_ptt_open = False
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        pass
+
+    tid: int | None = None
     with state_lock:
-        if state != State.RECORDING:
-            return
-        state = State.TRANSCRIBING
-    audio = stop_recording()
-    threading.Thread(target=transcribe_and_paste, args=(audio,), daemon=True).start()
+        cur_state = state
+        if state == State.RECORDING:
+            state = State.TRANSCRIBING
+    if tid is None and cur_state != State.RECORDING:
+        return None, cur_state
+    if cur_state == State.RECORDING:
+        audio = stop_recording()
+        # PR 5: begin transmission BEFORE the thread can race with reads
+        _tlog = _get_agent_transmission_log()
+        if _tlog is not None:
+            tid = _tlog.begin()
+        threading.Thread(
+            target=transcribe_and_paste,
+            args=(audio,),
+            kwargs={"_tlog": _tlog, "_tid": tid},
+            daemon=True,
+        ).start()
+        return tid, State.TRANSCRIBING
+    return None, cur_state
 
 
 def create_record_hotkey_handlers(hotkey):
@@ -3653,6 +3945,14 @@ def create_retry_handler(retry_key):
             _status_detail_for_edge_inference(rexmit=True),
         )
 
+        # PR 5: begin transmission for synchronous retry
+        _retry_tlog = _get_agent_transmission_log()
+        _retry_tid: int | None = None
+        _retry_outcome: str = "error"
+        _retry_text: str = ""
+        if _retry_tlog is not None:
+            _retry_tid = _retry_tlog.begin()
+
         try:
             wav_buffer = io.BytesIO(pending)
             text = transcribe_server(wav_buffer, last_audio_capture_info)
@@ -3665,6 +3965,8 @@ def create_retry_handler(retry_key):
                 _record_persistent_stats(metrics, source="retry")
 
             if text and not is_hallucination(text):
+                _retry_outcome = "completed"
+                _retry_text = text
                 try:
                     raw = io.BytesIO(pending)
                     r_sr, r_data = wavfile.read(raw)
@@ -3709,6 +4011,7 @@ def create_retry_handler(retry_key):
                 show_status(STATUS_VOX_COPY_REXMIT, copy_rex)
                 log_transcription_summary(text, metrics)
             else:
+                _retry_outcome = "no_speech"
                 beep_error()
                 show_status("❌ NO SPEECH", "Nothing detected")
                 h4 = get_transcript_history()
@@ -3718,6 +4021,17 @@ def create_retry_handler(retry_key):
             beep_error()
             set_terminal_title()
             show_status("❌ RE-TRANSMIT FAILED", str(e)[:200])
+        finally:
+            # PR 5: finish transmission on every exit path
+            try:
+                _finish_agent_transmission(
+                    _retry_tlog,
+                    _retry_tid,
+                    state=_retry_outcome,
+                    transcript=_retry_text or None,
+                )
+            except Exception:
+                pass
 
     return on_press
 
@@ -4339,6 +4653,68 @@ def run_client(args, _raw_argv: list[str]) -> int:
     clear_ux_chatter_wit()
     args.file_config = _merge_run_file_config(args)
     config = args
+
+    # -- Resolve agent flag precedence: CLI > env > YAML > hardcoded ----
+    _agent_fc = (getattr(config, "file_config", None) or {}).get("agent", {})
+    _agent_fc = _agent_fc if isinstance(_agent_fc, dict) else {}
+    _agent_scopes = None
+    if isinstance(_agent_fc, dict):
+        _agent_scopes = _agent_fc.get("scopes")
+        if not (isinstance(_agent_scopes, list) and _agent_scopes):
+            _agent_scopes = None
+    from voxium.agent_resolve import resolve_agent_enabled
+
+    _agent_enabled = resolve_agent_enabled(
+        cli_flag=getattr(config, "agent", None),
+        file_agent=_agent_fc,
+    )
+    _agent_cfg: dict[str, Any] = {"enabled": _agent_enabled}
+    if _agent_scopes:
+        _agent_cfg["scopes"] = _agent_scopes
+    # Forward the raw VOX cap so start_agent_listener can distinguish
+    # "absent (use 120 s default)" from "present but invalid (reject VOX arm)".
+    if isinstance(_agent_fc, dict) and "vox_max_seconds" in _agent_fc:
+        _agent_cfg["vox_max_seconds"] = _agent_fc["vox_max_seconds"]
+
+    # -- Start opt-in MCP listener (best-effort; failures don't block PTT) --
+    try:
+        from voxium.agent_server import start_agent_listener
+
+        start_agent_listener(
+            _agent_cfg,
+            scopes=_agent_cfg.get("scopes"),
+            server_url=getattr(config, "server_url", None),
+        )
+    except Exception:
+        cli_log(
+            "MCP agent listener failed to start; PTT continues without it.",
+            "warning",
+        )
+
+    # -- Install live state callable for session_status tool (PR 4) ---------
+    try:
+        from voxium.agent_server import install_state_callable
+
+        def _agent_state_fn() -> dict[str, Any]:
+            _state_names = {
+                State.IDLE: "idle",
+                State.RECORDING: "recording",
+                State.TRANSCRIBING: "transcribing",
+                State.COMMAND_INPUT: "command_input",
+            }
+            from voxium.agent_server import _vox_auto_disarmed
+
+            return {
+                "state": _state_names.get(state, "unknown"),
+                "input_mode": input_mode if input_mode is not None else "ptt",
+                "transmission_latest_id": None,
+                "vox_auto_disarmed": _vox_auto_disarmed,
+            }
+
+        install_state_callable(_agent_state_fn)
+    except Exception:
+        pass
+
     _llama_cpp_polish_ready_checked = False
     _llama_cpp_ux_ready_checked = False
     _telemetry_log_buffer.clear()
@@ -4363,6 +4739,16 @@ def run_client(args, _raw_argv: list[str]) -> int:
         max_total_chars=config.history_max_chars,
         max_pending_bytes=_pending_b,
     )
+    # PR 5: wire process-wide history for agent tools
+    from voxium.session_history import _set_session_history
+
+    _set_session_history(history)
+
+    # PR 7: wire live session adapter for agent MCP tools
+    # Install a SessionPort that reads real state, history, and paste ops
+    from voxium.agent_server import install_live_session
+
+    install_live_session(_LiveSessionProxy())
 
     if not config.quiet and not config.minimal:
         from voxium.startup_banner import get_startup_hostname, show_startup_banner
@@ -4731,7 +5117,16 @@ def run_client(args, _raw_argv: list[str]) -> int:
         except (OSError, ValueError):
             pass
 
+    # Herdr writes F9 into this tty as ESC [ 20 ~ and does not emit an X11 key,
+    # so the pynput listener never sees a press in this pane.
+    from voxium.terminal_hotkeys import TerminalHotkeyPump
+
+    terminal_keys = TerminalHotkeyPump(
+        on_press=combined_handler,
+        on_release=combined_release_handler,
+    )
     try:
+        terminal_keys.start()
         with keyboard.Listener(
             on_press=combined_handler,
             on_release=combined_release_handler,
@@ -4741,6 +5136,7 @@ def run_client(args, _raw_argv: list[str]) -> int:
     except KeyboardInterrupt:
         request_interrupt()
     finally:
+        terminal_keys.stop()
         try:
             signal.signal(signal.SIGINT, previous_sigint)
         except (OSError, ValueError):

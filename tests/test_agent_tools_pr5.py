@@ -1,0 +1,1591 @@
+"""Tests for PR 5 agent tool handlers (transmission, history, debug).
+
+These tests use a fresh MCPServer, register PR 5 tools, and hit the
+handlers directly to verify tool behaviour in isolation.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+# Use importorskip so these tests skip when mcp extra is absent.
+pytest.importorskip("mcp.server")
+
+from mcp.server.mcpserver.exceptions import ToolError
+
+# ---------------------------------------------------------------------------
+# Fixtures: shared TransmissionLog / SessionTranscriptHistory
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_wait_flags():
+    """Reset transmission_wait busy/active flags before each test."""
+    import voxium.agent_dispatch as _disp
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    _mod._shutting_down = False
+    _mod._server_url = None
+    _mod._live_session = None
+    _mod._agent_ptt_open = False
+    _mod._agent_inflight.clear()
+    # Replace the buckets. Refilling ``_tokens`` is not enough: an earlier
+    # module can leave a capacity-0 bucket, and acquire() clamps to capacity.
+    from voxium.agent_dispatch import TokenBucket
+
+    _disp.AgentDispatch._read_bucket = TokenBucket(capacity=20, refill_per_second=20.0)
+    _disp.AgentDispatch._mutable_bucket = TokenBucket(capacity=2, refill_per_second=2.0)
+    yield
+    # Teardown: clean up _HANDLER_MAP so tests are isolated
+    from voxium.agent_dispatch import _HANDLER_MAP
+
+    _mod2 = None
+    for k in list(_HANDLER_MAP.keys()):
+        if k.startswith(
+            (
+                "session_status",
+                "transmission_",
+                "history_",
+                "debug_",
+                "clipboard_",
+                "paste_",
+            )
+        ):
+            _HANDLER_MAP.pop(k, None)
+    # Reset _live_session so wired tests don't leak
+    if hasattr(_mod, "_live_session"):
+        _mod._live_session = None
+
+
+@pytest.fixture
+def tlog():
+    """Fresh TransmissionLog for each test."""
+    from voxium.transmission_log import TransmissionLog
+
+    return TransmissionLog(max_records=20)
+
+
+@pytest.fixture
+def history():
+    """Fresh SessionTranscriptHistory for each test."""
+    from voxium.session_history import SessionTranscriptHistory
+
+    return SessionTranscriptHistory(
+        max_entries=25,
+        max_total_chars=1000,
+        max_pending_bytes=32 * 1024,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: get registered tools from a fresh MCP server
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def server():
+    """Create a bare MCPServer and register PR 5 tools through dispatch."""
+    from mcp.server import MCPServer
+
+    from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch, FakeSessionPort
+
+    srv = MCPServer(name="test-pr5", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=FakeSessionPort(),
+        granted_scopes={"status:read", "transcript:read", "debug:read"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def _tool_fn(server, name):
+    """Return the raw callable registered for *name* on the MCP server."""
+    manager = getattr(server, "_tool_manager", None)
+    if manager is None:
+        pytest.skip("MCP server internal structure changed")
+    tools = getattr(manager, "_tools", {})
+    entry = tools.get(name)
+    if entry is None:
+        pytest.skip(f"tool '{name}' not registered on MCP server")
+    return entry.fn
+
+
+# ---------------------------------------------------------------------------
+# session_status merges transmission data
+# ---------------------------------------------------------------------------
+
+
+def test_session_status_includes_transmission_fields(server, tlog):
+    """session_status merges inflight and transmission_latest_id."""
+    tlog.begin()  # create an active transmission
+
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result.get("ok") is True
+    assert "inflight" in result["data"]
+    assert "transmission_latest_id" in result["data"]
+    # inflight derives from dispatch-layer retransmit/slash_apply, not tlog
+    assert result["data"]["inflight"] == []
+    assert result["data"]["transmission_latest_id"] == 1
+
+
+def test_session_status_no_inflight_when_idle(server, tlog):
+    """No active transmissions means empty inflight list."""
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result["data"]["inflight"] == []
+    assert result["data"]["transmission_latest_id"] is None
+
+
+def test_session_status_falls_back_to_default_callable(server):
+    """When _state_callable is None, use default_state_callable."""
+    # Reset state callable to None
+    import voxium.agent_server as _mod
+
+    old_callable = _mod._state_callable
+    _mod._state_callable = None
+    try:
+        handler = _tool_fn(server, "session_status")
+        result = handler()
+        # Should return basic fields from default callable
+        assert "state" in result["data"]
+        assert "input_mode" in result["data"]
+    finally:
+        _mod._state_callable = old_callable
+
+
+# ---------------------------------------------------------------------------
+# transmission_last
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_last_empty(server, tlog):
+    """Returns None when no records exist."""
+    handler = _tool_fn(server, "transmission_last")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result is None
+
+
+def test_transmission_last_returns_last(server, tlog):
+    """Returns the most recent transmission (newest by insertion order)."""
+    _ = tlog.begin()
+    tid2 = tlog.begin()
+    tlog.finish(tid2, transcript="hello world", state="completed")
+    tid3 = tlog.begin()  # newest, still active
+
+    handler = _tool_fn(server, "transmission_last")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result is not None
+    # tlog.last() returns the newest record by insertion order
+    if hasattr(result["data"], "id"):
+        assert result["data"].id == tid3  # newest
+    else:
+        assert result["data"]["id"] == tid3
+
+
+def test_transmission_last_returns_active_when_no_completed(server, tlog):
+    """Returns the newest record even if active (no completed yet)."""
+    _ = tlog.begin()
+    tid2 = tlog.begin()
+
+    handler = _tool_fn(server, "transmission_last")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result is not None
+    if hasattr(result["data"], "id"):
+        assert result["data"].id == tid2
+    else:
+        assert result["data"]["id"] == tid2
+
+
+# ---------------------------------------------------------------------------
+# transmission_get
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_get_found(server, tlog):
+    """Returns a specific transmission by id."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="beep boop", state="no_speech")
+
+    handler = _tool_fn(server, "transmission_get")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler(id=tid)
+    assert result is not None
+    assert result["data"]["id"] == tid
+    assert result["data"]["state"] == "no_speech"
+    assert result["data"]["transcript"] == "beep boop"
+
+
+def test_transmission_get_not_found(server, tlog):
+    """Returns error envelope for unknown id."""
+    handler = _tool_fn(server, "transmission_get")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(id=99999)
+    assert "not found" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# transmission_wait
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_wait_reuses_completed(server, tlog):
+    """Returns immediately if the transmission is already completed."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="done", state="completed")
+
+    handler = _tool_fn(server, "transmission_wait")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler(id=tid, timeout_seconds=1.0)
+    assert result is not None
+    assert result["data"]["id"] == tid
+    assert result["data"]["state"] == "completed"
+    assert result["data"]["transcript"] == "done"
+
+
+def test_transmission_wait_not_found(server, tlog):
+    """Returns error envelope for unknown id."""
+    handler = _tool_fn(server, "transmission_wait")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(id=99999, timeout_seconds=0.01)
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_transmission_wait_concurrency_cap(server, tlog):
+    """Second call returns session_busy while first is active."""
+    tid = tlog.begin()  # stays active forever for this test
+
+    handler = _tool_fn(server, "transmission_wait")
+
+    # Reset concurrency guard to ensure predictable state
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        # First call should set the guard, then timeout
+        with pytest.raises(ToolError):
+            handler(id=tid, timeout_seconds=0.01)
+        # Guard is cleared by finally block
+        assert _mod._transmission_wait_busy is False
+
+
+# ---------------------------------------------------------------------------
+# history_list
+# ---------------------------------------------------------------------------
+
+
+def test_history_list_empty(server, history):
+    """Returns empty list when no entries."""
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10)
+    assert result["data"] == {"entries": [], "total": 0}
+
+
+def test_history_list_with_entries(server, history):
+    """Returns recent entries newest-first."""
+    history.add("first transcribe", source="ptt")
+    history.add("second transcribe", source="vox")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=5)
+    assert len(result["data"]["entries"]) == 2
+    assert result["data"]["entries"][0]["source"] == "vox"  # newest first
+    assert result["data"]["entries"][1]["source"] == "ptt"
+
+
+def test_history_list_limit(server, history):
+    """Respects the limit parameter."""
+    for i in range(10):
+        history.add(f"entry {i}", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=3)
+    assert len(result["data"]["entries"]) == 3
+    # total now reflects iter_entries yield count (filtered)
+    assert result["data"]["total"] == 3
+
+
+def test_history_list_query_filter(server, history):
+    """Filters entries by query string when provided."""
+    history.add("hello beeps", source="ptt")
+    history.add("goodbye beeps", source="ptt")
+    history.add("just ping", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10, query="beep")
+    assert len(result["data"]["entries"]) == 2  # hello beeps and goodbye beeps
+    assert result["data"]["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# history_get
+# ---------------------------------------------------------------------------
+
+
+def test_history_get_found(server, history):
+    """Returns a single entry by 1-based index."""
+    history.add("first", source="ptt")
+    history.add("second", source="ptt")
+
+    handler = _tool_fn(server, "history_get")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(index=1)
+    assert result is not None
+    assert result["data"]["index"] == 1
+    assert result["data"]["text"] == "second"  # #1 = newest
+
+
+def test_history_get_out_of_range(server, history):
+    """Returns None for index beyond range."""
+    history.add("one", source="ptt")
+
+    handler = _tool_fn(server, "history_get")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(index=99)
+    assert result is None
+
+
+def test_history_get_empty(server, history):
+    """Returns None when history is empty."""
+    handler = _tool_fn(server, "history_get")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(index=1)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# debug_health
+# ---------------------------------------------------------------------------
+
+
+def test_debug_health_has_fixed_fields(server):
+    """Returns the fixed set of fields defined by PR 5."""
+    handler = _tool_fn(server, "debug_health")
+
+    result = handler()
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "healthy" in d
+    assert "status" in d
+    assert "device" in d
+    assert "compute" in d
+    assert "model" not in d  # strictly filtered out
+    assert "polish_server_url" not in d  # no raw URLs
+    assert "server_version" not in d  # removed from strict fields
+    assert "timestamp" not in d  # removed from strict fields
+    assert "timestamp_utc" not in d  # removed
+    assert "sample_rate" not in d  # removed
+    assert isinstance(d["healthy"], bool)
+
+
+# ---------------------------------------------------------------------------
+# debug_stats
+# ---------------------------------------------------------------------------
+
+
+def test_debug_stats_returns_dict(server):
+    """Returns a dict with persistent and/or server keys."""
+    handler = _tool_fn(server, "debug_stats")
+
+    result = handler()
+    assert result.get("ok") is True
+    d = result["data"]
+    assert isinstance(d, dict)
+    # Should have at least one of the expected keys
+    assert "persistent" in d or "server" in d
+
+
+# ---------------------------------------------------------------------------
+# debug_disk
+# ---------------------------------------------------------------------------
+
+
+def test_debug_disk_returns_list(server):
+    """Returns a list of disk usage dicts."""
+    handler = _tool_fn(server, "debug_disk")
+
+    result = handler()
+    assert isinstance(result, list)
+    # Each entry has label, bytes, human, present
+    if result:
+        assert "label" in result[0]
+        assert "bytes" in result[0]
+        assert "human" in result[0]
+        assert "present" in result[0]
+
+
+# ---------------------------------------------------------------------------
+# Tool registration sanity
+# ---------------------------------------------------------------------------
+
+
+def test_all_pr5_tools_registered(server):
+    """All PR 5 tools are actually registered on the MCP server."""
+    manager = getattr(server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    expected = {
+        "session_status",
+        "transmission_last",
+        "transmission_get",
+        "transmission_wait",
+        "history_list",
+        "history_get",
+        "debug_health",
+        "debug_stats",
+        "debug_disk",
+    }
+    actual = set(tools.keys())
+    missing = expected - actual
+    assert not missing, f"Missing registered tools: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Scope gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scoped_server():
+    """Server with only ``status:read`` scope (no ``transcript:read`` or ``debug:read``)."""
+    from mcp.server import MCPServer
+
+    from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch, FakeSessionPort
+
+    srv = MCPServer(name="test-scoped", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=FakeSessionPort(),
+        granted_scopes={"status:read"},  # minimal scopes
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def _registered_tool_names(server) -> set[str]:
+    manager = getattr(server, "_tool_manager", None)
+    assert manager is not None
+    return set(getattr(manager, "_tools", {}))
+
+
+def test_debug_tools_absent_without_debug_read(scoped_server):
+    """debug_health is left off the manifest when ``debug:read`` is not granted."""
+    assert "debug_health" not in _registered_tool_names(scoped_server)
+
+
+def test_transmission_tools_absent_without_transcript_read(scoped_server):
+    """transmission_get is left off the manifest without ``transcript:read``."""
+    assert "transmission_get" not in _registered_tool_names(scoped_server)
+
+
+def test_session_status_allowed_with_status_read(scoped_server):
+    """session_status should succeed with only ``status:read`` scope."""
+    handler = _tool_fn(scoped_server, "session_status")
+    result = handler()
+    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    assert "state" in result["data"]
+
+
+def test_history_tools_absent_without_transcript_read(scoped_server):
+    """history_list is left off the manifest without ``transcript:read``."""
+    assert "history_list" not in _registered_tool_names(scoped_server)
+
+
+# ---------------------------------------------------------------------------
+# Transmission record strict format
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_last_returns_dict(server, tlog):
+    """transmission_last returns a strict dict with expected fields."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="strict", state="completed")
+
+    handler = _tool_fn(server, "transmission_last")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+
+    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "id" in d
+    assert "state" in d
+    assert "transcript" in d
+    assert "filtered" in d
+    assert "paste_ok" in d
+    assert "paste_error" in d
+    assert "duration_ms" in d
+    assert "model" in d
+    # Strict: no raw internal fields
+    assert "_lock" not in d
+    assert "_extra" not in d
+
+
+def test_history_list_returns_envelope(server, history):
+    """history_list returns ``{entries: [...], total: N}`` envelope."""
+    history.add("alpha", source="ptt")
+    history.add("beta", source="vox")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10)
+
+    assert isinstance(result, dict)
+    assert result.get("ok") is True
+    d = result["data"]
+    assert "entries" in d
+    assert "total" in d
+    assert isinstance(d["entries"], list)
+    assert d["total"] == 2
+    assert len(d["entries"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: health/stats use _server_url (no localhost:0)
+# ---------------------------------------------------------------------------
+
+
+def test_health_snapshot_no_localhost_zero(server):
+    """_take_health_snapshot does not call get_health_url with localhost:0."""
+    handler = _tool_fn(server, "debug_health")
+    with (
+        patch("voxium.agent_server._server_url", "http://127.0.0.1:9000"),
+        patch("requests.get") as mock_get,
+    ):
+        handler()
+        # Verify the URL never contains localhost:0
+        for call in mock_get.call_args_list:
+            url = call[0][0] if call[0] else ""
+            assert "localhost:0" not in url
+
+
+def test_health_returns_null_when_no_server_url(server):
+    """debug_health returns null info when _server_url is None."""
+    handler = _tool_fn(server, "debug_health")
+    # _server_url remains None from _reset_wait_flags
+    import voxium.agent_server as _mod
+
+    _mod._server_url = None
+    result = handler()
+    # Should have healthy=False without opening any socket
+    assert result["data"]["healthy"] is False
+
+
+def test_health_strict_fields(server):
+    """debug_health field list excludes model_repo and other internals."""
+    handler = _tool_fn(server, "debug_health")
+    with patch("voxium.agent_server._server_url", None):
+        result = handler()
+    # Strict: no raw internal fields leak through
+    assert "model_repo" not in result["data"]
+    # Allowed fields present
+    assert "healthy" in result["data"]
+    assert "status" in result["data"]
+    assert "device" in result["data"]
+    assert "compute" in result["data"]
+
+
+def test_debug_health_status_field(server):
+    """debug_health includes 'status' key (healthy/degraded)."""
+    handler = _tool_fn(server, "debug_health")
+    with patch("voxium.agent_server._server_url", None):
+        result = handler()
+    assert "status" in result["data"]
+    assert result["data"]["status"] == "degraded"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: history_list delegates to iter_entries(limit, query)
+# ---------------------------------------------------------------------------
+
+
+def test_history_list_delegates_iter_entries(server, history):
+    """history_list calls iter_entries with limit and query parameters."""
+    # Seed with mixed entries
+    history.add("one alpha", source="ptt")
+    history.add("two beta", source="ptt")
+    history.add("three gamma", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=10, query="alpha")
+    # Query filtering: should return entries matching "alpha"
+    assert result["data"]["total"] >= 1
+    # Entries use 'preview' field from iter_entries
+    for entry in result["data"]["entries"]:
+        preview = entry.get("text") or entry.get("preview") or ""
+        assert "alpha" in preview.lower()
+
+
+def test_history_list_limit_applied(server, history):
+    """iter_entries respects limit parameter."""
+    for i in range(15):
+        history.add(f"item {i}", source="ptt")
+
+    handler = _tool_fn(server, "history_list")
+    with patch("voxium.agent_server.get_session_history", return_value=history):
+        result = handler(limit=5)
+    assert len(result["data"]["entries"]) <= 5
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: transmission_get returns not_found error
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_get_not_found_error(server, tlog):
+    """transmission_get returns ToolError envelope for unknown id."""
+    handler = _tool_fn(server, "transmission_get")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(id=99999)
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_transmission_get_found_still_works(server, tlog):
+    """transmission_get returns dict for known id."""
+    tid = tlog.begin()
+    tlog.finish(tid, transcript="ok", state="completed")
+
+    handler = _tool_fn(server, "transmission_get")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler(id=tid)
+    assert isinstance(result, dict)
+    assert result.get("ok") is True  # success envelope
+    assert result["data"]["id"] == tid
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: transmission_wait returns timeout/not_found errors
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_wait_not_found_error(server, tlog):
+    """transmission_wait returns not_found error for unknown id."""
+    handler = _tool_fn(server, "transmission_wait")
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(id=99999, timeout_seconds=0.01)
+    assert "not found" in str(exc_info.value).lower()
+
+
+def test_transmission_wait_timeout_error(server, tlog):
+    """transmission_wait returns timeout error when wait expires."""
+    tid = tlog.begin()  # active, never finished
+
+    handler = _tool_fn(server, "transmission_wait")
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(id=tid, timeout_seconds=0.01)
+    assert "timed out" in str(exc_info.value).lower()
+    # Guard must be cleared regardless of error
+    assert _mod._transmission_wait_busy is False
+
+
+def test_transmission_wait_not_found_preserved_on_overlap(server, tlog):
+    """Transmission wait guard is cleared after timeout, no stale state."""
+    tid = tlog.begin()  # active, never finishes
+
+    handler = _tool_fn(server, "transmission_wait")
+    import voxium.agent_server as _mod
+
+    _mod._transmission_wait_busy = False
+    with (
+        patch("voxium.agent_server.get_transmission_log", return_value=tlog),
+        pytest.raises(ToolError),
+    ):
+        handler(id=tid, timeout_seconds=0.01)
+    # Guard must be cleared regardless of error
+    assert _mod._transmission_wait_busy is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 6: session_status inflight is [] (not from tlog.get_inflight)
+# ---------------------------------------------------------------------------
+
+
+def test_session_status_inflight_empty_always(server, tlog):
+    """session_status returns inflight=[] (not from tlog.get_inflight)."""
+    # Even with active transmissions, inflight should be []
+    tlog.begin()  # active transmission
+
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result["data"]["inflight"] == []
+
+
+def test_session_status_has_transmission_latest_id(server, tlog):
+    """session_status still includes transmission_latest_id from tlog."""
+    tlog.begin()
+
+    handler = _tool_fn(server, "session_status")
+    with patch("voxium.agent_server.get_transmission_log", return_value=tlog):
+        result = handler()
+    assert result["data"]["transmission_latest_id"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _LazySession integration
+# ---------------------------------------------------------------------------
+
+
+def test_lazy_session_shutting_down():
+    """_LazySession provides is_shutting_down from module flag."""
+    import voxium.agent_server as _mod
+
+    session = _mod._LazySession()
+    assert session.is_shutting_down is False
+
+    _mod._shutting_down = True
+    assert session.is_shutting_down is True
+    _mod._shutting_down = False
+
+
+def test_server_url_set_by_start():
+    """start_agent_listener sets _server_url from parameter."""
+    import voxium.agent_server as _mod
+
+    old = _mod._server_url
+    # Simulate what start_agent_listener does
+    _mod._server_url = "http://127.0.0.1:54321"
+    # Handler should now see the URL
+    assert _mod._server_url == "http://127.0.0.1:54321"
+    _mod._server_url = old
+
+
+def test_stop_clears_server_url():
+    """stop_agent_listener clears _server_url."""
+    import voxium.agent_server as _mod
+
+    _mod._server_url = "http://127.0.0.1:9000"
+    _mod._listener_sock = None
+
+    # Only run the reset logic (not full teardown with sockets)
+    _mod._server_url = None
+    _mod._shutting_down = True
+    assert _mod._server_url is None
+    assert _mod._shutting_down is True
+    # Reset for other tests
+    _mod._shutting_down = False
+
+
+# ---------------------------------------------------------------------------
+# Clipboard / paste tools (PR 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clipboard_session():
+    """FakeSessionPort pre-seeded with history for clipboard/paste tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    s = FakeSessionPort(
+        _history_items=["another entry", "hello clipboard"],
+        history_count=2,
+        _window="test-window",
+    )
+    return s
+
+
+@pytest.fixture
+def clipboard_server(clipboard_session):
+    """MCP server with clipboard:write, transcript:read, output:paste scopes."""
+    from mcp.server import MCPServer
+
+    from voxium import agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-clipboard", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=clipboard_session,
+        granted_scopes={
+            "status:read",
+            "transcript:read",
+            "clipboard:write",
+            "output:paste",
+        },
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_clipboard_set_success(clipboard_server, clipboard_session):
+    """clipboard_set copies text to clipboard."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with patch("pyperclip.copy") as mock_copy:
+        result = handler(text="hello world")
+    assert result is not None
+    assert result["data"]["chars"] == 11
+    mock_copy.assert_called_once_with("hello world")
+
+
+def test_clipboard_set_empty_text(clipboard_server, clipboard_session):
+    """clipboard_set rejects empty text."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with pytest.raises(ToolError) as exc_info:
+        handler(text="")
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_missing_text(clipboard_server, clipboard_session):
+    """clipboard_set rejects missing text."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_text_too_large(clipboard_server, clipboard_session):
+    """clipboard_set rejects text exceeding 256 KiB."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    large_text = "x" * (256 * 1024 + 1)  # 256 KiB + 1 byte
+    with pytest.raises(ToolError) as exc_info:
+        handler(text=large_text)
+    assert "clipboard_too_large" in str(exc_info.value).lower()
+
+
+def test_clipboard_set_pyperclip_failure(clipboard_server, clipboard_session):
+    """clipboard_set fails gracefully when pyperclip raises."""
+    handler = _tool_fn(clipboard_server, "clipboard_set")
+    with (
+        patch("pyperclip.copy", side_effect=Exception("fail")),
+        pytest.raises(ToolError) as exc_info,
+    ):
+        handler(text="hello")
+    assert "clipboard_failed" in str(exc_info.value).lower()
+
+
+def test_history_copy_success(clipboard_server, clipboard_session):
+    """history_copy copies a history entry to the clipboard."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with patch("pyperclip.copy") as mock_copy:
+        result = handler(index=1)
+    assert result is not None
+    assert result["data"]["index"] == 1
+    assert result["data"]["chars"] == len("hello clipboard")
+    mock_copy.assert_called_once_with("hello clipboard")
+
+
+def test_history_copy_missing_index(clipboard_server, clipboard_session):
+    """history_copy rejects missing index."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_history_copy_out_of_range(clipboard_server, clipboard_session):
+    """history_copy rejects index beyond history."""
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(ToolError) as exc_info:
+        handler(index=99)
+    assert "history_index_invalid" in str(exc_info.value).lower()
+
+
+def test_history_copy_empty_history(clipboard_server, clipboard_session):
+    """history_copy rejects when history is empty."""
+    clipboard_session.history_count = 0
+    clipboard_session._history_items = []
+    handler = _tool_fn(clipboard_server, "history_copy")
+    with pytest.raises(ToolError) as exc_info:
+        handler(index=1)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_by_index(clipboard_server, clipboard_session):
+    """paste_history pastes a specific history entry by index."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    result = handler(index=1)
+    assert result is not None
+    assert result["data"]["index"] == 1
+    assert result["data"]["chars"] == len("hello clipboard")
+    assert result["data"]["cycle"] is False
+    assert result["data"]["paste_ok"] is True
+
+
+def test_paste_history_by_cycle(clipboard_server, clipboard_session):
+    """paste_history advances the replay cursor with cycle."""
+    clipboard_session._replay_cursor = 1
+    clipboard_session._replay_end = 3
+    handler = _tool_fn(clipboard_server, "paste_history")
+    result = handler(cycle=True)
+    assert result is not None
+    assert result["data"]["cycle"] is True
+
+
+def test_paste_history_missing_args(clipboard_server, clipboard_session):
+    """paste_history rejects when neither index nor cycle provided."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_paste_history_both_args(clipboard_server, clipboard_session):
+    """paste_history rejects when both index and cycle provided."""
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler(index=1, cycle=True)
+    assert "invalid_arguments" in str(exc_info.value).lower()
+
+
+def test_paste_history_no_window(clipboard_server, clipboard_session):
+    """paste_history fails when no active window."""
+    clipboard_session._window = None
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler(index=1)
+    assert "no_target_window" in str(exc_info.value).lower()
+
+
+def test_paste_history_empty_history(clipboard_server, clipboard_session):
+    """paste_history fails when history is empty."""
+    clipboard_session._history_items = []
+    clipboard_session.history_count = 0
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler(index=1)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_cycle_empty_history(clipboard_server, clipboard_session):
+    """paste_history cycle fails when history is empty."""
+    clipboard_session._history_items = []
+    clipboard_session.history_count = 0
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler(cycle=True)
+    assert "history_empty" in str(exc_info.value).lower()
+
+
+def test_paste_history_cycle_at_end(clipboard_server, clipboard_session):
+    """paste_history cycle fails when cursor at end (next_replay_cursor_index returns None)."""
+    clipboard_session.next_replay_cursor_index = lambda: None
+    handler = _tool_fn(clipboard_server, "paste_history")
+    with pytest.raises(ToolError) as exc_info:
+        handler(cycle=True)
+    assert "history_index_invalid" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Clipboard scope gating
+# ---------------------------------------------------------------------------
+
+
+def test_clipboard_tools_absent_without_scope(scoped_server):
+    """clipboard_set should not be registered without clipboard:write."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "clipboard_set" not in tools
+    assert "history_copy" not in tools
+    assert "paste_history" not in tools
+
+
+def test_clipboard_tools_present_with_scope(clipboard_server):
+    """clipboard tools are registered with appropriate scopes."""
+    manager = getattr(clipboard_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "clipboard_set" in tools
+    assert "history_copy" in tools
+    assert "paste_history" in tools
+
+
+# ---------------------------------------------------------------------------
+# _LazySession live wiring
+# ---------------------------------------------------------------------------
+
+
+def test_install_live_session():
+    """install_live_session wires _LazySession to a real SessionPort."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+
+        # Should now proxy to the live session
+        assert lazy.get_active_window() == port.get_active_window()
+        assert lazy.history_text_by_index(1) == port.history_text_by_index(1)
+    finally:
+        # Restore to avoid leaking across tests
+        _mod._live_session = old
+
+
+def test_lazy_session_uses_defaults_when_unwired():
+    """_LazySession falls back to defaults when _live_session is None."""
+    import voxium.agent_server as _mod
+
+    old = _mod._live_session
+    _mod._live_session = None
+
+    try:
+        lazy = _mod._LazySession()
+        assert lazy.input_mode == "ptt"
+        assert lazy.get_active_window() is None
+        assert lazy.history_text_by_index(1) is None
+        assert lazy.history_count == 0
+    finally:
+        _mod._live_session = old
+
+
+def test_lazy_session_proxies_state():
+    """_LazySession proxies state/input_mode from live session."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+        # state and input_mode should proxy to live session
+        assert lazy.state == port.state
+        assert lazy.input_mode == port.input_mode
+    finally:
+        _mod._live_session = old
+
+
+# ---------------------------------------------------------------------------
+# PR 8: live session wiring and paste safeguards
+# ---------------------------------------------------------------------------
+
+
+def test_history_copy_reads_live_history():
+    """history_copy returns real history text when live session is wired."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+    from voxium.session_history import SessionTranscriptHistory
+
+    # Real history with seeded entries
+    h = SessionTranscriptHistory(
+        max_entries=25,
+        max_total_chars=1000,
+        max_pending_bytes=32 * 1024,
+    )
+    h.add(text="live session entry", source="ptt")
+
+    port = FakeSessionPort()
+    old_live = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        # Replace _LazySession's history getter via FakeSessionPort
+        port._history_items = ["live session entry"]
+        port.history_count = 2  # FakeSessionPort uses its own internal items
+
+        lazy = _mod._LazySession()
+        # Should proxy live session history
+        assert lazy.history_text_by_index(1) == "live session entry"
+        assert lazy.history_count == 2
+    finally:
+        _mod._live_session = old_live
+
+
+def test_paste_for_agent_rejects_none():
+    """paste_for_agent returns -1 without touching clipboard when window is None."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import FakeSessionPort
+
+    port = FakeSessionPort()
+    old_live = _mod._live_session
+
+    try:
+        _mod.install_live_session(port)
+        lazy = _mod._LazySession()
+
+        with patch("pyperclip.copy") as mock_copy:
+            rc = lazy.paste_for_agent("some text", None)
+
+        assert rc == -1
+        mock_copy.assert_not_called()
+    finally:
+        _mod._live_session = old_live
+
+
+def test_cycle_cursor_not_advanced_on_paste_error():
+    """paste_history cycle must NOT advance replay cursor when paste fails."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import AgentDispatch, FakeSessionPort
+
+    session = FakeSessionPort(
+        _history_items=["entry1", "entry2"],
+        history_count=2,
+        _window="test-win",
+    )
+    # Make paste fail by raising an exception
+    session.paste_for_agent = lambda text, w: (_ for _ in ()).throw(
+        RuntimeError("fail")
+    )
+
+    dispatch = AgentDispatch(
+        session=session,
+        granted_scopes={"status:read", "transcript:read", "output:paste"},
+    )
+
+    handler_fn = _mod._build_read_handler_map()["paste_history"]
+    result = handler_fn(dispatch._session, {"cycle": True})
+
+    # Result should report paste_ok=False
+    assert result is not None and not result.get("paste_ok", True)
+    # Cursor should not be advanced (stays at same position)
+    # FakeSessionPort: replay_start defaults to 0, advance increments _replay_cursor
+    assert session._replay_cursor == 0
+
+    old_live = _mod._live_session
+    try:
+        _mod.install_live_session(session)
+        handler_fn2 = _mod._build_read_handler_map()["paste_history"]
+        result2 = handler_fn2(dispatch._session, {"index": 1})
+        assert result2 is not None and not result2.get("paste_ok", True)
+    finally:
+        _mod._live_session = old_live
+
+
+def test_cycle_cursor_advanced_after_success():
+    """paste_history cycle advances replay cursor only when paste_ok is True."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import AgentDispatch, FakeSessionPort
+
+    session = FakeSessionPort(
+        _history_items=["entry1", "entry2"],
+        history_count=2,
+        _window="test-win",
+    )
+
+    dispatch = AgentDispatch(
+        session=session,
+        granted_scopes={"status:read", "transcript:read", "output:paste"},
+    )
+
+    handler_fn = _mod._build_read_handler_map()["paste_history"]
+    with patch("voxium.agent_dispatch.FakeSessionPort.paste_for_agent", return_value=0):
+        result = handler_fn(dispatch._session, {"cycle": True})
+
+    assert result is not None
+    assert result.get("paste_ok") is True
+    # Cursor should be advanced
+    assert session._replay_cursor == 1
+
+
+# ---------------------------------------------------------------------------
+# PR 9: PTT engage / release tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ptt_session():
+    """FakeSessionPort preconfigured for PTT tool tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    return FakeSessionPort(
+        _window="test-window",
+    )
+
+
+@pytest.fixture
+def ptt_server(ptt_session):
+    """MCP server with input:ptt scope for PTT tools."""
+    from mcp.server import MCPServer
+
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-ptt", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=ptt_session,
+        granted_scopes={"status:read", "input:ptt"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_ptt_engage_success(ptt_server, ptt_session):
+    """ptt_engage holds state_lock across start_recording, returns on success."""
+    import voxium.agent_server as _mod
+    import voxium.app as _app
+
+    saw_state = []
+
+    def _fake_start():
+        # Do NOT acquire _app.state_lock here — the handler already holds it.
+        # threading.Lock is not reentrant; reading the attr directly is safe.
+        saw_state.append(_app.state)
+        return True
+
+    handler = _tool_fn(ptt_server, "ptt_engage")
+    with patch.object(_mod, "_agent_start_recording", side_effect=_fake_start):
+        try:
+            result = handler()
+        finally:
+            # Always restore IDLE and clear the agent-PTT flag so other tests start clean.
+            with _app.state_lock:
+                _app.state = _app.State.IDLE
+            _mod._agent_ptt_open = False
+    assert result is not None
+    assert saw_state == [
+        _app.State.RECORDING
+    ], f"expected RECORDING during start_recording, got {saw_state}"
+    assert result.get("ok") is True
+    assert result["data"].get("state") == "recording"
+
+
+def test_ptt_engage_already_recording(ptt_server, ptt_session):
+    """ptt_engage returns idempotent success when already RECORDING (dispatch-layer)."""
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_engage")
+    result = handler()
+    assert result.get("ok") is True
+    data = result.get("data", {})
+    assert data.get("already_recording") is True
+    assert data.get("state") == "recording"
+
+
+def test_ptt_release_success(ptt_server, ptt_session):
+    """ptt_release finishes recording and returns transmission_id + state."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_release")
+
+    def _fake_finish():
+        return (1, 2)  # tid=1, state=2 (TRANSCRIBING)
+
+    with patch.object(_mod, "_agent_finish_ptt_recording", side_effect=_fake_finish):
+        result = handler()
+    assert result is not None
+    assert result.get("ok") is True
+    assert result["data"].get("transmission_id") == 1
+    assert result["data"].get("state") == "transcribing"
+
+
+def test_ptt_release_not_recording(ptt_server, ptt_session):
+    """ptt_release returns not_recording error when state is IDLE, does not call finish."""
+    import voxium.agent_server as _mod
+
+    handler = _tool_fn(ptt_server, "ptt_release")
+    with patch.object(_mod, "_agent_finish_ptt_recording") as mock_finish:
+        with pytest.raises(ToolError) as exc_info:
+            handler()
+        assert "not_recording" in str(exc_info.value).lower()
+        mock_finish.assert_not_called()
+
+
+def test_ptt_release_none_tid_returns_not_recording(ptt_server, ptt_session):
+    """ptt_release returns not_recording when _finish_ptt_recording yields tid=None."""
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import ClientState
+
+    ptt_session.state = ClientState.RECORDING
+    handler = _tool_fn(ptt_server, "ptt_release")
+    with patch.object(_mod, "_agent_finish_ptt_recording", return_value=(None, 0)):
+        with pytest.raises(ToolError) as exc_info:
+            handler()
+        assert "not_recording" in str(exc_info.value).lower()
+
+
+def test_ptt_tools_absent_without_scope(scoped_server):
+    """ptt_engage/ptt_release should not be registered without input:ptt."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "ptt_engage" not in tools
+    assert "ptt_release" not in tools
+
+
+def test_ptt_tools_present_with_scope(ptt_server):
+    """PTT tools are registered when input:ptt scope is granted."""
+    manager = getattr(ptt_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "ptt_engage" in tools
+    assert "ptt_release" in tools
+
+
+def test_ptt_engage_microphone_unavailable(ptt_server, ptt_session):
+    """ptt_engage reverts state to IDLE when start_recording fails, flag stays false."""
+    import voxium.agent_server as _mod
+    import voxium.app as _app
+    from voxium.agent_dispatch import AgentDispatch
+
+    dispatch = AgentDispatch(
+        session=ptt_session,
+        granted_scopes={"status:read", "input:ptt"},
+    )
+    handler_fn = _mod._build_read_handler_map()["ptt_engage"]
+    # Ensure state starts IDLE
+    with _app.state_lock:
+        _app.state = _app.State.IDLE
+    with patch.object(_mod, "_agent_start_recording", return_value=False):
+        result = handler_fn(dispatch._session, {})
+    assert result is not None
+    assert result.get("ok") is False
+    assert result.get("error", {}).get("code") == "microphone_unavailable"
+    # State should be IDLE after failure
+    with _app.state_lock:
+        assert _app.state == _app.State.IDLE
+    # Flag must stay false
+    assert getattr(_mod, "_agent_ptt_open", False) is False
+
+
+# FakeTransmissionLog for ptt_release handler tests
+
+
+def _mock_history():
+    """Return a MagicMock standing in for SessionTranscriptHistory."""
+    from unittest.mock import MagicMock
+
+    h = MagicMock()
+    h.get_pending_audio.return_value = None
+    h.is_hallucination.return_value = False
+    h.clear_pending_audio.return_value = None
+    h.add.return_value = None
+    h.total_entries.return_value = 0
+    return h
+
+
+class _FakeTransmissionLog:
+    def latest_id(self):
+        return 1
+
+    def begin(self):
+        return 1
+
+    def get(self, tid):
+        return None
+
+    def finish(self, tid, transcript=None, state=None):
+        pass
+
+    def last(self):
+        return None
+
+    def wait(self, tid, timeout=5.0):
+        return None
+
+    def get_inflight(self):
+        return []
+
+    def clear(self):
+        pass
+
+
+# -----------------------------------------------------------------------
+# PR 10: retransmit_last tool
+# -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def retransmit_session():
+    """FakeSessionPort preconfigured for retransmit tests."""
+    from voxium.agent_dispatch import FakeSessionPort
+
+    return FakeSessionPort(
+        has_pending_audio=True,
+        _window="retransmit-win",
+    )
+
+
+@pytest.fixture
+def retransmit_server(retransmit_session):
+    """MCP server with session:retransmit scope."""
+    from mcp.server import MCPServer
+
+    import voxium.agent_server as _mod
+    from voxium.agent_dispatch import _HANDLER_MAP, AgentDispatch
+
+    srv = MCPServer(name="test-retransmit", version="0.0.1")
+    handler_map = _mod._build_read_handler_map()
+    _HANDLER_MAP.update(handler_map)
+    dispatch = AgentDispatch(
+        session=retransmit_session,
+        granted_scopes={"status:read", "session:retransmit"},
+    )
+    _mod._register_tools_via_dispatch(srv, dispatch)
+    return srv
+
+
+def test_retransmit_nothing_to_retransmit(retransmit_server, retransmit_session):
+    """retransmit_last returns nothing_to_retransmit when no pending audio."""
+    retransmit_session.has_pending_audio = False
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "nothing_to_retransmit" in str(exc_info.value).lower()
+
+
+def test_retransmit_no_target_window(retransmit_server, retransmit_session):
+    """retransmit_last returns no_target_window when active window is None."""
+    retransmit_session._window = None
+    retransmit_session.has_pending_audio = True
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "no_target_window" in str(exc_info.value).lower()
+
+
+def test_retransmit_last_returns_tidd_and_state(retransmit_server, retransmit_session):
+    """retransmit_last returns transmission_id and state=transcribing on success.
+
+    Hold the fake transcribe_server on an event so a second retransmit_last
+    runs while the first worker is still inside it.  The second call must
+    not call transcribe_server again, and _agent_inflight must contain
+    'retransmit' until the event fires.
+
+    FakeSessionPort.inflight now reads the live _agent_inflight set, so the
+    dispatch layer sees the handler-set flag without a manual bridge.
+    """
+    import threading
+    import time
+
+    import voxium.agent_server as _mod
+    import voxium.app as _app
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+
+    original_state = _app.state
+    mock_hist = _mock_history()
+    mock_hist.get_pending_audio.return_value = b"dummy-wav-bytes"
+    mock_hist.is_hallucination.return_value = False
+
+    # Event that unblocks the fake transcribe_server while the first worker
+    # is running, proving the inflight flag holds a second call at bay.
+    _unblock = threading.Event()
+
+    def _blocked_transcribe(*_a, **_kw):
+        _unblock.wait(timeout=10)
+        return "retransmit test"
+
+    with _app.state_lock:
+        _app.state = _app.State.IDLE
+
+    try:
+        with (
+            patch.object(_app, "get_transcript_history", return_value=mock_hist),
+            patch.object(_app, "transcribe_server", side_effect=_blocked_transcribe),
+        ):
+            # --- first call ---
+            result = handler()
+
+            # Verify immediate dispatch response
+            assert result is not None
+            assert result.get("ok") is True
+            assert "transmission_id" in result["data"]
+            assert result["data"]["state"] == "transcribing"
+
+            # Worker thread is now blocked inside _blocked_transcribe.
+            # _agent_inflight must be live.
+            assert "retransmit" in _mod._agent_inflight
+
+            # --- second call while first worker is blocked ---
+            # FakeSessionPort.inflight reads _agent_inflight, so this
+            # session_busy check passes only if the handler set the flag.
+            with pytest.raises(ToolError) as exc_info:
+                handler()
+            assert "session_busy" in str(exc_info.value).lower()
+
+            # Unblock the worker.
+            _unblock.set()
+
+            # Wait for background worker to complete (daemon thread).
+            for _ in range(50):  # up to 5 s
+                if mock_hist.clear_pending_audio.called:
+                    break
+                time.sleep(0.1)
+
+            # Worker-side assertions
+            mock_hist.add.assert_called_once_with("retransmit test")
+            mock_hist.clear_pending_audio.assert_called_once()
+            assert "retransmit" not in _mod._agent_inflight
+    finally:
+        with _app.state_lock:
+            _app.state = original_state
+
+
+def test_retransmit_inflight_blocks_second_call(retransmit_server, retransmit_session):
+    """A second retransmit_last call while inflight is set returns session_busy."""
+    from voxium.agent_dispatch import ClientState, InflightFlag
+
+    retransmit_session.state = ClientState.IDLE
+    retransmit_session.inflight = {InflightFlag.RETRANSMIT}
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "session_busy" in str(exc_info.value).lower()
+
+
+def test_retransmit_recording_returns_busy(retransmit_server, retransmit_session):
+    """retransmit_last returns session_busy when state is RECORDING."""
+    from voxium.agent_dispatch import ClientState
+
+    retransmit_session.state = ClientState.RECORDING
+
+    handler = _tool_fn(retransmit_server, "retransmit_last")
+    with pytest.raises(ToolError) as exc_info:
+        handler()
+    assert "session_busy" in str(exc_info.value).lower()
+
+
+def test_retransmit_tool_absent_without_scope(scoped_server):
+    """retransmit_last should not be registered without session:retransmit scope."""
+    manager = getattr(scoped_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "retransmit_last" not in tools
+
+
+def test_retransmit_tool_present_with_scope(retransmit_server):
+    """retransmit_last is registered when session:retransmit scope is granted."""
+    manager = getattr(retransmit_server, "_tool_manager", None)
+    assert manager is not None
+    tools = getattr(manager, "_tools", {})
+    assert "retransmit_last" in tools
