@@ -8,7 +8,7 @@ from __future__ import annotations
 from voxium.agent_resolve import resolve_agent_enabled
 
 
-class TestResolveAgentEnabled:
+class TestResolveAgentEnabled:  # pylint: disable=too-many-public-methods
     """``resolve_agent_enabled`` follows CLI > env > YAML > default."""
 
     # -- CLI flag wins outright -----------------------------------------------
@@ -135,5 +135,8 @@ class TestResolveAgentEnabled:
 
     def test_env_get_override(self) -> None:
         """Custom _env_get can be used to simulate environment."""
-        fake_get = lambda k: "1"
+
+        def fake_get(_key):
+            return "1"
+
         assert resolve_agent_enabled(_env_get=fake_get) is True

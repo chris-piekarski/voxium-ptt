@@ -246,3 +246,136 @@ def test_recording_hud_refresh_updates_footer_at_current_width() -> None:
 
     assert main_live.widths[-1] == 76
     assert footer_live.widths[-1] == 76
+
+
+# -----------------------------------------------------------------------------
+# Inference health HUD row
+# -----------------------------------------------------------------------------
+
+
+def test_inference_status_row_omitted_when_no_snapshots() -> None:
+    from voxium.console_status import build_inference_status_row
+
+    assert build_inference_status_row(None) is None
+    assert build_inference_status_row([]) is None
+
+
+def test_inference_status_row_renders_label_and_servers() -> None:
+    from voxium.console_status import build_inference_status_row
+    from voxium.inference_health import (
+        STATE_DEGRADED,
+        STATE_OK,
+        InferenceHealthSnapshot,
+    )
+
+    row = build_inference_status_row(
+        [
+            InferenceHealthSnapshot(
+                server="whisper",
+                state=STATE_OK,
+                last_ok_at=1.0,
+                last_error_at=None,
+                last_error_msg=None,
+                consecutive_failures=0,
+            ),
+            InferenceHealthSnapshot(
+                server="polish",
+                state=STATE_DEGRADED,
+                last_ok_at=None,
+                last_error_at=2.0,
+                last_error_msg="CUDA error: unknown error",
+                consecutive_failures=1,
+            ),
+        ]
+    )
+    assert row is not None
+    plain = row.plain
+    assert "INFER" in plain
+    assert "Whisper" in plain
+    assert "Polish" in plain
+    assert "CUDA error: unknown error" in plain
+
+
+def test_inference_status_row_truncates_long_errors() -> None:
+    from voxium.console_status import build_inference_status_row
+    from voxium.inference_health import (
+        STATE_FAILED,
+        InferenceHealthSnapshot,
+    )
+
+    long_msg = "x" * 200
+    row = build_inference_status_row(
+        [
+            InferenceHealthSnapshot(
+                server="polish",
+                state=STATE_FAILED,
+                last_ok_at=None,
+                last_error_at=1.0,
+                last_error_msg=long_msg,
+                consecutive_failures=3,
+            )
+        ]
+    )
+    assert row is not None
+    # Truncation glyph keeps the row to ~one HUD line.
+    assert "…" in row.plain
+    assert len(row.plain) < 100
+
+
+def test_inference_status_row_orders_known_servers_first() -> None:
+    from voxium.console_status import build_inference_status_row
+    from voxium.inference_health import (
+        STATE_OK,
+        InferenceHealthSnapshot,
+    )
+
+    row = build_inference_status_row(
+        [
+            InferenceHealthSnapshot(
+                server="polish",
+                state=STATE_OK,
+                last_ok_at=1.0,
+                last_error_at=None,
+                last_error_msg=None,
+                consecutive_failures=0,
+            ),
+            InferenceHealthSnapshot(
+                server="whisper",
+                state=STATE_OK,
+                last_ok_at=1.0,
+                last_error_at=None,
+                last_error_msg=None,
+                consecutive_failures=0,
+            ),
+        ]
+    )
+    assert row is not None
+    # Whisper precedes Polish despite snapshot order.
+    assert row.plain.index("Whisper") < row.plain.index("Polish")
+
+
+def test_session_panel_includes_infer_row_when_snapshots_passed() -> None:
+    from voxium.inference_health import (
+        STATE_OK,
+        InferenceHealthSnapshot,
+    )
+
+    panel = build_voxium_session_panel(
+        [PttStatusStep("◉ PTT/VOX · Standing by", "Standing by.")],
+        80,
+        inference_snapshots=[
+            InferenceHealthSnapshot(
+                server="whisper",
+                state=STATE_OK,
+                last_ok_at=1.0,
+                last_error_at=None,
+                last_error_msg=None,
+                consecutive_failures=0,
+            )
+        ],
+    )
+    c = Console(force_terminal=True, width=100, record=True, color_system="truecolor")
+    c.print(panel)
+    out = c.export_text(clear=True)
+    assert "INFER" in out
+    assert "Whisper" in out

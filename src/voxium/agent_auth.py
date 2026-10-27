@@ -220,8 +220,10 @@ def _apply_current_user_dacl(path: Path) -> bool:
         import win32api
         import win32con
         import win32security
-    except ImportError:
-        raise PermissionError("cannot apply current-user DACL: pywin32 not installed")
+    except ImportError as exc:
+        raise PermissionError(
+            "cannot apply current-user DACL: pywin32 not installed"
+        ) from exc
 
     try:
         user_name = win32api.GetUserName()
@@ -256,10 +258,10 @@ def _apply_current_user_dacl(path: Path) -> bool:
         return True
     except PermissionError:
         raise
-    except Exception:  # noqa: BLE001 - catch-all for cleanup + failure
+    except Exception as exc:  # noqa: BLE001 - catch-all for cleanup + failure
         raise PermissionError(
             "cannot apply current-user DACL: Windows ACL operation failed"
-        )
+        ) from exc
 
 
 def _windows_dacl_current_user(path: Path, *, dacl_func: Any = None) -> None:
@@ -269,7 +271,9 @@ def _windows_dacl_current_user(path: Path, *, dacl_func: Any = None) -> None:
     except PermissionError:
         raise
     except Exception as exc:  # noqa: BLE001 - fail-closed on any ACL error
-        raise PermissionError(f"cannot restrict file to current user on Windows: {exc}")
+        raise PermissionError(
+            f"cannot restrict file to current user on Windows: {exc}"
+        ) from exc
     if not result:
         raise PermissionError("cannot restrict file to current user on Windows")
 

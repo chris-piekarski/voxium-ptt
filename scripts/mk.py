@@ -284,7 +284,7 @@ def cmd_dev_stamp(
         check=True,
     )
     subprocess.run(
-        [str(pip), "install", "-e", f"{str(root)}[dev]"],
+        [str(pip), "install", "-e", f"{root}[dev,agent]"],
         check=True,
     )
     dev_stamp.parent.mkdir(parents=True, exist_ok=True)

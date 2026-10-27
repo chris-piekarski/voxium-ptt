@@ -13,7 +13,7 @@ import pytest
 # Use importorskip so these tests skip when mcp extra is absent.
 pytest.importorskip("mcp.server")
 
-from mcp.server.mcpserver.exceptions import ToolError
+ToolError = pytest.importorskip("mcp.server.mcpserver.exceptions").ToolError
 
 # ---------------------------------------------------------------------------
 # Fixtures: shared TransmissionLog / SessionTranscriptHistory
@@ -60,16 +60,16 @@ def _reset_wait_flags():
         _mod._live_session = None
 
 
-@pytest.fixture
-def tlog():
+@pytest.fixture(name="tlog")
+def tlog_fixture():
     """Fresh TransmissionLog for each test."""
     from voxium.transmission_log import TransmissionLog
 
     return TransmissionLog(max_records=20)
 
 
-@pytest.fixture
-def history():
+@pytest.fixture(name="history")
+def history_fixture():
     """Fresh SessionTranscriptHistory for each test."""
     from voxium.session_history import SessionTranscriptHistory
 
@@ -85,8 +85,8 @@ def history():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def server():
+@pytest.fixture(name="server")
+def server_fixture():
     """Create a bare MCPServer and register PR 5 tools through dispatch."""
     from mcp.server import MCPServer
 
@@ -467,8 +467,8 @@ def test_all_pr5_tools_registered(server):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def scoped_server():
+@pytest.fixture(name="scoped_server")
+def scoped_server_fixture():
     """Server with only ``status:read`` scope (no ``transcript:read`` or ``debug:read``)."""
     from mcp.server import MCPServer
 
@@ -809,8 +809,8 @@ def test_stop_clears_server_url():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def clipboard_session():
+@pytest.fixture(name="clipboard_session")
+def clipboard_session_fixture():
     """FakeSessionPort pre-seeded with history for clipboard/paste tests."""
     from voxium.agent_dispatch import FakeSessionPort
 
@@ -822,8 +822,8 @@ def clipboard_session():
     return s
 
 
-@pytest.fixture
-def clipboard_server(clipboard_session):
+@pytest.fixture(name="clipboard_server")
+def clipboard_server_fixture(clipboard_session):
     """MCP server with clipboard:write, transcript:read, output:paste scopes."""
     from mcp.server import MCPServer
 
@@ -1216,8 +1216,8 @@ def test_cycle_cursor_advanced_after_success():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def ptt_session():
+@pytest.fixture(name="ptt_session")
+def ptt_session_fixture():
     """FakeSessionPort preconfigured for PTT tool tests."""
     from voxium.agent_dispatch import FakeSessionPort
 
@@ -1226,8 +1226,8 @@ def ptt_session():
     )
 
 
-@pytest.fixture
-def ptt_server(ptt_session):
+@pytest.fixture(name="ptt_server")
+def ptt_server_fixture(ptt_session):
     """MCP server with input:ptt scope for PTT tools."""
     from mcp.server import MCPServer
 
@@ -1423,19 +1423,22 @@ class _FakeTransmissionLog:
 # -----------------------------------------------------------------------
 
 
-@pytest.fixture
-def retransmit_session():
+@pytest.fixture(name="retransmit_session")
+def retransmit_session_fixture():
     """FakeSessionPort preconfigured for retransmit tests."""
     from voxium.agent_dispatch import FakeSessionPort
+
+    import voxium.agent_server as _mod
 
     return FakeSessionPort(
         has_pending_audio=True,
         _window="retransmit-win",
+        inflight_provider=lambda: _mod._agent_inflight,
     )
 
 
-@pytest.fixture
-def retransmit_server(retransmit_session):
+@pytest.fixture(name="retransmit_server")
+def retransmit_server_fixture(retransmit_session):
     """MCP server with session:retransmit scope."""
     from mcp.server import MCPServer
 

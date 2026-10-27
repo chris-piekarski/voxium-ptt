@@ -53,8 +53,8 @@ def _build_scope(
     }
 
 
-@pytest.fixture
-def middleware():
+@pytest.fixture(name="middleware")
+def middleware_fixture():
     return AgentBearerMiddleware(_ok_app, token=TOKEN)
 
 

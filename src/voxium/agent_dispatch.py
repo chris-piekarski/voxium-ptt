@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import Any, Protocol
 
@@ -414,6 +415,9 @@ class FakeSessionPort:
         self.state: ClientState = kwargs.get("state", ClientState.IDLE)
         self.input_mode: str = kwargs.get("input_mode", "ptt")
         self._inflight: set[InflightFlag] = set(kwargs.get("inflight", []))
+        self._inflight_provider: Callable[[], Iterable[str]] | None = kwargs.get(
+            "inflight_provider"
+        )
         self.active_hotkey: str | None = kwargs.get("active_hotkey", None)
         self.paste_debounce_remaining_ms: float = kwargs.get(
             "paste_debounce_remaining_ms", 0
@@ -432,22 +436,18 @@ class FakeSessionPort:
 
     @property
     def inflight(self) -> set[InflightFlag]:
-        """Live inflight union: private test set + module-level _agent_inflight.
+        """Combine local flags with an optional live provider supplied by tests.
 
         Mirrors :class:`_LiveSessionProxy.inflight` so the dispatch
         dispatch-layer sees flags the handler set on the real module set.
         """
         out: set[InflightFlag] = set(self._inflight)
-        try:
-            import voxium.agent_server as _agent_mod
-
-            for name in _agent_mod._agent_inflight:
+        if self._inflight_provider is not None:
+            for name in self._inflight_provider():
                 try:
                     out.add(InflightFlag(name))
                 except ValueError:
                     pass
-        except Exception:  # noqa: BLE001, S110
-            pass
         return out
 
     @inflight.setter

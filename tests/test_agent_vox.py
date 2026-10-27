@@ -13,8 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("mcp.server")
-
 import voxium.agent_dispatch as _disp
 import voxium.agent_server as _mod
 from voxium.agent_dispatch import (

@@ -95,7 +95,7 @@ def _windows_foreground_looks_like_ours() -> bool:  # pragma: no cover
         ppid = -1
     if fgp == pid:
         return True
-    if ppid >= 0 and fgp == ppid:
+    if 0 <= ppid == fgp:
         return True
     return False
 
