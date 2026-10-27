@@ -67,7 +67,12 @@ The Windows PowerShell wrapper itself is still best validated with a manual smok
 |---------|---------|
 | `make test` | Pytest only; respects `PYTEST_ARGS` (e.g. `make test PYTEST_ARGS='-vv tests/test_foo.py'`) |
 | `make test-cov` | Pytest with **coverage** (per-file/missing lines in the **console**), **fail** if below configured `fail_under` (see `pyproject.toml`; `mk.py` may add extra flags) |
-| `make install-dev` | Installs `.[dev]` (includes `pytest-cov`) once (via `.dev-install-stamp`) |
+| `make install-dev` | Installs `.[dev,agent]` (includes `pytest-cov` and the MCP SDK) once (via `.dev-install-stamp`) |
+
+The development environment includes the optional MCP SDK so the local coding-agent
+control path is tested alongside PTT and VOX. A normal `pip install .` still leaves
+that extra out. Ruff's original rule set (`E4`, `E7`, `E9`, `F`) is explicit in
+`pyproject.toml`, so installing a newer Ruff does not silently change the lint gate.
 
 **Useful focused runs for the shipped polish path:**
 

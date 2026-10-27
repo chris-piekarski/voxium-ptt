@@ -38,7 +38,7 @@ The UX path still has its own prompts, short timeouts, and fallbacks. It does **
 | Guard | Suggestion (tune in implementation) |
 |------|-------------------------------------|
 | **Output length** | `max_tokens` very small (e.g. 32–64); then **hard truncate** to **panel width** (e.g. 100–120 chars) with ellipsis. |
-| **Wall time** | Short HTTP timeout (e.g. 250–600 ms) for UX; on timeout **fallback string**. |
+| **Wall time** | Default HTTP budget is 6s (ceiling 8s) so a CPU `llama-server` can finish one line. On timeout, **fallback string**. A GPU reply still returns as soon as the model is done. |
 | **Frequency** | **Debounce** / **cooldown**: e.g. at most one generation per **finished transcript**, or one per N seconds, **not** on every UI tick. |
 | **No hot path** | Never **await** UX generation before **paste** or **STT** completion; fire async or “next idle” after the **documented** success path. **Optional:** `threading` / `concurrent.futures` with a **small** thread pool (one worker) if the UI thread must not block — measure and keep GIL impact minimal. |
 | **Content** | System prompt: **brand** + small digest of [radio-chatter-context.md](radio-chatter-context.md) (or embedded constant snippet), plus “one line, no profanity, no PII regurgitation, no URLs, no code blocks.” Post-filter strip newlines / repeated spaces. |

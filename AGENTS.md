@@ -74,7 +74,7 @@ Voxium’s public tone is defined in **[`docs/brand.md`](docs/brand.md)**. In sh
 
 ```bash
 make install        # venv + editable install (.venv/bin/voxium)
-make install-dev    # ensures .[dev] (ruff, pytest, …) via the dev stamp
+make install-dev    # ensures .[dev,agent] (ruff, pytest, MCP SDK, …) via the dev stamp
 ```
 
 Use the venv’s Python for development (`.venv/bin/python`, `.venv/bin/voxium`).

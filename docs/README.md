@@ -12,6 +12,7 @@ Welcome to the **Voxium 0.0.2** technical documentation. The voice here follows 
 | [llm-polish-plan.md](plans/llm-polish-plan.md) | Design and implementation notes for the optional local **LLM polish** pass: STT text goes through a repo-local **llama.cpp** runtime (`llama-server` + GGUF model) on the loopback stack; Windows setup/bootstrap now provisions the runtime and default model into the repo. |
 | [radio-chatter-context.md](radio-chatter-context.md) | Optional **CB / HAM** phrasing reference for brand-adjacent copy, plus §17 **coding-agents / moon-and-back vocabulary** companion to brand.md §2 (not legal or protocol guidance). |
 | [ux-chatter-gemma.md](ux-chatter-gemma.md) | **Gemma**-friendly **console-only** UX (on by default; opt out with `--no-ux-chatter` or config), sharing the active polish GGUF and `llama-server`, guardrails. |
+| [agent-control.md](agent-control.md) | Opt-in **MCP control-plane** listener for local coding agents (bearer auth, scopes, PTT/VOX and history tools). |
 
 ## Diagram index
 
@@ -28,6 +29,7 @@ Welcome to the **Voxium 0.0.2** technical documentation. The voice here follows 
 - **Repository size** — code vs area / package (pies + tables): [repository-stats.md](repository-stats.md)
 - **LLM polish** — STT → optional local LLM, `llama-server`, GGUF model inventory, API sketch: [llm-polish-plan.md](plans/llm-polish-plan.md)
 - **UX chatter** — console-only chatter on the **shared polish/chatter** `llama-server` lane, default on: [ux-chatter-gemma.md](ux-chatter-gemma.md)
+- **Agent MCP listener** — opt-in bearer-authenticated control plane for local coding agents (scopes, PTT/VOX, history, loopback): [agent-control.md](agent-control.md)
 
 ## Conventions
 

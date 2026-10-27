@@ -12,6 +12,20 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 
+# Process-wide history singleton (set by app.py at startup)
+_session_history: SessionTranscriptHistory | None = None
+
+
+def _set_session_history(hist: SessionTranscriptHistory) -> None:
+    """Wire the process-wide history singleton (PR 5 agent tools)."""
+    global _session_history
+    _session_history = hist
+
+
+def get_transcript_history() -> SessionTranscriptHistory | None:
+    """Return the session history singleton if initialised."""
+    return _session_history
+
 
 @dataclass(frozen=True, slots=True)
 class _Entry:
@@ -237,3 +251,66 @@ class SessionTranscriptHistory:
     def get_pending_audio(self) -> bytes | None:
         with self._lock:
             return self._pending
+
+    def iter_entries(
+        self,
+        *,
+        limit: int = 25,
+        query: str = "",
+    ) -> list[dict[str, object]]:
+        """
+        Locked iterator over entries (newest first, #1-based).
+
+        Returns a list of dicts with keys: ``index``, ``source``, ``preview``,
+        ``chars``.  *preview* flattens newlines and caps at 100 characters.
+        *query* filters case-insensitively when non-empty.
+
+        This is the lock-safe view that ``history_list`` reads; it does not
+        mutate replay cursors or touch Rich.
+        """
+        q = (query or "").lower()
+        with self._lock:
+            full = list(reversed(self._entries))
+            # Tag each entry with its full-ring 1-based index before filtering
+            indexed = list(enumerate(full, start=1))
+            if q:
+                indexed = [
+                    (idx, e)
+                    for idx, e in indexed
+                    if q in e.text.replace("\n", " ").lower()
+                ]
+            out: list[dict[str, object]] = []
+            for idx, entry in indexed[:limit]:
+                text = entry.text.replace("\n", " ").strip()
+                out.append(
+                    {
+                        "index": idx,
+                        "source": entry.source,
+                        "preview": text[:100],
+                        "chars": len(entry.text),
+                    }
+                )
+            return out
+
+    def total_entries(self) -> int:
+        """Total number of transcript entries (under lock)."""
+        with self._lock:
+            return len(self._entries)
+
+    def get_entry(self, index: int) -> dict | None:
+        """Return a single entry by 1-based display index (#1 = newest).
+
+        ``text`` is the stored transcript, including newlines. Returns
+        ``None`` when *index* is out of range.
+        """
+        with self._lock:
+            n = len(self._entries)
+            if index < 1 or index > n:
+                return None
+            entry = self._entries[-index]
+            return {
+                "index": index,
+                "source": entry.source,
+                "text": entry.text,
+                "chars": len(entry.text),
+            }
