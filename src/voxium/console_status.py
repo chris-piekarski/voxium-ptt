@@ -12,6 +12,14 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from voxium.inference_health import (
+    STATE_DEGRADED,
+    STATE_FAILED,
+    STATE_OK,
+    STATE_UNKNOWN,
+    InferenceHealthSnapshot,
+    all_snapshots as all_inference_health_snapshots,
+)
 from voxium.standby_telemetry import build_standby_detail_line
 
 # Single pipeline border: one "Voxium" shell; inner lines = PTT & VOX, PTT ACTIVE, EDGE INFERENCE, etc.
@@ -21,6 +29,23 @@ _HUD_METER_STYLE = "dim #86efac"
 _DETAIL_STYLE = "dim #cbd5e1"
 _LIVE_READBACK_STYLE = "italic dim #a7f3d0"  # green-200 dim italic — "in-flight" feel
 _PTT_BRAND = "Voxium"
+
+# Inference health row styling — same palette family as the rest of the box.
+_INFER_LABEL_STYLE = "dim #cbd5e1"
+_INFER_DOT_STYLES: dict[str, str] = {
+    STATE_OK: "bold #86efac",  # green-200
+    STATE_DEGRADED: "bold #fbbf24",  # amber-400
+    STATE_FAILED: "bold #f87171",  # red-400
+    STATE_UNKNOWN: "dim color(240)",  # grey, no signal yet
+}
+_INFER_ERROR_STYLE = "dim #fca5a5"  # softened red for the trailing message
+# Display name overrides; falls back to capitalized server key.
+_INFER_DISPLAY_NAMES: dict[str, str] = {
+    "whisper": "Whisper",
+    "polish": "Polish",
+}
+# Render order in the HUD row.
+_INFER_RENDER_ORDER: tuple[str, ...] = ("whisper", "polish")
 
 # Cap so a long session does not grow the live region without bound.
 PTT_SESSION_MAX_STEPS = 20
@@ -80,6 +105,56 @@ def _standby_head_with_morse_hint(head: str, ctx: dict) -> str:
     return head
 
 
+def _inference_display_name(server: str) -> str:
+    key = (server or "").strip().lower()
+    return _INFER_DISPLAY_NAMES.get(key, key.capitalize() or "?")
+
+
+def _order_inference_snapshots(
+    snapshots: list[InferenceHealthSnapshot],
+) -> list[InferenceHealthSnapshot]:
+    """Stable order: known servers first in display order, then anything else alphabetically."""
+    by_name = {s.server: s for s in snapshots}
+    ordered: list[InferenceHealthSnapshot] = []
+    for key in _INFER_RENDER_ORDER:
+        snap = by_name.pop(key, None)
+        if snap is not None:
+            ordered.append(snap)
+    for key in sorted(by_name.keys()):
+        ordered.append(by_name[key])
+    return ordered
+
+
+def build_inference_status_row(
+    snapshots: list[InferenceHealthSnapshot] | None,
+) -> Text | None:
+    """One-line HUD row: ``INFER  ●Whisper  ●Polish: <last error>``.
+
+    Returns ``None`` when there are no snapshots so callers can omit the row.
+    Dots are colored per tri-state; on degraded/failed, a short trailing
+    fragment shows the last error message (truncated).
+    """
+    if not snapshots:
+        return None
+    ordered = _order_inference_snapshots(list(snapshots))
+    if not ordered:
+        return None
+    row = Text("INFER", style=_INFER_LABEL_STYLE)
+    for snap in ordered:
+        state = snap.state or STATE_UNKNOWN
+        dot_style = _INFER_DOT_STYLES.get(state, _INFER_DOT_STYLES[STATE_UNKNOWN])
+        row.append("  ", style=_INFER_LABEL_STYLE)
+        row.append("●", style=dot_style)
+        row.append(_inference_display_name(snap.server), style=dot_style)
+        if state in (STATE_DEGRADED, STATE_FAILED) and snap.last_error_msg:
+            msg = snap.last_error_msg.strip()
+            if len(msg) > 60:
+                msg = msg[:57].rstrip() + "…"
+            row.append(": ", style=_INFER_LABEL_STYLE)
+            row.append(msg, style=_INFER_ERROR_STYLE)
+    return row
+
+
 def _group_from_status_steps(steps: list[PttStatusStep]) -> RenderableType:
     if not steps:
         return Text("—", style="dim")
@@ -108,10 +183,23 @@ def _group_from_status_steps(steps: list[PttStatusStep]) -> RenderableType:
     return Group(*parts)
 
 
-def build_voxium_session_panel(steps: list[PttStatusStep], box_width: int) -> Panel:
-    """Green Voxium panel from an ordered list of session steps (tests / inspection)."""
+def build_voxium_session_panel(
+    steps: list[PttStatusStep],
+    box_width: int,
+    *,
+    inference_snapshots: list[InferenceHealthSnapshot] | None = None,
+) -> Panel:
+    """Green Voxium panel from an ordered list of session steps (tests / inspection).
+
+    If *inference_snapshots* is provided, a colored ``INFER`` row is appended at
+    the bottom so the operator can see whisper/polish health at a glance.
+    """
+    body: RenderableType = _group_from_status_steps(steps)
+    infer_row = build_inference_status_row(inference_snapshots)
+    if infer_row is not None:
+        body = Group(body, infer_row)
     return Panel(
-        _group_from_status_steps(steps),
+        body,
         title=Text(_PTT_BRAND, style=_PTT_BOX_NAME_STYLE),
         title_align="left",
         border_style=_PTT_STATUS_BORDER,
@@ -677,6 +765,7 @@ class PttSessionStatusBox:
 
     def _build_main_panel(self) -> Panel:
         w = self._box_width()
+        infer = all_inference_health_snapshots()
         if self._standby_row_active_unsafe():
             last = self._session_steps[-1]
             ctx = self._standby_context_fn() if self._standby_context_fn else {}
@@ -691,8 +780,10 @@ class PttSessionStatusBox:
                 detail,
                 last.live_hud,
             )
-            return build_voxium_session_panel(steps, w)
-        return build_voxium_session_panel(self._session_steps, w)
+            return build_voxium_session_panel(steps, w, inference_snapshots=infer)
+        return build_voxium_session_panel(
+            self._session_steps, w, inference_snapshots=infer
+        )
 
     def _standby_anim_wanted_unsafe(self) -> bool:
         return (

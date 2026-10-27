@@ -101,6 +101,10 @@ from voxium.llama_cpp_client import (
     llama_cpp_loaded_model,
     llama_cpp_reachable,
 )
+from voxium.inference_health import (
+    all_snapshots as all_inference_health_snapshots,
+    get_health as get_inference_health,
+)
 from voxium.loopback import is_loopback_host, is_loopback_url, normalize_loopback_host
 from voxium import polish_profile
 from voxium.polish_models import DEFAULT_POLISH_MODEL, validate_polish_model_tag
@@ -1374,6 +1378,18 @@ def get_stats():
     }
 
 
+@app.get("/inference-health")
+def get_inference_health_snapshots():
+    """Tri-state health of every inference server tracked in this process.
+
+    The HUD in the main app polls this for the Whisper indicator; polish health
+    lives in the app process and is merged client-side.
+    """
+    return {
+        "snapshots": [snap.as_dict() for snap in all_inference_health_snapshots()],
+    }
+
+
 @app.get("/gpu")
 def get_gpu_snapshot():
 
@@ -1600,6 +1616,7 @@ async def transcribe(
         except Exception as e:
             logger.error(f"Voxium: model load failed: {e}")
             stats.record_error()
+            get_inference_health("whisper").record_error(f"model load failed: {e}")
             raise HTTPException(503, "Voxium: model not available — try again later")
 
         gpu_sampler = GpuMetricsSampler(gpu_probe, config.metrics_sample_interval)
@@ -1653,6 +1670,7 @@ async def transcribe(
             gpu_metrics = gpu_sampler.stop(transcribe_duration)
             logger.error(f"Voxium: transcription failed: {e}")
             stats.record_error()
+            get_inference_health("whisper").record_error(e)
             raise HTTPException(
                 500, f"Voxium: transcription failed: {type(e).__name__}: {e}"
             )
@@ -1684,6 +1702,7 @@ async def transcribe(
         }
 
         stats.record_request(request_metrics)
+        get_inference_health("whisper").record_ok()
 
         gpu_log = ""
         if gpu_metrics:
@@ -1813,6 +1832,9 @@ async def _handle_transcribe_stream(websocket: WebSocket) -> None:
             whisper = get_model(config.model, config.device, config.compute)
         except Exception as exc:
             logger.error("Voxium: streaming model load failed: %s", exc)
+            get_inference_health("whisper").record_error(
+                f"streaming model load failed: {exc}"
+            )
             await websocket.send_json(
                 {
                     "type": "error",
@@ -1911,6 +1933,9 @@ async def _handle_transcribe_stream(websocket: WebSocket) -> None:
                 try:
                     partial = await asyncio.to_thread(decoder.push, pcm)
                 except StreamingDecodeError as exc:
+                    get_inference_health("whisper").record_error(
+                        f"streaming decode failed: {exc}"
+                    )
                     await websocket.send_json(
                         {
                             "type": "error",
@@ -1947,6 +1972,9 @@ async def _handle_transcribe_stream(websocket: WebSocket) -> None:
                     try:
                         final_partial = await asyncio.to_thread(decoder.finalize)
                     except StreamingDecodeError as exc:
+                        get_inference_health("whisper").record_error(
+                            f"streaming finalize failed: {exc}"
+                        )
                         await websocket.send_json(
                             {
                                 "type": "error",
@@ -1959,6 +1987,7 @@ async def _handle_transcribe_stream(websocket: WebSocket) -> None:
                     final_partial = _force_final(final_partial)
                     await websocket.send_json(_partial_to_json(final_partial))
                     final_emitted = True
+                    get_inference_health("whisper").record_ok()
                     break
                 if kind == "close":
                     break
@@ -1974,6 +2003,7 @@ async def _handle_transcribe_stream(websocket: WebSocket) -> None:
                 return
     except Exception as exc:  # pragma: no cover - defensive; surface and close cleanly
         logger.exception("Voxium: streaming session %s failed: %s", session_id, exc)
+        get_inference_health("whisper").record_error(f"streaming session failed: {exc}")
         try:
             await websocket.send_json(
                 {
